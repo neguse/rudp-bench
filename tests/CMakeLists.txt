@@ -21,3 +21,7 @@ add_test(NAME test_proc_sampler COMMAND test_proc_sampler)
 add_executable(test_raw_udp_smoke test_raw_udp_smoke.cc)
 target_link_libraries(test_raw_udp_smoke PRIVATE adapter_raw_udp GTest::gtest_main)
 add_test(NAME test_raw_udp_smoke COMMAND test_raw_udp_smoke)
+
+add_executable(test_mini_rudp_smoke test_mini_rudp_smoke.cc)
+target_link_libraries(test_mini_rudp_smoke PRIVATE adapter_mini_rudp GTest::gtest_main)
+add_test(NAME test_mini_rudp_smoke COMMAND test_mini_rudp_smoke)

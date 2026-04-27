@@ -1,1 +1,2 @@
-# placeholder; sources added in later tasks
+add_library(adapter_mini_rudp STATIC mini_rudp_adapter.cc)
+target_link_libraries(adapter_mini_rudp PUBLIC rudp_bench_harness)
