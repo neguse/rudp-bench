@@ -58,8 +58,7 @@ class EnetAdapter : public rudp_bench::Adapter {
       enet_packet_destroy(pkt);
       return -1;
     }
-    // ENet は host_service / host_flush で実際の送信。即時 flush して loopback latency を最小化。
-    enet_host_flush(host_);
+    // ENet は poll() 末尾で flush する(バッチング維持)
     return 0;
   }
 
@@ -67,7 +66,9 @@ class EnetAdapter : public rudp_bench::Adapter {
     if (inbox_.empty()) return 0;
     auto& m = inbox_.front();
     if (m.data.size() > cap) {
-      // 切り詰めず破棄して err を返す。Phase 1 では cap=2048〜65536 想定
+      // 切り詰めず破棄して err。caller がバッファサイズを判断できるよう必要サイズだけ書く。
+      *out_len = m.data.size();
+      *out_conn_id = m.conn_id;
       inbox_.pop_front();
       return -1;
     }
@@ -126,6 +127,7 @@ class EnetAdapter : public rudp_bench::Adapter {
         default: break;
       }
     }
+    enet_host_flush(host_);
   }
 
   void close() override {
