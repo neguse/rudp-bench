@@ -115,15 +115,29 @@ rudp-bench/
 
 ```cpp
 struct Adapter {
+  virtual ~Adapter() = default;
+
+  // server-side
   virtual void server_listen(uint16_t port) = 0;
-  virtual void client_connect(const char* host, uint16_t port) = 0;
-  virtual void send(uint32_t conn_id, const void* data, size_t len, bool reliable) = 0;
-  virtual size_t recv(uint32_t conn_id, void* buf, size_t cap) = 0; // non-blocking
-  virtual void poll() = 0;   // イベントポンプ駆動
+
+  // client-side: 接続要求発行 → handle 返却。非同期 lib 用に is_connected で確認。
+  virtual uint32_t client_connect(const char* host, uint16_t port) = 0;
+  virtual bool is_connected(uint32_t conn_id) = 0;
+
+  // both sides
+  virtual int send(uint32_t conn_id, const void* data, size_t len, bool reliable) = 0;  // 0=ok, -1=err
+  virtual int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) = 0;  // 1=msg, 0=none, -1=err
+
+  virtual void poll() = 0;
   virtual void close() = 0;
+
   virtual const char* name() const = 0;
+  virtual bool supports(bool reliable) const = 0;
+  virtual bool encryption_on() const = 0;
 };
 ```
+
+`send` は失敗時 -1。`recv` は非同期取得で 1/0/-1。`supports`/`encryption_on` は capability query。
 
 QUIC (msquic) は `reliable=true → stream`、`reliable=false → datagram (RFC 9221)` にマップする。
 UDT4 のように非信頼モードを持たない実装では unreliable シナリオは `N/A` で結果に記録する。

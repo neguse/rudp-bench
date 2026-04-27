@@ -1,0 +1,31 @@
+add_executable(test_adapter_registry test_adapter_registry.cc)
+target_link_libraries(test_adapter_registry PRIVATE rudp_bench_harness GTest::gtest_main)
+add_test(NAME test_adapter_registry COMMAND test_adapter_registry)
+
+add_executable(test_scenario test_scenario.cc)
+target_link_libraries(test_scenario PRIVATE rudp_bench_harness GTest::gtest_main)
+add_test(NAME test_scenario COMMAND test_scenario)
+
+add_executable(test_metrics test_metrics.cc)
+target_link_libraries(test_metrics PRIVATE rudp_bench_harness GTest::gtest_main)
+add_test(NAME test_metrics COMMAND test_metrics)
+
+add_executable(test_csv_writer test_csv_writer.cc)
+target_link_libraries(test_csv_writer PRIVATE rudp_bench_harness GTest::gtest_main)
+add_test(NAME test_csv_writer COMMAND test_csv_writer)
+
+add_executable(test_proc_sampler test_proc_sampler.cc)
+target_link_libraries(test_proc_sampler PRIVATE rudp_bench_harness GTest::gtest_main)
+add_test(NAME test_proc_sampler COMMAND test_proc_sampler)
+
+add_executable(test_raw_udp_smoke test_raw_udp_smoke.cc)
+target_link_libraries(test_raw_udp_smoke PRIVATE adapter_raw_udp GTest::gtest_main)
+add_test(NAME test_raw_udp_smoke COMMAND test_raw_udp_smoke)
+
+add_executable(test_mini_rudp_smoke test_mini_rudp_smoke.cc)
+target_link_libraries(test_mini_rudp_smoke PRIVATE adapter_mini_rudp GTest::gtest_main)
+add_test(NAME test_mini_rudp_smoke COMMAND test_mini_rudp_smoke)
+
+add_executable(test_runner_loopback test_runner_loopback.cc)
+target_link_libraries(test_runner_loopback PRIVATE rudp_bench_harness adapter_raw_udp GTest::gtest_main)
+add_test(NAME test_runner_loopback COMMAND test_runner_loopback)

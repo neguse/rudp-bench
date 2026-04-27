@@ -1,0 +1,6 @@
+build/
+results/
+.cache/
+compile_commands.json
+*.swp
+__pycache__/
