@@ -1,3 +1,4 @@
-# placeholder; sources added in later tasks
-add_library(rudp_bench_harness INTERFACE)
-target_include_directories(rudp_bench_harness INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+add_library(rudp_bench_harness STATIC
+  adapter_registry.cc
+)
+target_include_directories(rudp_bench_harness PUBLIC ${CMAKE_SOURCE_DIR})
