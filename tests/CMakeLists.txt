@@ -13,3 +13,7 @@ add_test(NAME test_metrics COMMAND test_metrics)
 add_executable(test_csv_writer test_csv_writer.cc)
 target_link_libraries(test_csv_writer PRIVATE rudp_bench_harness GTest::gtest_main)
 add_test(NAME test_csv_writer COMMAND test_csv_writer)
+
+add_executable(test_proc_sampler test_proc_sampler.cc)
+target_link_libraries(test_proc_sampler PRIVATE rudp_bench_harness GTest::gtest_main)
+add_test(NAME test_proc_sampler COMMAND test_proc_sampler)
