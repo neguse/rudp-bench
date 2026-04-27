@@ -181,7 +181,38 @@ class KcpAdapter : public rudp_bench::Adapter {
     return it != conns_.end() && it->second->connected;
   }
 
-  int send(uint32_t /*conn_id*/, const void* /*data*/, size_t /*len*/, bool /*reliable*/) override { return -1; }
+  // ----------------------------------------------------------
+  // send: reliable → KCP ARQ 経由 / unreliable → raw sendto bypass
+  //
+  // unreliable ワイヤ: [PREFIX_RAW][conv:4LE][payload]
+  // conv を含めることで server/client 双方が conn_id を特定できる。
+  // ----------------------------------------------------------
+  int send(uint32_t conn_id, const void* data, size_t len, bool reliable) override {
+    auto it = conns_.find(conn_id);
+    if (it == conns_.end()) return -1;
+    KcpConn* conn = it->second.get();
+
+    if (reliable) {
+      ensure_kcp(conn);
+      return ikcp_send(conn->kcp, static_cast<const char*>(data),
+                       static_cast<int>(len)) < 0 ? -1 : 0;
+    }
+
+    // unreliable bypass: raw UDP with conv header
+    std::vector<uint8_t> buf(5 + len);
+    buf[0] = PREFIX_RAW;
+    std::memcpy(buf.data() + 1, &conn->conv, 4);
+    std::memcpy(buf.data() + 5, data, len);
+    ssize_t n;
+    if (is_server_) {
+      n = ::sendto(server_fd_, buf.data(), buf.size(), 0,
+                   reinterpret_cast<const sockaddr*>(&conn->out_ctx.peer_addr),
+                   sizeof(conn->out_ctx.peer_addr));
+    } else {
+      n = ::send(client_fd_, buf.data(), buf.size(), 0);
+    }
+    return (n == static_cast<ssize_t>(buf.size())) ? 0 : -1;
+  }
 
   int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
     if (inbox_.empty()) return 0;
@@ -288,8 +319,28 @@ class KcpAdapter : public rudp_bench::Adapter {
           enqueue_raw(id, raw + 5, static_cast<size_t>(n - 5));
         }
       }
+    } else {
+      // client: 共有ソケットから受信し conv で KCP インスタンスに振り分け
+      ssize_t n;
+      while ((n = ::recv(client_fd_, raw, sizeof(raw), 0)) > 0) {
+        if (n < 1) continue;
+        uint8_t prefix = raw[0];
+        if (prefix == PREFIX_KCP && n > 5) {
+          IUINT32 conv = ikcp_getconv(raw + 1);
+          auto it = conns_.find(static_cast<uint32_t>(conv));
+          if (it != conns_.end() && it->second->kcp) {
+            ikcp_input(it->second->kcp, reinterpret_cast<char*>(raw + 1),
+                       static_cast<long>(n - 1));
+          }
+        } else if (prefix == PREFIX_RAW && n >= 5) {
+          IUINT32 conv; std::memcpy(&conv, raw + 1, 4);
+          auto it = conns_.find(static_cast<uint32_t>(conv));
+          if (it != conns_.end()) {
+            enqueue_raw(it->second->conn_id, raw + 5, static_cast<size_t>(n - 5));
+          }
+        }
+      }
     }
-    // client path: added in next step
   }
 
   // KCP デコード済みメッセージを inbox_ に移す
