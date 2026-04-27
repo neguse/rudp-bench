@@ -29,3 +29,7 @@ add_test(NAME test_mini_rudp_smoke COMMAND test_mini_rudp_smoke)
 add_executable(test_runner_loopback test_runner_loopback.cc)
 target_link_libraries(test_runner_loopback PRIVATE rudp_bench_harness adapter_raw_udp GTest::gtest_main)
 add_test(NAME test_runner_loopback COMMAND test_runner_loopback)
+
+add_executable(test_enet_smoke test_enet_smoke.cc)
+target_link_libraries(test_enet_smoke PRIVATE adapter_enet GTest::gtest_main)
+add_test(NAME test_enet_smoke COMMAND test_enet_smoke)
