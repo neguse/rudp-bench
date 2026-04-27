@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(rudp-bench LANGUAGES CXX)
+project(rudp-bench LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,4 +27,5 @@ add_subdirectory(adapters/mini_rudp)
 add_subdirectory(adapters/enet)
 add_subdirectory(adapters/kcp)
 add_subdirectory(adapters/slikenet)
+add_subdirectory(adapters/yojimbo)
 add_subdirectory(tests)
