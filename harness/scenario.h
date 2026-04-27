@@ -1,0 +1,29 @@
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+
+namespace rudp_bench {
+
+enum class Role { Server, Client };
+enum class Reliability { Reliable, Unreliable, NotApplicable };
+
+struct ScenarioConfig {
+  std::string library;
+  Role role = Role::Client;
+  std::string host = "127.0.0.1";
+  uint16_t port = 9000;
+  Reliability reliable = Reliability::Unreliable;
+  uint32_t size_bytes = 64;
+  uint32_t conns = 1;
+  uint32_t rate_per_conn = 0;     // 0 = unbounded
+  uint32_t duration_s = 30;
+  uint32_t warmup_s = 2;
+  double loss_pct = 0.0;          // メタデータ(tc は外側で設定済み前提)
+  std::string out_path;
+};
+
+std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]);
+
+}  // namespace rudp_bench
