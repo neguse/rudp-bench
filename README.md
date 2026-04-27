@@ -5,8 +5,8 @@ See `docs/superpowers/specs/2026-04-28-rudp-bench-design.md` for the full design
 
 ## Status
 
-Plan 3 complete: harness + `raw_udp` + `mini_rudp` baselines + ENet adapter + KCP adapter.
-Subsequent plans add SLikeNet, UDT4, yojimbo, GNS, msquic, LiteNetLib adapters.
+Plan 4 complete: harness + `raw_udp` + `mini_rudp` baselines + ENet + KCP + SLikeNet adapters.
+Subsequent plans add UDT4, yojimbo, GNS, msquic, LiteNetLib adapters.
 
 ## Submodule fetch
 
@@ -35,10 +35,10 @@ ctest --test-dir build --output-on-failure
 ## Phase 1 sweep
 
 ```
-scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp --results=results/phase1.csv
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet --results=results/phase1.csv
 
 # with tc loss injection (requires sudo)
-scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp --results=results/phase1.csv --loss-injection
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet --results=results/phase1.csv --loss-injection
 
 python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase1_table.md
 ```
