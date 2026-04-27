@@ -15,4 +15,5 @@ target_link_libraries(rudp-bench PRIVATE
   adapter_mini_rudp
   adapter_enet
   adapter_kcp
+  adapter_slikenet
 )
