@@ -5,3 +5,7 @@ add_test(NAME test_adapter_registry COMMAND test_adapter_registry)
 add_executable(test_scenario test_scenario.cc)
 target_link_libraries(test_scenario PRIVATE rudp_bench_harness GTest::gtest_main)
 add_test(NAME test_scenario COMMAND test_scenario)
+
+add_executable(test_metrics test_metrics.cc)
+target_link_libraries(test_metrics PRIVATE rudp_bench_harness GTest::gtest_main)
+add_test(NAME test_metrics COMMAND test_metrics)
