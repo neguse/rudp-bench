@@ -143,8 +143,44 @@ class KcpAdapter : public rudp_bench::Adapter {
     set_nonblock(server_fd_);
   }
 
-  uint32_t client_connect(const char* /*host*/, uint16_t /*port*/) override { return 0; }
-  bool is_connected(uint32_t /*conn_id*/) override { return false; }
+  // ----------------------------------------------------------
+  // client_connect: 共有ソケットを生成 (初回のみ)、KCP インスタンスを作成。
+  // 全コネクションが同一サーバ宛てであることを前提に 1 ソケットを共有する。
+  // conv = conn_id とし、server 側が受信フレームから接続を特定できるようにする。
+  // ----------------------------------------------------------
+  uint32_t client_connect(const char* host, uint16_t port) override {
+    if (client_fd_ < 0) {
+      client_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+      if (client_fd_ < 0) std::abort();
+      set_nonblock(client_fd_);
+      sockaddr_in srv{};
+      srv.sin_family = AF_INET;
+      srv.sin_port   = htons(port);
+      inet_pton(AF_INET, host, &srv.sin_addr);
+      ::connect(client_fd_, reinterpret_cast<sockaddr*>(&srv), sizeof(srv));
+    }
+    uint32_t id = next_id_++;
+    auto conn = std::make_unique<KcpConn>();
+    conn->conn_id         = id;
+    conn->conv            = static_cast<IUINT32>(id);
+    conn->out_ctx.fd      = client_fd_;
+    conn->out_ctx.is_server = false;
+    conn->kcp = ikcp_create(conn->conv, &conn->out_ctx);
+    ikcp_setoutput(conn->kcp, kcp_output_cb);
+    ikcp_nodelay(conn->kcp, 1, 10, 2, 1);
+    ikcp_setmtu(conn->kcp, KCP_MTU);
+    ikcp_wndsize(conn->kcp, KCP_SND_WND, KCP_RCV_WND);
+    // KCP はハンドシェイク不要 – ソケット生成後即座に connected
+    conn->connected = true;
+    conns_[id] = std::move(conn);
+    return id;
+  }
+
+  bool is_connected(uint32_t conn_id) override {
+    auto it = conns_.find(conn_id);
+    return it != conns_.end() && it->second->connected;
+  }
+
   int send(uint32_t /*conn_id*/, const void* /*data*/, size_t /*len*/, bool /*reliable*/) override { return -1; }
 
   int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
