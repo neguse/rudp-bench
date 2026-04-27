@@ -31,9 +31,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"; if [ "$LOSS_INJECT" = "1" ]; then sudo scripts/set_loss.sh clear >/dev/null 2>&1 || true; fi' EXIT
 
 # CSV header (1回だけ)
-"$BIN" --library=raw_udp --role=server --port=29999 --duration=0 --out="$TMP/hdr.csv" 2>/dev/null || true
-head -n1 "$TMP/hdr.csv" > "$RESULTS" 2>/dev/null || \
-  echo "library,encryption,phase,reliable,size,conns,rate,loss,throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s" > "$RESULTS"
+echo "library,encryption,phase,reliable,size,conns,rate,loss,throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s" > "$RESULTS"
 
 PORT_BASE=30000
 PORT=$PORT_BASE

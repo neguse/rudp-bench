@@ -34,7 +34,9 @@ scripts/run_phase1.sh --libraries=raw_udp,mini_rudp --results=results/phase1.csv
 python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase1_table.md
 ```
 
-## 既知の挙動
+## 既知の挙動・制限
 
 - `delivery_ratio` は warmup 期間との境界で `> 1.0` になることがある。warmup 中の send は計測対象外だが、その echo が post-warmup 区間に到着して received としてカウントされるため。これは loopback の RTT が warmup 終了後の echo にまで影響することによる既知のアーティファクトで、長時間ランほど影響は薄まる。
 - `raw_udp` は reliable モードを持たないため、`--reliable=r` シナリオは `na` 行として記録される(計測なし)。
+- **size = 65536 シナリオは現状ペイロード切り詰めが起きる**: UDP の最大データグラムサイズ(65507B)を超えるため、`sendto` が `EMSGSIZE` で失敗し送信側で記録されない、または受信側の 2KB 内部バッファで切り詰められる。Phase 2 までに `mini_rudp` でアプリ層フラグメンテーションを実装するか、シナリオ最大サイズを 8KB 程度に下げる対応が必要。
+- `LatencyHist::samples_` と `DeliveryTracker::received_keys_` は計測中に成長し続けるため、高 throughput × 長時間ランで RSS 計測が harness 自身のオーバーヘッドに引っ張られる。Phase 2 実装前にリザーバサンプリング等の対策を入れる予定。
