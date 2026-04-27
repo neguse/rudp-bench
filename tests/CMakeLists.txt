@@ -9,3 +9,7 @@ add_test(NAME test_scenario COMMAND test_scenario)
 add_executable(test_metrics test_metrics.cc)
 target_link_libraries(test_metrics PRIVATE rudp_bench_harness GTest::gtest_main)
 add_test(NAME test_metrics COMMAND test_metrics)
+
+add_executable(test_csv_writer test_csv_writer.cc)
+target_link_libraries(test_csv_writer PRIVATE rudp_bench_harness GTest::gtest_main)
+add_test(NAME test_csv_writer COMMAND test_csv_writer)
