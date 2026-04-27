@@ -33,14 +33,28 @@ class EnetAdapter : public rudp_bench::Adapter {
     ENetAddress addr{};
     addr.host = ENET_HOST_ANY;
     addr.port = port;
-    // 最大ピア数 4096(Phase 1 では conns ≤ 1000、余裕)、2 channel、帯域無制限
-    host_ = enet_host_create(&addr, 4096, 2, 0, 0);
+    // 最大ピア数 4095(ENet プロトコル上限 ENET_PROTOCOL_MAXIMUM_PEER_ID=0xFFF)、2 channel、帯域無制限
+    host_ = enet_host_create(&addr, 4095, 2, 0, 0);
     if (!host_) std::abort();
     is_server_ = true;
   }
 
-  uint32_t client_connect(const char* /*host*/, uint16_t /*port*/) override {
-    std::abort();
+  uint32_t client_connect(const char* host, uint16_t port) override {
+    if (!host_) {
+      host_ = enet_host_create(nullptr, 32, 2, 0, 0);
+      if (!host_) std::abort();
+      is_server_ = false;
+    }
+    ENetAddress addr{};
+    enet_address_set_host(&addr, host);
+    addr.port = port;
+    ENetPeer* peer = enet_host_connect(host_, &addr, 2, 0);
+    if (!peer) std::abort();
+    uint32_t id = next_id_++;
+    id_by_peer_[peer] = id;
+    peer_by_id_[id] = peer;
+    // CONNECT イベントが来るまで connected_ids_ に入らない
+    return id;
   }
 
   bool is_connected(uint32_t conn_id) override {
