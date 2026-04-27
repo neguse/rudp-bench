@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-LIBS="raw_udp,mini_rudp"
+LIBS="raw_udp,mini_rudp,enet"
 BUILD_DIR="build"
 RESULTS="results/phase1.csv"
 LOSS_INJECT="0"   # 0=skip, 1=apply via sudo
