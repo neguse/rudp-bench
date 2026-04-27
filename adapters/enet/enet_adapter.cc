@@ -36,14 +36,12 @@ class EnetAdapter : public rudp_bench::Adapter {
     // 最大ピア数 4095(ENet プロトコル上限 ENET_PROTOCOL_MAXIMUM_PEER_ID=0xFFF)、2 channel、帯域無制限
     host_ = enet_host_create(&addr, 4095, 2, 0, 0);
     if (!host_) std::abort();
-    is_server_ = true;
   }
 
   uint32_t client_connect(const char* host, uint16_t port) override {
     if (!host_) {
       host_ = enet_host_create(nullptr, 32, 2, 0, 0);
       if (!host_) std::abort();
-      is_server_ = false;
     }
     ENetAddress addr{};
     enet_address_set_host(&addr, host);
@@ -159,7 +157,6 @@ class EnetAdapter : public rudp_bench::Adapter {
   };
 
   ENetHost* host_ = nullptr;
-  bool is_server_ = false;
 
   // peer ↔ conn_id マッピング(双方向)
   std::unordered_map<ENetPeer*, uint32_t> id_by_peer_;
