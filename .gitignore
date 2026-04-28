@@ -4,3 +4,6 @@ results/
 compile_commands.json
 *.swp
 __pycache__/
+# .NET build artifacts
+adapters/litenetlib/bin/
+adapters/litenetlib/obj/
