@@ -33,3 +33,7 @@ add_test(NAME test_runner_loopback COMMAND test_runner_loopback)
 add_executable(test_enet_smoke test_enet_smoke.cc)
 target_link_libraries(test_enet_smoke PRIVATE adapter_enet GTest::gtest_main)
 add_test(NAME test_enet_smoke COMMAND test_enet_smoke)
+
+add_executable(test_kcp_smoke test_kcp_smoke.cc)
+target_link_libraries(test_kcp_smoke PRIVATE adapter_kcp GTest::gtest_main)
+add_test(NAME test_kcp_smoke COMMAND test_kcp_smoke)
