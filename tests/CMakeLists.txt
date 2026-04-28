@@ -45,3 +45,7 @@ add_test(NAME test_slikenet_smoke COMMAND test_slikenet_smoke)
 add_executable(test_yojimbo_smoke test_yojimbo_smoke.cc)
 target_link_libraries(test_yojimbo_smoke PRIVATE adapter_yojimbo GTest::gtest_main)
 add_test(NAME test_yojimbo_smoke COMMAND test_yojimbo_smoke)
+
+add_executable(test_gns_smoke test_gns_smoke.cc)
+target_link_libraries(test_gns_smoke PRIVATE adapter_gns GTest::gtest_main)
+add_test(NAME test_gns_smoke COMMAND test_gns_smoke)
