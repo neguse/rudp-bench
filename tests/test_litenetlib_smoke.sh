@@ -5,7 +5,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ADAPTER="$REPO_ROOT/adapters/litenetlib/bin/Release/net8.0/litenetlib_adapter"
+ADAPTER="$REPO_ROOT/adapters/litenetlib/bin/Release/net10.0/litenetlib_adapter"
 
 if [ ! -x "$ADAPTER" ]; then
     echo "litenetlib_adapter binary not found or not executable: $ADAPTER" >&2

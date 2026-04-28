@@ -27,7 +27,7 @@ BIN="$BUILD_DIR/harness/rudp-bench"
 [ -x "$BIN" ] || { echo "binary not found: $BIN" >&2; exit 2; }
 
 # LiteNetLib は独立した .NET バイナリ。同じ CLI 仕様・CSV フォーマットを持つ。
-LITENETLIB_BIN="adapters/litenetlib/bin/Release/net8.0/litenetlib_adapter"
+LITENETLIB_BIN="adapters/litenetlib/bin/Release/net10.0/litenetlib_adapter"
 # spec: JIT/GC ウォームアップのため warmup を 5 秒に引き上げる
 LITENETLIB_WARMUP=5
 
