@@ -5,8 +5,8 @@ See `docs/superpowers/specs/2026-04-28-rudp-bench-design.md` for the full design
 
 ## Status
 
-Plan 7 complete: harness + `raw_udp` + `mini_rudp` baselines + ENet + KCP + SLikeNet + yojimbo + GNS adapters.
-Subsequent plans add UDT4, msquic, LiteNetLib adapters.
+Plan 9 complete: harness + `raw_udp` + `mini_rudp` baselines + ENet + KCP + SLikeNet + yojimbo + GNS + LiteNetLib adapters.
+Subsequent plans add UDT4, msquic adapters.
 
 | ライブラリ | 暗号 | 状態 |
 |---|---|---|
@@ -17,12 +17,14 @@ Subsequent plans add UDT4, msquic, LiteNetLib adapters.
 | slikenet | off | ✅ |
 | yojimbo | **on** (libsodium 必須) | ✅ |
 | gns | **on** (GNS デフォルト) | ✅ |
+| litenetlib | off (.NET 8 独立バイナリ) | ✅ |
 
 ## Dependencies
 
 ```
-sudo apt-get install libsodium-dev libmbedtls-dev   # yojimbo
+sudo apt-get install libsodium-dev libmbedtls-dev                   # yojimbo
 sudo apt-get install protobuf-compiler libprotobuf-dev libssl-dev   # gns
+sudo apt-get install dotnet-sdk-8.0                                 # litenetlib
 ```
 
 ## Submodule fetch
@@ -36,10 +38,14 @@ git submodule update --init --recursive
 
 ## Build
 
+`cmake --build` が C++ と .NET の両系統をまとめてビルドします:
+
 ```
 cmake -S . -B build && cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
+
+dotnet が見つからない場合 LiteNetLib ビルドはスキップされ、他の C++ アダプタのビルドは継続します。
 
 ## Run a single scenario
 
