@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-LIBS="raw_udp,mini_rudp,enet,kcp,slikenet,yojimbo,gns"
+LIBS="raw_udp,mini_rudp,enet,kcp,slikenet,yojimbo,gns,litenetlib"
 BUILD_DIR="build"
 RESULTS="results/phase1.csv"
 LOSS_INJECT="0"   # 0=skip, 1=apply via sudo
@@ -25,6 +25,11 @@ done
 
 BIN="$BUILD_DIR/harness/rudp-bench"
 [ -x "$BIN" ] || { echo "binary not found: $BIN" >&2; exit 2; }
+
+# LiteNetLib は独立した .NET バイナリ。同じ CLI 仕様・CSV フォーマットを持つ。
+LITENETLIB_BIN="adapters/litenetlib/bin/Release/net8.0/litenetlib_adapter"
+# spec: JIT/GC ウォームアップのため warmup を 5 秒に引き上げる
+LITENETLIB_WARMUP=5
 
 mkdir -p "$(dirname "$RESULTS")"
 TMP=$(mktemp -d)
@@ -50,17 +55,36 @@ for lib in ${LIBS//,/ }; do
             S_OUT="$TMP/s_${lib}_${reliable}_${size}_${conns}_${rate}_${loss}.csv"
             C_OUT="$TMP/c_${lib}_${reliable}_${size}_${conns}_${rate}_${loss}.csv"
 
-            timeout 90s "$BIN" --library="$lib" --role=server --port="$PORT" \
-              --reliable="$reliable" --duration=30 --warmup=2 --loss="$loss" \
-              --out="$S_OUT" &
-            SPID=$!
-            sleep 0.2
-
-            timeout 90s "$BIN" --library="$lib" --role=client \
-              --host=127.0.0.1 --port="$PORT" \
-              --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
-              --duration=30 --warmup=2 --loss="$loss" \
-              --out="$C_OUT" || true
+            # LiteNetLib は独立 .NET バイナリに dispatch。warmup は 5 秒固定。
+            if [ "$lib" = "litenetlib" ]; then
+              if [ ! -x "$LITENETLIB_BIN" ]; then
+                echo "litenetlib binary not found: $LITENETLIB_BIN — skipping" >&2
+                continue
+              fi
+              WARMUP_ARG="$LITENETLIB_WARMUP"
+              TIMEOUT_S=$((30 + LITENETLIB_WARMUP + 10))
+              timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
+                --reliable="$reliable" --duration=30 --warmup="$WARMUP_ARG" --loss="$loss" \
+                --out="$S_OUT" &
+              SPID=$!
+              sleep 0.5
+              timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=client \
+                --host=127.0.0.1 --port="$PORT" \
+                --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
+                --duration=30 --warmup="$WARMUP_ARG" --loss="$loss" \
+                --out="$C_OUT" || true
+            else
+              timeout 90s "$BIN" --library="$lib" --role=server --port="$PORT" \
+                --reliable="$reliable" --duration=30 --warmup=2 --loss="$loss" \
+                --out="$S_OUT" &
+              SPID=$!
+              sleep 0.2
+              timeout 90s "$BIN" --library="$lib" --role=client \
+                --host=127.0.0.1 --port="$PORT" \
+                --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
+                --duration=30 --warmup=2 --loss="$loss" \
+                --out="$C_OUT" || true
+            fi
 
             kill "$SPID" 2>/dev/null || true
             wait "$SPID" 2>/dev/null || true
