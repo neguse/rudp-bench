@@ -4,3 +4,6 @@
 [submodule "third_party/kcp"]
 	path = third_party/kcp
 	url = https://github.com/skywind3000/kcp
+[submodule "third_party/slikenet"]
+	path = third_party/slikenet
+	url = https://github.com/SLikeSoft/SLikeNet

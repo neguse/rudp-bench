@@ -37,3 +37,7 @@ add_test(NAME test_enet_smoke COMMAND test_enet_smoke)
 add_executable(test_kcp_smoke test_kcp_smoke.cc)
 target_link_libraries(test_kcp_smoke PRIVATE adapter_kcp GTest::gtest_main)
 add_test(NAME test_kcp_smoke COMMAND test_kcp_smoke)
+
+add_executable(test_slikenet_smoke test_slikenet_smoke.cc)
+target_link_libraries(test_slikenet_smoke PRIVATE adapter_slikenet GTest::gtest_main)
+add_test(NAME test_slikenet_smoke COMMAND test_slikenet_smoke)

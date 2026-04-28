@@ -11,6 +11,7 @@ void register_raw_udp_adapter();
 void register_mini_rudp_adapter();
 void register_enet_adapter();
 void register_kcp_adapter();
+void register_slikenet_adapter();
 }  // namespace rudp_bench
 
 int main(int argc, const char* argv[]) {
@@ -18,6 +19,7 @@ int main(int argc, const char* argv[]) {
   rudp_bench::register_mini_rudp_adapter();
   rudp_bench::register_enet_adapter();
   rudp_bench::register_kcp_adapter();
+  rudp_bench::register_slikenet_adapter();
 
   auto cfg_opt = rudp_bench::parse_scenario(argc, argv);
   if (!cfg_opt) {
