@@ -29,4 +29,19 @@ add_subdirectory(adapters/kcp)
 add_subdirectory(adapters/slikenet)
 add_subdirectory(adapters/yojimbo)
 add_subdirectory(adapters/gns)
+
+# LiteNetLib: .NET 8 独立バイナリ — cmake --build がここで dotnet build を呼ぶ
+find_program(DOTNET_EXECUTABLE dotnet)
+if(DOTNET_EXECUTABLE)
+    add_custom_target(litenetlib_build ALL
+        COMMAND ${DOTNET_EXECUTABLE} build -c Release
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/adapters/litenetlib"
+        COMMENT "Building LiteNetLib .NET adapter (adapters/litenetlib)"
+        VERBATIM
+    )
+    message(STATUS "dotnet found: ${DOTNET_EXECUTABLE} — litenetlib_build target added")
+else()
+    message(WARNING "dotnet not found; LiteNetLib adapter will not be built (apt: dotnet-sdk-8.0)")
+endif()
+
 add_subdirectory(tests)

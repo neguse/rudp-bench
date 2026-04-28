@@ -49,3 +49,14 @@ add_test(NAME test_yojimbo_smoke COMMAND test_yojimbo_smoke)
 add_executable(test_gns_smoke test_gns_smoke.cc)
 target_link_libraries(test_gns_smoke PRIVATE adapter_gns GTest::gtest_main)
 add_test(NAME test_gns_smoke COMMAND test_gns_smoke)
+
+# LiteNetLib smoke test — shell script (NOT a C++ GTest; invokes the .NET binary on loopback)
+find_program(DOTNET_EXECUTABLE dotnet)
+find_program(BASH_EXECUTABLE bash)
+if(DOTNET_EXECUTABLE AND BASH_EXECUTABLE)
+    add_test(
+        NAME test_litenetlib_smoke
+        COMMAND ${BASH_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_litenetlib_smoke.sh"
+    )
+    set_tests_properties(test_litenetlib_smoke PROPERTIES TIMEOUT 60)
+endif()
