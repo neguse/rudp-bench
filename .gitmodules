@@ -10,3 +10,6 @@
 [submodule "third_party/yojimbo"]
 	path = third_party/yojimbo
 	url = https://github.com/networkprotocol/yojimbo.git
+[submodule "third_party/gns"]
+	path = third_party/gns
+	url = https://github.com/ValveSoftware/GameNetworkingSockets
