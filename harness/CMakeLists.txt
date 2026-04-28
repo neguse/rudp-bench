@@ -17,4 +17,5 @@ target_link_libraries(rudp-bench PRIVATE
   adapter_kcp
   adapter_slikenet
   adapter_yojimbo
+  adapter_gns
 )
