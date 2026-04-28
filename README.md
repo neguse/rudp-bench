@@ -5,12 +5,29 @@ See `docs/superpowers/specs/2026-04-28-rudp-bench-design.md` for the full design
 
 ## Status
 
-Plan 4 complete: harness + `raw_udp` + `mini_rudp` baselines + ENet + KCP + SLikeNet adapters.
-Subsequent plans add UDT4, yojimbo, GNS, msquic, LiteNetLib adapters.
+Plan 6 complete: harness + `raw_udp` + `mini_rudp` baselines + ENet + KCP + SLikeNet + yojimbo adapters.
+Subsequent plans add UDT4, GNS, msquic, LiteNetLib adapters.
+
+| ライブラリ | 暗号 | 状態 |
+|---|---|---|
+| raw_udp | off | ✅ |
+| mini_rudp | off | ✅ |
+| enet | off | ✅ |
+| kcp | off | ✅ |
+| slikenet | off | ✅ |
+| yojimbo | **on** (libsodium 必須) | ✅ |
+
+## Dependencies
+
+yojimbo adapter requires system libsodium and libmbedtls:
+
+```
+sudo apt-get install libsodium-dev libmbedtls-dev
+```
 
 ## Submodule fetch
 
-ENet などの third_party ライブラリは git submodule で管理しています。
+ENet / yojimbo などの third_party ライブラリは git submodule で管理しています。
 clone 直後は以下を実行してください:
 
 ```
@@ -35,10 +52,10 @@ ctest --test-dir build --output-on-failure
 ## Phase 1 sweep
 
 ```
-scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet --results=results/phase1.csv
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,yojimbo --results=results/phase1.csv
 
 # with tc loss injection (requires sudo)
-scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet --results=results/phase1.csv --loss-injection
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,yojimbo --results=results/phase1.csv --loss-injection
 
 python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase1_table.md
 ```
