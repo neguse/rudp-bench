@@ -5,8 +5,8 @@ See `docs/superpowers/specs/2026-04-28-rudp-bench-design.md` for the full design
 
 ## Status
 
-Plan 6 complete: harness + `raw_udp` + `mini_rudp` baselines + ENet + KCP + SLikeNet + yojimbo adapters.
-Subsequent plans add UDT4, GNS, msquic, LiteNetLib adapters.
+Plan 7 complete: harness + `raw_udp` + `mini_rudp` baselines + ENet + KCP + SLikeNet + yojimbo + GNS adapters.
+Subsequent plans add UDT4, msquic, LiteNetLib adapters.
 
 | ライブラリ | 暗号 | 状態 |
 |---|---|---|
@@ -16,13 +16,13 @@ Subsequent plans add UDT4, GNS, msquic, LiteNetLib adapters.
 | kcp | off | ✅ |
 | slikenet | off | ✅ |
 | yojimbo | **on** (libsodium 必須) | ✅ |
+| gns | **on** (GNS デフォルト) | ✅ |
 
 ## Dependencies
 
-yojimbo adapter requires system libsodium and libmbedtls:
-
 ```
-sudo apt-get install libsodium-dev libmbedtls-dev
+sudo apt-get install libsodium-dev libmbedtls-dev   # yojimbo
+sudo apt-get install protobuf-compiler libprotobuf-dev libssl-dev   # gns
 ```
 
 ## Submodule fetch
@@ -52,10 +52,10 @@ ctest --test-dir build --output-on-failure
 ## Phase 1 sweep
 
 ```
-scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,yojimbo --results=results/phase1.csv
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,yojimbo,gns --results=results/phase1.csv
 
 # with tc loss injection (requires sudo)
-scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,yojimbo --results=results/phase1.csv --loss-injection
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,yojimbo,gns --results=results/phase1.csv --loss-injection
 
 python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase1_table.md
 ```
