@@ -164,44 +164,46 @@ static CsvRow RunServer(Config cfg)
 
 static CsvRow RunClient(Config cfg)
 {
-    var listener = new EventBasedNetListener();
-    var manager = new NetManager(listener) { AutoRecycle = true };
-
-    // peer → conn_id マッピング
-    var peerToId = new Dictionary<NetPeer, uint>(32);
+    // LiteNetLib の NetManager は内部で単一 UDP ソケットを持つ。
+    // 同一 manager から複数 Connect すると全 peer が同一 source endpoint
+    // を共有し、サーバ側で同一エンドポイント扱いになって接続待ちがハングする。
+    // 解決策は conn ごとに独立した NetManager を持つこと（各自エフェメラル
+    // ポートを取得 → サーバから別 peer として認識される）。
+    var managers = new NetManager[cfg.Conns];
     var peers = new NetPeer[cfg.Conns];
     var connected = new bool[cfg.Conns];
 
-    // 受信メッセージキュー（PollEvents()内で同期的にpush）
+    // 受信メッセージキュー（各 listener から conn_id 付きで push）
     var inbox = new List<(uint connId, byte[] data)>();
 
-    listener.PeerConnectedEvent += peer =>
+    for (uint i = 0; i < cfg.Conns; i++)
     {
-        if (peerToId.TryGetValue(peer, out uint id))
-            connected[id] = true;
-    };
+        uint connId = i; // closure capture
+        var listener = new EventBasedNetListener();
+        listener.PeerConnectedEvent += _ => connected[connId] = true;
+        listener.NetworkReceiveEvent += (_, reader, _, _) =>
+            inbox.Add((connId, reader.GetRemainingBytes()));
 
-    listener.NetworkReceiveEvent += (peer, reader, _, _) =>
-    {
-        if (peerToId.TryGetValue(peer, out uint id))
-            inbox.Add((id, reader.GetRemainingBytes()));
-    };
-
-    manager.Start();
+        var manager = new NetManager(listener) { AutoRecycle = true };
+        if (!manager.Start())
+        {
+            Console.Error.WriteLine($"NetManager.Start() failed for conn {connId}");
+            Environment.Exit(2);
+        }
+        managers[i] = manager;
+    }
 
     // 全コネクション発行
     long tConnectBeginTicks = Stopwatch.GetTimestamp();
     for (uint i = 0; i < cfg.Conns; i++)
     {
-        var peer = manager.Connect(cfg.Host, cfg.Port, "rudpbench");
-        peers[i] = peer;
-        peerToId[peer] = i;
+        peers[i] = managers[i].Connect(cfg.Host, cfg.Port, "rudpbench");
     }
 
     // 全コネクションが ready になるまで poll
     while (!connected.All(c => c))
     {
-        manager.PollEvents();
+        for (uint i = 0; i < cfg.Conns; i++) managers[i].PollEvents();
         Thread.Sleep(1);
     }
     long tConnectEndTicks = Stopwatch.GetTimestamp();
@@ -273,7 +275,7 @@ static CsvRow RunClient(Config cfg)
             }
         }
 
-        manager.PollEvents();
+        for (uint i = 0; i < cfg.Conns; i++) managers[i].PollEvents();
 
         foreach (var (connId, data) in inbox)
         {
@@ -298,7 +300,7 @@ static CsvRow RunClient(Config cfg)
     }
 
     ps.End();
-    manager.Stop();
+    for (uint i = 0; i < cfg.Conns; i++) managers[i].Stop();
 
     return new CsvRow
     {

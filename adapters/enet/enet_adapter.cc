@@ -40,7 +40,9 @@ class EnetAdapter : public rudp_bench::Adapter {
 
   uint32_t client_connect(const char* host, uint16_t port) override {
     if (!host_) {
-      host_ = enet_host_create(nullptr, 32, 2, 0, 0);
+      // 同一クライアントから複数 peer を張る用途で 4095 (ENet 上限) を確保。
+      // 32 にすると 33 本目の enet_host_connect が NULL → abort する。
+      host_ = enet_host_create(nullptr, 4095, 2, 0, 0);
       if (!host_) std::abort();
     }
     ENetAddress addr{};
