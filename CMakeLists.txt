@@ -27,6 +27,7 @@ add_subdirectory(adapters/mini_rudp)
 add_subdirectory(adapters/enet)
 add_subdirectory(adapters/kcp)
 add_subdirectory(adapters/slikenet)
+add_subdirectory(adapters/udt4)
 add_subdirectory(adapters/yojimbo)
 add_subdirectory(adapters/gns)
 
