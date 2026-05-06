@@ -70,6 +70,11 @@ static Config? ParseArgs(string[] args)
         else if (arg.StartsWith("--duration=")) cfg.DurationS = uint.Parse(arg["--duration=".Length..]);
         else if (arg.StartsWith("--warmup=")) cfg.WarmupS = uint.Parse(arg["--warmup=".Length..]);
         else if (arg.StartsWith("--loss=")) cfg.Loss = double.Parse(arg["--loss=".Length..], CultureInfo.InvariantCulture);
+        else if (arg.StartsWith("--mode="))
+        {
+            cfg.Mode = arg["--mode=".Length..];
+            if (cfg.Mode != "echo" && cfg.Mode != "broadcast") return null;
+        }
         else if (arg.StartsWith("--out=")) cfg.OutPath = arg["--out=".Length..];
         else { Console.Error.WriteLine($"unknown flag: {arg}"); return null; }
     }
@@ -108,12 +113,26 @@ static CsvRow RunServer(Config cfg)
     long deadlineTicks = Stopwatch.GetTimestamp() +
         (long)((cfg.WarmupS + cfg.DurationS + 5) * Stopwatch.Frequency);
 
+    var knownPeers = new HashSet<NetPeer>();
+    bool broadcast = cfg.Mode == "broadcast";
+
     while (Stopwatch.GetTimestamp() < deadlineTicks)
     {
         manager.PollEvents();
 
         foreach (var (peer, data) in inbox)
-            peer.Send(data, deliveryMethod);
+        {
+            knownPeers.Add(peer);
+            if (broadcast)
+            {
+                foreach (var target in knownPeers)
+                    target.Send(data, deliveryMethod);
+            }
+            else
+            {
+                peer.Send(data, deliveryMethod);
+            }
+        }
         inbox.Clear();
 
         Thread.Sleep(0);
@@ -135,6 +154,7 @@ static CsvRow RunServer(Config cfg)
         DurationS = cfg.DurationS,
         CpuPct = ps.CpuPct(),
         RssMb = ps.RssMbMax,
+        Mode = cfg.Mode,
     };
 }
 
@@ -228,15 +248,22 @@ static CsvRow RunClient(Config cfg)
             {
                 if (nowTicks < nextSendTicks[i]) continue;
 
-                ulong seq = seqCounters[i]++;
+                ulong localSeq = seqCounters[i]++;
+                // src_idx を上位 32bit に乗せて global seq に
+                // (broadcast 時の dedup key が src 違いで衝突しないように)
+                ulong globalSeq = ((ulong)i << 32) | localSeq;
                 // 単調クロックのナノ秒タイムスタンプ（C++ runner.cc と同形式）
                 ulong tsNs = (ulong)(Stopwatch.GetTimestamp() * 1_000_000_000L / Stopwatch.Frequency);
-                BitConverter.TryWriteBytes(payload.AsSpan(0, 8), seq);
+                BitConverter.TryWriteBytes(payload.AsSpan(0, 8), globalSeq);
                 BitConverter.TryWriteBytes(payload.AsSpan(8, 8), tsNs);
 
                 // LiteNetLib 2.x: Send() は void を返す。送信失敗の検出は省略し常に MarkSent
                 peers[i].Send(payload, deliveryMethod);
-                if (inMeasure) delivery.MarkSent(seq, i);
+                if (inMeasure)
+                {
+                    uint expected = cfg.Mode == "broadcast" ? cfg.Conns : 1u;
+                    for (uint k = 0; k < expected; k++) delivery.MarkSent(globalSeq, i);
+                }
 
                 if (intervalTicks > 0)
                 {
@@ -295,6 +322,7 @@ static CsvRow RunClient(Config cfg)
         RssMb = ps.RssMbMax,
         ConnectMs = connectMs,
         DurationS = cfg.DurationS,
+        Mode = cfg.Mode,
     };
 }
 
@@ -305,7 +333,7 @@ static CsvRow RunClient(Config cfg)
 static string CsvHeader() =>
     "library,encryption,phase,reliable,size,conns,rate,loss," +
     "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us," +
-    "delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s";
+    "delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode";
 
 static string FormatRow(CsvRow r) =>
     $"{r.Library},{r.Encryption},{r.Phase},{r.Reliable}," +
@@ -317,7 +345,7 @@ static string FormatRow(CsvRow r) =>
     $"{r.Delivered},{r.Sent}," +
     $"{r.DeliveryRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.CpuPct.ToString("F2", CultureInfo.InvariantCulture)}," +
-    $"{r.RssMb},{r.ConnectMs},{r.DurationS}";
+    $"{r.RssMb},{r.ConnectMs},{r.DurationS},{r.Mode}";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -336,6 +364,7 @@ class Config
     public uint DurationS = 30;
     public uint WarmupS = 5; // spec: JIT/GC ウォームアップのため 5 秒デフォルト
     public double Loss = 0.0;
+    public string Mode = "echo";  // "echo" / "broadcast"
     public string OutPath = "";
 }
 
@@ -365,6 +394,7 @@ class CsvRow
     public ulong RssMb;
     public ulong ConnectMs;
     public uint DurationS;
+    public string Mode = "echo";
 }
 
 // ---------------------------------------------------------------------------

@@ -13,3 +13,6 @@
 [submodule "third_party/gns"]
 	path = third_party/gns
 	url = https://github.com/ValveSoftware/GameNetworkingSockets
+[submodule "third_party/msquic"]
+	path = third_party/msquic
+	url = https://github.com/microsoft/msquic.git

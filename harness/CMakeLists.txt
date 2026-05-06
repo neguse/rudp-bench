@@ -19,4 +19,5 @@ target_link_libraries(rudp-bench PRIVATE
   adapter_udt4
   adapter_yojimbo
   adapter_gns
+  adapter_msquic
 )

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "harness/metrics.h"
@@ -17,6 +18,8 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   ps.begin();
 
   std::vector<uint8_t> buf(65536);
+  std::unordered_set<uint32_t> known_conns;  // broadcast 配信先
+  bool reliable = (cfg.reliable == Reliability::Reliable);
   auto deadline = std::chrono::steady_clock::now() +
                   std::chrono::seconds(cfg.duration_s + cfg.warmup_s + 5);
   while (std::chrono::steady_clock::now() < deadline) {
@@ -24,8 +27,15 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
     size_t n; uint32_t cid;
     int r = a.recv(buf.data(), buf.size(), &n, &cid);
     if (r == 1) {
-      bool reliable = (cfg.reliable == Reliability::Reliable);
-      a.send(cid, buf.data(), n, reliable);
+      known_conns.insert(cid);
+      if (cfg.mode == ServerMode::Echo) {
+        a.send(cid, buf.data(), n, reliable);
+      } else {
+        // Broadcast: 既知の全 conn に同 payload を送る(送信元を含む)
+        for (uint32_t target : known_conns) {
+          a.send(target, buf.data(), n, reliable);
+        }
+      }
     } else {
       std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
@@ -46,6 +56,7 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   row.cpu_pct = ps.cpu_pct();
   row.rss_mb = ps.rss_max_mb();
   row.duration_s = cfg.duration_s;
+  row.mode = (cfg.mode == ServerMode::Broadcast) ? "broadcast" : "echo";
   return row;
 }
 
@@ -99,15 +110,21 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
     if (now < run_end) {
       for (uint32_t i = 0; i < cfg.conns; ++i) {
         if (now < next_send[i]) continue;
-        // ヘッダ書き込み
-        uint64_t seq = seq_counter[i]++;
+        // ヘッダ書き込み: seq は (src_idx << 32 | local) でグローバルにユニーク化
+        // (broadcast 時の dedup key が src 違いで衝突しないため)
+        uint64_t local_seq = seq_counter[i]++;
+        uint64_t global_seq = (static_cast<uint64_t>(i) << 32) | local_seq;
         uint64_t ts = std::chrono::duration_cast<std::chrono::nanoseconds>(
                           now.time_since_epoch()).count();
-        std::memcpy(payload.data(), &seq, 8);
+        std::memcpy(payload.data(), &global_seq, 8);
         std::memcpy(payload.data() + 8, &ts, 8);
         if (a.send(ids[i], payload.data(), payload.size(), reliable) == 0) {
           if (in_measure(now)) {
-            dt.mark_sent(seq, ids[i]);
+            // echo: 期待受信 1, broadcast: 期待受信 cfg.conns
+            uint32_t expected = (cfg.mode == ServerMode::Broadcast) ? cfg.conns : 1;
+            for (uint32_t k = 0; k < expected; ++k) {
+              dt.mark_sent(global_seq, ids[i]);
+            }
           }
         }
         if (cfg.rate_per_conn) {
@@ -161,6 +178,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.rss_mb = ps.rss_max_mb();
   row.connect_ms = connect_ms;
   row.duration_s = cfg.duration_s;
+  row.mode = (cfg.mode == ServerMode::Broadcast) ? "broadcast" : "echo";
   return row;
 }
 

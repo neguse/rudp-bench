@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-LIBS="raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,litenetlib"
+LIBS="raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,litenetlib,msquic"
 BUILD_DIR="build"
 RESULTS="results/phase1.csv"
 LOSS_INJECT="0"   # 0=skip, 1=apply via sudo
@@ -36,24 +36,25 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"; if [ "$LOSS_INJECT" = "1" ]; then sudo scripts/set_loss.sh clear >/dev/null 2>&1 || true; fi' EXIT
 
 # CSV header (1回だけ)
-echo "library,encryption,phase,reliable,size,conns,rate,loss,throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s" > "$RESULTS"
+echo "library,encryption,phase,reliable,size,conns,rate,loss,throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode" > "$RESULTS"
 
 PORT_BASE=30000
 PORT=$PORT_BASE
 
 for lib in ${LIBS//,/ }; do
   for reliable in r u; do
-    for size in 64 65536; do
-      for conns in 1 1000; do
-        for rate in 100 100000; do   # 低 / 飽和超え近似(後でライブラリ別調整)
-          for loss in 0 5; do
+    for size in 64 1000; do
+      for conns in 1 50; do
+        for mode in echo broadcast; do
+          for loss in 0; do
             PORT=$((PORT + 1))
+            rate=50  # 全シナリオ共通: 50 msg/sec/conn
             if [ "$LOSS_INJECT" = "1" ]; then
               sudo scripts/set_loss.sh apply "$loss" >/dev/null
             fi
 
-            S_OUT="$TMP/s_${lib}_${reliable}_${size}_${conns}_${rate}_${loss}.csv"
-            C_OUT="$TMP/c_${lib}_${reliable}_${size}_${conns}_${rate}_${loss}.csv"
+            S_OUT="$TMP/s_${lib}_${reliable}_${size}_${conns}_${rate}_${mode}_${loss}.csv"
+            C_OUT="$TMP/c_${lib}_${reliable}_${size}_${conns}_${rate}_${mode}_${loss}.csv"
 
             # LiteNetLib は独立 .NET バイナリに dispatch。warmup は 5 秒固定。
             if [ "$lib" = "litenetlib" ]; then
@@ -62,27 +63,29 @@ for lib in ${LIBS//,/ }; do
                 continue
               fi
               WARMUP_ARG="$LITENETLIB_WARMUP"
-              TIMEOUT_S=$((30 + LITENETLIB_WARMUP + 10))
+              TIMEOUT_S=$((20 + LITENETLIB_WARMUP + 10))
               timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
-                --reliable="$reliable" --duration=30 --warmup="$WARMUP_ARG" --loss="$loss" \
+                --reliable="$reliable" --duration=20 --warmup="$WARMUP_ARG" --loss="$loss" \
+                --mode="$mode" \
                 --out="$S_OUT" &
               SPID=$!
               sleep 0.5
               timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=client \
                 --host=127.0.0.1 --port="$PORT" \
                 --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
-                --duration=30 --warmup="$WARMUP_ARG" --loss="$loss" \
+                --duration=20 --warmup="$WARMUP_ARG" --loss="$loss" --mode="$mode" \
                 --out="$C_OUT" || true
             else
-              timeout 90s "$BIN" --library="$lib" --role=server --port="$PORT" \
-                --reliable="$reliable" --duration=30 --warmup=2 --loss="$loss" \
+              timeout 60s "$BIN" --library="$lib" --role=server --port="$PORT" \
+                --reliable="$reliable" --duration=20 --warmup=2 --loss="$loss" \
+                --mode="$mode" \
                 --out="$S_OUT" &
               SPID=$!
               sleep 0.2
-              timeout 90s "$BIN" --library="$lib" --role=client \
+              timeout 60s "$BIN" --library="$lib" --role=client \
                 --host=127.0.0.1 --port="$PORT" \
                 --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
-                --duration=30 --warmup=2 --loss="$loss" \
+                --duration=20 --warmup=2 --loss="$loss" --mode="$mode" \
                 --out="$C_OUT" || true
             fi
 

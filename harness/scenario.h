@@ -8,6 +8,7 @@ namespace rudp_bench {
 
 enum class Role { Server, Client };
 enum class Reliability { Reliable, Unreliable, NotApplicable };
+enum class ServerMode { Echo, Broadcast };
 
 struct ScenarioConfig {
   std::string library;
@@ -21,6 +22,7 @@ struct ScenarioConfig {
   uint32_t duration_s = 30;
   uint32_t warmup_s = 2;
   double loss_pct = 0.0;          // メタデータ(tc は外側で設定済み前提)
+  ServerMode mode = ServerMode::Echo;  // echo: 1:1 / broadcast: 1:N (全 conn)
   std::string out_path;
 };
 

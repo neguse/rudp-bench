@@ -15,6 +15,7 @@ void register_slikenet_adapter();
 void register_udt4_adapter();
 void register_yojimbo_adapter();
 void register_gns_adapter();
+void register_msquic_adapter();
 }  // namespace rudp_bench
 
 int main(int argc, const char* argv[]) {
@@ -26,6 +27,7 @@ int main(int argc, const char* argv[]) {
   rudp_bench::register_udt4_adapter();
   rudp_bench::register_yojimbo_adapter();
   rudp_bench::register_gns_adapter();
+  rudp_bench::register_msquic_adapter();
 
   auto cfg_opt = rudp_bench::parse_scenario(argc, argv);
   if (!cfg_opt) {
@@ -57,6 +59,7 @@ int main(int argc, const char* argv[]) {
       row.rate = cfg.rate_per_conn;
       row.loss = cfg.loss_pct;
       row.duration_s = cfg.duration_s;
+      row.mode = (cfg.mode == rudp_bench::ServerMode::Broadcast) ? "broadcast" : "echo";
       if (!cfg.out_path.empty()) {
         std::ofstream f(cfg.out_path);
         rudp_bench::write_header(f);

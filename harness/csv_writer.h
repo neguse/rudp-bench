@@ -27,6 +27,7 @@ struct CsvRow {
   uint64_t rss_mb = 0;
   uint64_t connect_ms = 0;
   uint32_t duration_s = 0;
+  std::string mode = "echo";       // "echo" / "broadcast"
 };
 
 void write_header(std::ostream& os);

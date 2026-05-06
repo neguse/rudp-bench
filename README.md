@@ -5,8 +5,7 @@ See `docs/superpowers/specs/2026-04-28-rudp-bench-design.md` for the full design
 
 ## Status
 
-Plan 9 + Plan 5 complete: harness + `raw_udp` + `mini_rudp` baselines + ENet + KCP + SLikeNet + UDT4 + yojimbo + GNS + LiteNetLib adapters.
-Subsequent plans add msquic adapter.
+Plan 3-9 complete (all 10 adapters): harness + `raw_udp` + `mini_rudp` baselines + ENet + KCP + SLikeNet + UDT4 + yojimbo + GNS + LiteNetLib + msquic adapters.
 
 | ライブラリ | 暗号 | 状態 |
 |---|---|---|
@@ -19,6 +18,7 @@ Subsequent plans add msquic adapter.
 | yojimbo | **on** (libsodium 必須) | ✅ |
 | gns | **on** (GNS デフォルト) | ✅ |
 | litenetlib | off (.NET 8 独立バイナリ) | ✅ |
+| msquic | **on** (QUIC TLS, self-signed cert) | ✅ |
 
 ## Dependencies
 
@@ -26,6 +26,7 @@ Subsequent plans add msquic adapter.
 sudo apt-get install libsodium-dev libmbedtls-dev                   # yojimbo
 sudo apt-get install protobuf-compiler libprotobuf-dev libssl-dev   # gns
 sudo apt-get install dotnet-sdk-8.0                                 # litenetlib (or net10)
+sudo apt-get install libnuma-dev                                    # msquic
 ```
 
 UDT4 は SourceForge tarball を CMake `FetchContent` で configure 時に取得するので追加 dep 不要。
@@ -61,10 +62,10 @@ dotnet が見つからない場合 LiteNetLib ビルドはスキップされ、�
 ## Phase 1 sweep
 
 ```
-scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns --results=results/phase1.csv
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib --results=results/phase1.csv
 
 # with tc loss injection (requires sudo)
-scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns --results=results/phase1.csv --loss-injection
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib --results=results/phase1.csv --loss-injection
 
 python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase1_table.md
 ```

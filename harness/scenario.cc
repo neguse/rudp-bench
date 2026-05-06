@@ -43,6 +43,12 @@ std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]) {
     else if (starts_with(a, "--duration=")) c.duration_s = std::atoi(value(a, "--duration="));
     else if (starts_with(a, "--warmup=")) c.warmup_s = std::atoi(value(a, "--warmup="));
     else if (starts_with(a, "--loss=")) c.loss_pct = std::atof(value(a, "--loss="));
+    else if (starts_with(a, "--mode=")) {
+      const char* v = value(a, "--mode=");
+      if (std::strcmp(v, "echo") == 0) c.mode = ServerMode::Echo;
+      else if (std::strcmp(v, "broadcast") == 0) c.mode = ServerMode::Broadcast;
+      else return std::nullopt;
+    }
     else if (starts_with(a, "--out=")) c.out_path = value(a, "--out=");
     else {
       std::cerr << "unknown flag: " << a << "\n";

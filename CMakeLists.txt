@@ -30,6 +30,7 @@ add_subdirectory(adapters/slikenet)
 add_subdirectory(adapters/udt4)
 add_subdirectory(adapters/yojimbo)
 add_subdirectory(adapters/gns)
+add_subdirectory(adapters/msquic)
 
 # LiteNetLib: .NET 8 独立バイナリ — cmake --build がここで dotnet build を呼ぶ
 find_program(DOTNET_EXECUTABLE dotnet)
