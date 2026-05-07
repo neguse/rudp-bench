@@ -221,9 +221,15 @@ static CsvRow RunClient(Config cfg)
     var rtt = new LatencyHist();
     var throughput = new ThroughputCounter();
     var delivery = new DeliveryTracker();
+    var tick = new ClientTickStats();
 
     // ペーシング: コネクションごとの次回送信時刻(ticks)
     long intervalTicks = cfg.Rate > 0 ? Stopwatch.Frequency / (long)cfg.Rate : 0;
+    ulong missedBudgetUs = TickUtil.PacingBudgetUs(cfg.Rate);
+    ulong targetOffered = cfg.Rate > 0
+        ? (ulong)cfg.Rate * cfg.Conns * cfg.DurationS
+        : 0;
+    ulong outstanding = 0;
     var nextSendTicks = new long[cfg.Conns];
     long t0 = Stopwatch.GetTimestamp();
     for (int i = 0; i < cfg.Conns; i++) nextSendTicks[i] = t0;
@@ -242,13 +248,19 @@ static CsvRow RunClient(Config cfg)
         nowTicks = Stopwatch.GetTimestamp();
         if (nowTicks >= tailUntilTicks) break;
 
-        bool inMeasure = nowTicks >= warmupEndTicks;
+        bool inDiag = nowTicks >= warmupEndTicks;
+        bool inActiveSend = nowTicks >= warmupEndTicks && nowTicks < runEndTicks;
+        tick.RecordTick(nowTicks, inDiag);
 
         if (nowTicks < runEndTicks)
         {
             for (uint i = 0; i < cfg.Conns; i++)
             {
                 if (nowTicks < nextSendTicks[i]) continue;
+                ulong lagUs = 0;
+                if (cfg.Rate > 0 && nowTicks > nextSendTicks[i])
+                    lagUs = TickUtil.TicksToUs(nowTicks - nextSendTicks[i]);
+                if (inActiveSend) tick.RecordSendDue(lagUs, missedBudgetUs);
 
                 ulong localSeq = seqCounters[i]++;
                 // src_idx を上位 32bit に乗せて global seq に
@@ -261,10 +273,13 @@ static CsvRow RunClient(Config cfg)
 
                 // LiteNetLib 2.x: Send() は void を返す。送信失敗の検出は省略し常に MarkSent
                 peers[i].Send(payload, deliveryMethod);
-                if (inMeasure)
+                if (inActiveSend)
                 {
+                    tick.RecordAccepted();
                     uint expected = cfg.Mode == "broadcast" ? cfg.Conns : 1u;
                     for (uint k = 0; k < expected; k++) delivery.MarkSent(globalSeq, i);
+                    outstanding += expected;
+                    tick.RecordOutstanding(outstanding);
                 }
 
                 if (intervalTicks > 0)
@@ -277,8 +292,10 @@ static CsvRow RunClient(Config cfg)
 
         for (uint i = 0; i < cfg.Conns; i++) managers[i].PollEvents();
 
+        ulong drainedThisTick = 0;
         foreach (var (connId, data) in inbox)
         {
+            drainedThisTick++;
             nowTicks = Stopwatch.GetTimestamp();
             bool inMeasureNow = nowTicks >= warmupEndTicks;
 
@@ -293,14 +310,30 @@ static CsvRow RunClient(Config cfg)
             {
                 rtt.RecordUs(rttUs);
                 throughput.Record((ulong)data.Length);
-                delivery.MarkReceived(seq, connId);
+                if (delivery.MarkReceived(seq, connId) && outstanding > 0)
+                    outstanding--;
             }
         }
+        if (inDiag && drainedThisTick > 0) tick.RecordRecvDrained(drainedThisTick);
         inbox.Clear();
     }
 
     ps.End();
     for (uint i = 0; i < cfg.Conns; i++) managers[i].Stop();
+
+    ulong tickGapP99Us = tick.TickGapP99Us;
+    ulong pacingLagP99Us = tick.PacingLagP99Us;
+    double offeredRatio = targetOffered > 0 ? (double)tick.Offered / targetOffered : 1.0;
+    double acceptedRatio = tick.Offered > 0 ? (double)tick.Accepted / tick.Offered : 0.0;
+    bool tickOk = tick.TickSamples > 0 &&
+        tickGapP99Us <= 250 &&
+        acceptedRatio >= 0.99;
+    if (cfg.Rate > 0)
+    {
+        tickOk = tickOk &&
+            offeredRatio >= 0.99 &&
+            pacingLagP99Us <= missedBudgetUs;
+    }
 
     return new CsvRow
     {
@@ -325,6 +358,19 @@ static CsvRow RunClient(Config cfg)
         ConnectMs = connectMs,
         DurationS = cfg.DurationS,
         Mode = cfg.Mode,
+        ClientTickGapP99Us = tickGapP99Us,
+        ClientTickGapMaxUs = tick.TickGapMaxUs,
+        ClientPacingLagP99Us = pacingLagP99Us,
+        ClientPacingLagMaxUs = tick.PacingLagMaxUs,
+        ClientMissedPacing = tick.MissedPacing,
+        ClientOffered = tick.Offered,
+        ClientAccepted = tick.Accepted,
+        ClientOfferedRatio = offeredRatio,
+        ClientAcceptedRatio = acceptedRatio,
+        ClientRecvDrainedP99 = tick.RecvDrainedP99,
+        ClientRecvDrainedMax = tick.RecvDrainedMax,
+        ClientOutstandingMax = tick.OutstandingMax,
+        ClientTickOk = tickOk ? 1u : 0u,
     };
 }
 
@@ -335,7 +381,13 @@ static CsvRow RunClient(Config cfg)
 static string CsvHeader() =>
     "library,encryption,phase,reliable,size,conns,rate,loss," +
     "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us," +
-    "delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode";
+    "delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode," +
+    "client_tick_gap_p99_us,client_tick_gap_max_us," +
+    "client_pacing_lag_p99_us,client_pacing_lag_max_us," +
+    "client_missed_pacing,client_offered,client_accepted," +
+    "client_offered_ratio,client_accepted_ratio," +
+    "client_recv_drained_p99,client_recv_drained_max," +
+    "client_outstanding_max,client_tick_ok";
 
 static string FormatRow(CsvRow r) =>
     $"{r.Library},{r.Encryption},{r.Phase},{r.Reliable}," +
@@ -347,7 +399,14 @@ static string FormatRow(CsvRow r) =>
     $"{r.Delivered},{r.Sent}," +
     $"{r.DeliveryRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.CpuPct.ToString("F2", CultureInfo.InvariantCulture)}," +
-    $"{r.RssMb},{r.ConnectMs},{r.DurationS},{r.Mode}";
+    $"{r.RssMb},{r.ConnectMs},{r.DurationS},{r.Mode}," +
+    $"{r.ClientTickGapP99Us},{r.ClientTickGapMaxUs}," +
+    $"{r.ClientPacingLagP99Us},{r.ClientPacingLagMaxUs}," +
+    $"{r.ClientMissedPacing},{r.ClientOffered},{r.ClientAccepted}," +
+    $"{r.ClientOfferedRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
+    $"{r.ClientAcceptedRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
+    $"{r.ClientRecvDrainedP99},{r.ClientRecvDrainedMax}," +
+    $"{r.ClientOutstandingMax},{r.ClientTickOk}";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -397,6 +456,118 @@ class CsvRow
     public ulong ConnectMs;
     public uint DurationS;
     public string Mode = "echo";
+    public ulong ClientTickGapP99Us;
+    public ulong ClientTickGapMaxUs;
+    public ulong ClientPacingLagP99Us;
+    public ulong ClientPacingLagMaxUs;
+    public ulong ClientMissedPacing;
+    public ulong ClientOffered;
+    public ulong ClientAccepted;
+    public double ClientOfferedRatio;
+    public double ClientAcceptedRatio;
+    public ulong ClientRecvDrainedP99;
+    public ulong ClientRecvDrainedMax;
+    public ulong ClientOutstandingMax;
+    public uint ClientTickOk;
+}
+
+static class TickUtil
+{
+    public static ulong TicksToUs(long ticks) =>
+        ticks <= 0 ? 0UL : (ulong)(ticks * 1_000_000L / Stopwatch.Frequency);
+
+    public static ulong PacingBudgetUs(uint ratePerConn)
+    {
+        if (ratePerConn == 0) return 0;
+        ulong intervalUs = 1_000_000UL / ratePerConn;
+        return Math.Max(20UL, Math.Min(100UL, intervalUs / 10UL));
+    }
+}
+
+class BoundedHistogram
+{
+    private readonly ulong[] bins_;
+    private ulong count_;
+    private ulong max_;
+    private ulong overflow_;
+
+    public BoundedHistogram(int maxExact)
+    {
+        bins_ = new ulong[maxExact + 1];
+    }
+
+    public void Record(ulong value)
+    {
+        count_++;
+        if (value > max_) max_ = value;
+        if (value < (ulong)bins_.Length)
+            bins_[value]++;
+        else
+            overflow_++;
+    }
+
+    public ulong PercentilePerMille(uint perMille)
+    {
+        if (count_ == 0) return 0;
+        ulong target = (count_ * perMille + 999) / 1000;
+        ulong seen = 0;
+        for (int i = 0; i < bins_.Length; i++)
+        {
+            seen += bins_[i];
+            if (seen >= target) return (ulong)i;
+        }
+        _ = overflow_;
+        return max_;
+    }
+
+    public ulong Max => max_;
+    public ulong Count => count_;
+}
+
+class ClientTickStats
+{
+    private readonly BoundedHistogram tickGapUs_ = new(10_000);
+    private readonly BoundedHistogram pacingLagUs_ = new(10_000);
+    private readonly BoundedHistogram recvDrained_ = new(10_000);
+    private bool haveLastTick_;
+    private long lastTick_;
+
+    public ulong MissedPacing { get; private set; }
+    public ulong Offered { get; private set; }
+    public ulong Accepted { get; private set; }
+    public ulong OutstandingMax { get; private set; }
+
+    public void RecordTick(long nowTicks, bool inDiag)
+    {
+        if (haveLastTick_ && inDiag)
+            tickGapUs_.Record(TickUtil.TicksToUs(nowTicks - lastTick_));
+        lastTick_ = nowTicks;
+        haveLastTick_ = true;
+    }
+
+    public void RecordSendDue(ulong lagUs, ulong missedBudgetUs)
+    {
+        Offered++;
+        pacingLagUs_.Record(lagUs);
+        if (lagUs > missedBudgetUs) MissedPacing++;
+    }
+
+    public void RecordAccepted() => Accepted++;
+
+    public void RecordRecvDrained(ulong n) => recvDrained_.Record(n);
+
+    public void RecordOutstanding(ulong n)
+    {
+        if (n > OutstandingMax) OutstandingMax = n;
+    }
+
+    public ulong TickSamples => tickGapUs_.Count;
+    public ulong TickGapP99Us => tickGapUs_.PercentilePerMille(990);
+    public ulong TickGapMaxUs => tickGapUs_.Max;
+    public ulong PacingLagP99Us => pacingLagUs_.PercentilePerMille(990);
+    public ulong PacingLagMaxUs => pacingLagUs_.Max;
+    public ulong RecvDrainedP99 => recvDrained_.PercentilePerMille(990);
+    public ulong RecvDrainedMax => recvDrained_.Max;
 }
 
 // ---------------------------------------------------------------------------
@@ -439,9 +610,11 @@ class DeliveryTracker
         ((ulong)connId << 48) | (seq & 0x0000FFFFFFFFFFFFul);
 
     public void MarkSent(ulong seq, uint connId) { sentCount_++; _ = Pack(seq, connId); }
-    public void MarkReceived(ulong seq, uint connId)
+    public bool MarkReceived(ulong seq, uint connId)
     {
-        if (receivedKeys_.Add(Pack(seq, connId))) receivedCount_++;
+        if (!receivedKeys_.Add(Pack(seq, connId))) return false;
+        receivedCount_++;
+        return true;
     }
 
     public ulong Sent => sentCount_;

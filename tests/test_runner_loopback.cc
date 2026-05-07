@@ -43,4 +43,6 @@ TEST(RunnerLoopback, RawUdpShortSession) {
   EXPECT_GT(row.sent, 100u);
   EXPECT_GT(row.delivered, 50u);
   EXPECT_GT(row.delivery_ratio, 0.5);
+  EXPECT_GT(row.client_offered, 100u);
+  EXPECT_EQ(row.client_tick_ok, 1u);
 }

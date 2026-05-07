@@ -80,3 +80,4 @@ python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase
 - `kcp` adapter の reliable 遅延は KCP の内部タイマ粒度(デフォルト 100ms、nodelay=1 で 10ms)に依存する。loopback ではタイマ粒度が RTT の支配項になるため、ENet / raw_udp より reliable RTT が高くなる傾向がある。`ikcp_update` 呼び出し頻度を上げることで改善できるが、CPU コストと要トレードオフ(Phase 2 バックログ)。
 - `kcp` adapter の unreliable は KCP を完全バイパスし raw sendto で実装するため、同モードの RTT は raw_udp と同程度になる。信頼性は持たない。
 - `udt4` は unreliable モードを持たないため、`--reliable=u` シナリオは `na` 行として記録される(計測なし)。adapter の `supports(false)` が false を返すことで harness が自動的に na を出力する。UDT4 は SOCK_STREAM over UDP でありメッセージ境界を持たないため、adapter 内部で 4 バイト LE 長プレフィックスによるフレーミングを行っている。ソースは system apt パッケージ `libudt-dev 4.11+dfsg1` を使用(GitHub fork は環境から到達不可のため)。
+- CSV 末尾の `client_*` 列は client が負荷発生器として破綻していないかを見る診断値。主目的の ranking 指標ではないが、`client_tick_ok=0` の行は pacing 遅延、send accept 率、または tick gap の影響で RTT/throughput が harness 側に汚染されている可能性がある。

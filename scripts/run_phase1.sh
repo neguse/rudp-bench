@@ -36,7 +36,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"; if [ "$LOSS_INJECT" = "1" ]; then sudo scripts/set_loss.sh clear >/dev/null 2>&1 || true; fi' EXIT
 
 # CSV header (1回だけ)
-echo "library,encryption,phase,reliable,size,conns,rate,loss,throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode" > "$RESULTS"
+echo "library,encryption,phase,reliable,size,conns,rate,loss,throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode,client_tick_gap_p99_us,client_tick_gap_max_us,client_pacing_lag_p99_us,client_pacing_lag_max_us,client_missed_pacing,client_offered,client_accepted,client_offered_ratio,client_accepted_ratio,client_recv_drained_p99,client_recv_drained_max,client_outstanding_max,client_tick_ok" > "$RESULTS"
 
 PORT_BASE=30000
 PORT=$PORT_BASE

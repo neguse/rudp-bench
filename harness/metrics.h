@@ -30,7 +30,7 @@ class ThroughputCounter {
 class DeliveryTracker {
  public:
   void mark_sent(uint64_t seq, uint32_t conn_id);
-  void mark_received(uint64_t seq, uint32_t conn_id);
+  bool mark_received(uint64_t seq, uint32_t conn_id);
   uint64_t sent() const { return sent_count_; }
   uint64_t received() const { return received_count_; }
   double delivery_ratio() const {

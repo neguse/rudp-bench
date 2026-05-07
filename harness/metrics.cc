@@ -28,9 +28,11 @@ void DeliveryTracker::mark_sent(uint64_t seq, uint32_t conn_id) {
   (void)pack(seq, conn_id);  // 送信側は count のみ管理
 }
 
-void DeliveryTracker::mark_received(uint64_t seq, uint32_t conn_id) {
+bool DeliveryTracker::mark_received(uint64_t seq, uint32_t conn_id) {
   uint64_t k = pack(seq, conn_id);
-  if (received_keys_.insert(k).second) ++received_count_;
+  if (!received_keys_.insert(k).second) return false;
+  ++received_count_;
+  return true;
 }
 
 }  // namespace rudp_bench

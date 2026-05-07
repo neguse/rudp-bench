@@ -28,6 +28,19 @@ struct CsvRow {
   uint64_t connect_ms = 0;
   uint32_t duration_s = 0;
   std::string mode = "echo";       // "echo" / "broadcast"
+  uint64_t client_tick_gap_p99_us = 0;
+  uint64_t client_tick_gap_max_us = 0;
+  uint64_t client_pacing_lag_p99_us = 0;
+  uint64_t client_pacing_lag_max_us = 0;
+  uint64_t client_missed_pacing = 0;
+  uint64_t client_offered = 0;
+  uint64_t client_accepted = 0;
+  double client_offered_ratio = 0.0;
+  double client_accepted_ratio = 0.0;
+  uint64_t client_recv_drained_p99 = 0;
+  uint64_t client_recv_drained_max = 0;
+  uint64_t client_outstanding_max = 0;
+  uint32_t client_tick_ok = 0;
 };
 
 void write_header(std::ostream& os);
