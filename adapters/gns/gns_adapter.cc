@@ -109,8 +109,11 @@ class GnsAdapter : public rudp_bench::Adapter {
       if (it == id_to_conn_.end()) return -1;
       hConn = it->second;
     }
+    // GNS の Nagle はデフォルト 5ms。msquic / yojimbo 等は Nagle 相当の遅延を
+    // 入れていないため、bench のフェアネスのため NoNagle を立てて即時送信する。
     int flags = reliable ? k_nSteamNetworkingSend_Reliable
                          : k_nSteamNetworkingSend_Unreliable;
+    flags |= k_nSteamNetworkingSend_NoNagle;
     EResult r = iface_->SendMessageToConnection(
         hConn, data, static_cast<uint32>(len), flags, nullptr);
     // k_EResultIgnored: unreliable dropped due to NoDelay — not an error

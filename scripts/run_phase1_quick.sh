@@ -11,12 +11,16 @@ set -euo pipefail
 LIBS="raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,litenetlib,msquic"
 BUILD_DIR="build"
 RESULTS="results/phase1_quick.csv"
+SIZE=100
+CONNS=10
 
 for arg in "$@"; do
   case "$arg" in
     --libraries=*) LIBS="${arg#*=}" ;;
     --build-dir=*) BUILD_DIR="${arg#*=}" ;;
     --results=*) RESULTS="${arg#*=}" ;;
+    --conns=*) CONNS="${arg#*=}" ;;
+    --size=*) SIZE="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
@@ -33,10 +37,8 @@ trap 'rm -rf "$TMP"' EXIT
 
 echo "library,encryption,phase,reliable,size,conns,rate,loss,throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode" > "$RESULTS"
 
-# 軸固定
+# 軸固定 (size, conns は --size, --conns で上書き可能)
 RELIABLE=r
-SIZE=100
-CONNS=10
 MODE=echo
 RATE=50
 LOSS=0
