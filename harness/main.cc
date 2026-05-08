@@ -31,7 +31,8 @@ int main(int argc, const char* argv[]) {
 
   auto cfg_opt = rudp_bench::parse_scenario(argc, argv);
   if (!cfg_opt) {
-    std::cerr << "usage: rudp-bench --library=<name> --role=server|client ...\n";
+    std::cerr << "usage: rudp-bench --library=<name> --role=server|client "
+                 "[--idle=spin|adaptive] ...\n";
     return 2;
   }
   auto& cfg = *cfg_opt;

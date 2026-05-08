@@ -95,6 +95,12 @@ uint64_t pacing_budget_us(uint32_t rate_per_conn) {
   return std::max<uint64_t>(20, std::min<uint64_t>(100, interval_us / 10));
 }
 
+constexpr std::chrono::microseconds kAdaptiveIdleCap{20};
+
+void adaptive_idle_for(std::chrono::microseconds d) {
+  if (d.count() > 0) std::this_thread::sleep_for(d);
+}
+
 }  // namespace
 
 CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
@@ -111,6 +117,7 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
     a.poll();
     size_t n; uint32_t cid;
     int r = a.recv(buf.data(), buf.size(), &n, &cid);
+    bool did_work = r != 0;
     if (r == 1) {
       known_conns.insert(cid);
       if (cfg.mode == ServerMode::Echo) {
@@ -121,8 +128,9 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
           a.send(target, buf.data(), n, reliable);
         }
       }
-    } else {
-      std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+    if (!did_work && cfg.idle_policy == IdlePolicy::Adaptive) {
+      adaptive_idle_for(kAdaptiveIdleCap);
     }
   }
   ps.end();
@@ -142,6 +150,7 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   row.rss_mb = ps.rss_max_mb();
   row.duration_s = cfg.duration_s;
   row.mode = (cfg.mode == ServerMode::Broadcast) ? "broadcast" : "echo";
+  row.idle_policy = idle_policy_name(cfg.idle_policy);
   return row;
 }
 
@@ -201,10 +210,12 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
     auto now = clock::now();
     bool in_active_send = now >= warmup_end && now < run_end;
     bool in_diag = now >= warmup_end;
+    bool did_work = false;
     tick.record_tick(now, in_diag);
     if (now < run_end) {
       for (uint32_t i = 0; i < cfg.conns; ++i) {
         if (now < next_send[i]) continue;
+        did_work = true;
         uint64_t lag_us = 0;
         if (cfg.rate_per_conn && now > next_send[i]) {
           lag_us = static_cast<uint64_t>(
@@ -259,6 +270,18 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
       }
     }
     if (in_diag && drained_this_tick > 0) tick.record_recv_drained(drained_this_tick);
+    if (drained_this_tick > 0) did_work = true;
+    if (!did_work && outstanding == 0 &&
+        cfg.idle_policy == IdlePolicy::Adaptive) {
+      auto sleep_for = kAdaptiveIdleCap;
+      if (cfg.rate_per_conn && clock::now() < run_end) {
+        auto next_due = *std::min_element(next_send.begin(), next_send.end());
+        auto until_due = std::chrono::duration_cast<std::chrono::microseconds>(
+            next_due - clock::now());
+        if (until_due < sleep_for) sleep_for = until_due;
+      }
+      adaptive_idle_for(sleep_for);
+    }
   }
   ps.end();
   a.close();
@@ -286,6 +309,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.connect_ms = connect_ms;
   row.duration_s = cfg.duration_s;
   row.mode = (cfg.mode == ServerMode::Broadcast) ? "broadcast" : "echo";
+  row.idle_policy = idle_policy_name(cfg.idle_policy);
   row.client_tick_gap_p99_us = tick.tick_gap_us.percentile_per_mille(990);
   row.client_tick_gap_max_us = tick.tick_gap_us.max();
   row.client_pacing_lag_p99_us = tick.pacing_lag_us.percentile_per_mille(990);

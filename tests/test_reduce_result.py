@@ -13,7 +13,7 @@ RAW_HEADER = (
     "library,encryption,phase,reliable,size,conns,rate,loss,"
     "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,"
     "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
-    "mode,client_tick_gap_p99_us,client_tick_gap_max_us,"
+    "mode,idle_policy,client_tick_gap_p99_us,client_tick_gap_max_us,"
     "client_pacing_lag_p99_us,client_pacing_lag_max_us,"
     "client_missed_pacing,client_attempted,client_accepted,"
     "client_attempted_ratio,client_accepted_ratio,"
@@ -44,6 +44,7 @@ BASE_RAW_ROW = {
     "connect_ms": "0",
     "duration_s": "2",
     "mode": "echo",
+    "idle_policy": "spin",
     "client_tick_gap_p99_us": "4",
     "client_tick_gap_max_us": "10",
     "client_pacing_lag_p99_us": "3",
@@ -173,6 +174,8 @@ def append_case(
             "2",
             "--warmup",
             "0",
+            "--idle",
+            "spin",
         ]
     )
 
@@ -302,6 +305,7 @@ def main() -> int:
         )
 
         canonical = by_scenario(read_rows(results))
+        scenario_rows = by_scenario(read_rows(scenarios))
         assert canonical["ok"]["valid"] == "1"
         assert canonical["ok"]["invalid_reason"] == "ok"
         assert canonical["ok"]["delivery_ratio"] == "1.0000"
@@ -318,6 +322,7 @@ def main() -> int:
         assert canonical["low_delivery_is_valid"]["valid"] == "1"
         assert canonical["low_delivery_is_valid"]["invalid_reason"] == "ok"
         assert canonical["ratio_recomputed"]["delivery_ratio"] == "0.5000"
+        assert scenario_rows["ok"]["idle_policy"] == "spin"
 
         diag = read_rows(diagnostics)
         assert len(diag) == 20

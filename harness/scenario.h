@@ -9,6 +9,7 @@ namespace rudp_bench {
 enum class Role { Server, Client };
 enum class Reliability { Reliable, Unreliable, NotApplicable };
 enum class ServerMode { Echo, Broadcast };
+enum class IdlePolicy { Spin, Adaptive };
 
 struct ScenarioConfig {
   std::string library;
@@ -23,9 +24,11 @@ struct ScenarioConfig {
   uint32_t warmup_s = 2;
   double loss_pct = 0.0;          // メタデータ(tc は外側で設定済み前提)
   ServerMode mode = ServerMode::Echo;  // echo: 1:1 / broadcast: 1:N (全 conn)
+  IdlePolicy idle_policy = IdlePolicy::Spin;
   std::string out_path;
 };
 
+const char* idle_policy_name(IdlePolicy p);
 std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]);
 
 }  // namespace rudp_bench

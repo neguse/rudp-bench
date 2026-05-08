@@ -17,6 +17,10 @@ const char* value(const char* s, const char* p) {
 
 }  // namespace
 
+const char* idle_policy_name(IdlePolicy p) {
+  return p == IdlePolicy::Adaptive ? "adaptive" : "spin";
+}
+
 std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]) {
   ScenarioConfig c;
   for (int i = 1; i < argc; ++i) {
@@ -47,6 +51,12 @@ std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]) {
       const char* v = value(a, "--mode=");
       if (std::strcmp(v, "echo") == 0) c.mode = ServerMode::Echo;
       else if (std::strcmp(v, "broadcast") == 0) c.mode = ServerMode::Broadcast;
+      else return std::nullopt;
+    }
+    else if (starts_with(a, "--idle=")) {
+      const char* v = value(a, "--idle=");
+      if (std::strcmp(v, "spin") == 0) c.idle_policy = IdlePolicy::Spin;
+      else if (std::strcmp(v, "adaptive") == 0) c.idle_policy = IdlePolicy::Adaptive;
       else return std::nullopt;
     }
     else if (starts_with(a, "--out=")) c.out_path = value(a, "--out=");

@@ -15,6 +15,7 @@ DIAGNOSTICS=""
 SCENARIOS=""
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RAW_DIR=""
+IDLE="spin"
 SIZE=100
 CONNS=10
 
@@ -27,11 +28,17 @@ for arg in "$@"; do
     --scenarios=*) SCENARIOS="${arg#*=}" ;;
     --run-id=*) RUN_ID="${arg#*=}" ;;
     --raw-dir=*) RAW_DIR="${arg#*=}" ;;
+    --idle=*) IDLE="${arg#*=}" ;;
     --conns=*) CONNS="${arg#*=}" ;;
     --size=*) SIZE="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
+
+if [ "$IDLE" != "spin" ] && [ "$IDLE" != "adaptive" ]; then
+  echo "invalid --idle: $IDLE" >&2
+  exit 2
+fi
 
 if [ -z "$DIAGNOSTICS" ]; then
   DIAGNOSTICS="${RESULTS%.csv}_diagnostics.csv"
@@ -67,7 +74,7 @@ PORT=$PORT_BASE
 for lib in ${LIBS//,/ }; do
   PORT=$((PORT + 1))
 
-  SCENARIO_ID="${lib}_${RELIABLE}_${SIZE}_${CONNS}_${RATE}_${MODE}_${LOSS}"
+  SCENARIO_ID="${lib}_${RELIABLE}_${SIZE}_${CONNS}_${RATE}_${MODE}_${LOSS}_${IDLE}"
   S_OUT="$RAW_DIR/s_${SCENARIO_ID}.csv"
   C_OUT="$RAW_DIR/c_${SCENARIO_ID}.csv"
   WARMUP_ARG=2
@@ -83,14 +90,14 @@ for lib in ${LIBS//,/ }; do
     TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + 10))
     timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
       --reliable="$RELIABLE" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" \
-      --mode="$MODE" --out="$S_OUT" &
+      --mode="$MODE" --idle="$IDLE" --out="$S_OUT" &
     SPID=$!
     sleep 0.5
     set +e
     timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=client \
       --host=127.0.0.1 --port="$PORT" \
       --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
-      --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" --mode="$MODE" \
+      --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
       --out="$C_OUT"
     C_STATUS=$?
     wait "$SPID" 2>/dev/null
@@ -99,14 +106,14 @@ for lib in ${LIBS//,/ }; do
   else
     timeout 60s "$BIN" --library="$lib" --role=server --port="$PORT" \
       --reliable="$RELIABLE" --duration="$DURATION" --warmup=2 --loss="$LOSS" \
-      --mode="$MODE" --out="$S_OUT" &
+      --mode="$MODE" --idle="$IDLE" --out="$S_OUT" &
     SPID=$!
     sleep 0.2
     set +e
     timeout 60s "$BIN" --library="$lib" --role=client \
       --host=127.0.0.1 --port="$PORT" \
       --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
-      --duration="$DURATION" --warmup=2 --loss="$LOSS" --mode="$MODE" \
+      --duration="$DURATION" --warmup=2 --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
       --out="$C_OUT"
     C_STATUS=$?
     wait "$SPID" 2>/dev/null
@@ -121,7 +128,7 @@ for lib in ${LIBS//,/ }; do
     --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
     --library "$lib" --reliable "$RELIABLE" --size "$SIZE" --conns "$CONNS" \
     --rate "$RATE" --loss "$LOSS" --mode "$MODE" \
-    --duration "$DURATION" --warmup "$WARMUP_ARG"
+    --duration "$DURATION" --warmup "$WARMUP_ARG" --idle "$IDLE"
 done
 
 echo "wrote $RESULTS"

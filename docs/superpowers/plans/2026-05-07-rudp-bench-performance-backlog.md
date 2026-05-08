@@ -195,7 +195,7 @@ stderr_path
   - Reducer fills diagnostics `attempted`, `accepted`, `delivered`, and recomputes `delivery_ratio = delivered / accepted`.
   - Legacy raw `sent` / `client_offered` remain reducer fallbacks only.
 
-- [ ] **PERF-004: Decide and encode idle policy instead of ad hoc sleeps**
+- [x] **PERF-004: Decide and encode idle policy instead of ad hoc sleeps**
 
   Problem:
   - Client currently spins, server sleeps 50us when idle. This creates asymmetric CPU and latency bias.
@@ -211,6 +211,13 @@ stderr_path
   - Every scenario has an explicit idle policy in metadata or diagnostics.
   - Adaptive mode does not exceed the accepted raw_udp RTT p99 delta threshold.
   - `client_tick_ok` remains the diagnostic gate, not client CPU.
+
+  Done:
+  - Added `--idle=spin|adaptive` to C++ harness and LiteNetLib.
+  - Default policy is `spin` for latency-focused runs.
+  - `adaptive` only idles when no send/recv work is due and the client has no outstanding expected delivery.
+  - Phase runners pass idle policy through to server/client and record it in `scenarios.csv`.
+  - Raw role CSVs include `idle_policy` for standalone runs.
 
 - [ ] **PERF-005: Make Phase 1 script match the intended benchmark matrix**
 

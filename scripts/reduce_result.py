@@ -73,6 +73,7 @@ SCENARIO_FIELDS = [
     "mode",
     "duration_s",
     "warmup_s",
+    "idle_policy",
 ]
 
 
@@ -280,6 +281,7 @@ def append(args: argparse.Namespace) -> int:
         "mode": args.mode,
         "duration_s": args.duration,
         "warmup_s": args.warmup,
+        "idle_policy": args.idle,
     })
 
     append_row(args.diagnostics, DIAGNOSTIC_FIELDS,
@@ -346,6 +348,7 @@ def main() -> int:
     append_p.add_argument("--mode", required=True)
     append_p.add_argument("--duration", required=True)
     append_p.add_argument("--warmup", required=True)
+    append_p.add_argument("--idle", default="spin", choices=["spin", "adaptive"])
     append_p.set_defaults(func=append)
 
     args = p.parse_args()

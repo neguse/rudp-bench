@@ -15,6 +15,7 @@ DIAGNOSTICS=""
 SCENARIOS=""
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RAW_DIR=""
+IDLE="spin"
 LOSS_INJECT="0"   # 0=skip, 1=apply via sudo
 
 for arg in "$@"; do
@@ -26,10 +27,16 @@ for arg in "$@"; do
     --scenarios=*) SCENARIOS="${arg#*=}" ;;
     --run-id=*) RUN_ID="${arg#*=}" ;;
     --raw-dir=*) RAW_DIR="${arg#*=}" ;;
+    --idle=*) IDLE="${arg#*=}" ;;
     --loss-injection) LOSS_INJECT=1 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
+
+if [ "$IDLE" != "spin" ] && [ "$IDLE" != "adaptive" ]; then
+  echo "invalid --idle: $IDLE" >&2
+  exit 2
+fi
 
 if [ -z "$DIAGNOSTICS" ]; then
   DIAGNOSTICS="${RESULTS%.csv}_diagnostics.csv"
@@ -70,7 +77,7 @@ for lib in ${LIBS//,/ }; do
               sudo scripts/set_loss.sh apply "$loss" >/dev/null
             fi
 
-            SCENARIO_ID="${lib}_${reliable}_${size}_${conns}_${rate}_${mode}_${loss}"
+            SCENARIO_ID="${lib}_${reliable}_${size}_${conns}_${rate}_${mode}_${loss}_${IDLE}"
             S_OUT="$RAW_DIR/s_${SCENARIO_ID}.csv"
             C_OUT="$RAW_DIR/c_${SCENARIO_ID}.csv"
             WARMUP_ARG=2
@@ -87,7 +94,7 @@ for lib in ${LIBS//,/ }; do
               TIMEOUT_S=$((20 + LITENETLIB_WARMUP + 10))
               timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
                 --reliable="$reliable" --duration=20 --warmup="$WARMUP_ARG" --loss="$loss" \
-                --mode="$mode" \
+                --mode="$mode" --idle="$IDLE" \
                 --out="$S_OUT" &
               SPID=$!
               sleep 0.5
@@ -95,7 +102,7 @@ for lib in ${LIBS//,/ }; do
               timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=client \
                 --host=127.0.0.1 --port="$PORT" \
                 --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
-                --duration=20 --warmup="$WARMUP_ARG" --loss="$loss" --mode="$mode" \
+                --duration=20 --warmup="$WARMUP_ARG" --loss="$loss" --mode="$mode" --idle="$IDLE" \
                 --out="$C_OUT"
               C_STATUS=$?
               wait "$SPID" 2>/dev/null
@@ -104,7 +111,7 @@ for lib in ${LIBS//,/ }; do
             else
               timeout 60s "$BIN" --library="$lib" --role=server --port="$PORT" \
                 --reliable="$reliable" --duration=20 --warmup=2 --loss="$loss" \
-                --mode="$mode" \
+                --mode="$mode" --idle="$IDLE" \
                 --out="$S_OUT" &
               SPID=$!
               sleep 0.2
@@ -112,7 +119,7 @@ for lib in ${LIBS//,/ }; do
               timeout 60s "$BIN" --library="$lib" --role=client \
                 --host=127.0.0.1 --port="$PORT" \
                 --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
-                --duration=20 --warmup=2 --loss="$loss" --mode="$mode" \
+                --duration=20 --warmup=2 --loss="$loss" --mode="$mode" --idle="$IDLE" \
                 --out="$C_OUT"
               C_STATUS=$?
               wait "$SPID" 2>/dev/null
@@ -127,7 +134,7 @@ for lib in ${LIBS//,/ }; do
               --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
               --library "$lib" --reliable "$reliable" --size "$size" --conns "$conns" \
               --rate "$rate" --loss "$loss" --mode "$mode" \
-              --duration 20 --warmup "$WARMUP_ARG"
+              --duration 20 --warmup "$WARMUP_ARG" --idle "$IDLE"
 
             if [ "$LOSS_INJECT" = "1" ]; then
               sudo scripts/set_loss.sh clear >/dev/null

@@ -8,7 +8,7 @@ TEST(Scenario, ParsesAllFlags) {
       "--host=127.0.0.1", "--port=9000",
       "--reliable=u", "--size=64", "--conns=4", "--rate=100",
       "--duration=30", "--warmup=2", "--loss=0",
-      "--out=/tmp/out.csv",
+      "--idle=adaptive", "--out=/tmp/out.csv",
   };
   int argc = sizeof(argv) / sizeof(argv[0]);
   auto cfg = rudp_bench::parse_scenario(argc, argv);
@@ -24,6 +24,8 @@ TEST(Scenario, ParsesAllFlags) {
   EXPECT_EQ(cfg->duration_s, 30u);
   EXPECT_EQ(cfg->warmup_s, 2u);
   EXPECT_DOUBLE_EQ(cfg->loss_pct, 0.0);
+  EXPECT_EQ(cfg->idle_policy, rudp_bench::IdlePolicy::Adaptive);
+  EXPECT_STREQ(rudp_bench::idle_policy_name(cfg->idle_policy), "adaptive");
   EXPECT_EQ(cfg->out_path, "/tmp/out.csv");
 }
 

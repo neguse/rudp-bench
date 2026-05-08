@@ -23,7 +23,7 @@ if (cfg == null)
 {
     Console.Error.WriteLine("usage: litenetlib_adapter --library=<name> --role=server|client " +
         "--host= --port= --reliable=r|u --size= --conns= --rate= " +
-        "--duration= --warmup= --loss= --out=");
+        "--duration= --warmup= --loss= --idle=spin|adaptive --out=");
     return 2;
 }
 
@@ -75,6 +75,11 @@ static Config? ParseArgs(string[] args)
             cfg.Mode = arg["--mode=".Length..];
             if (cfg.Mode != "echo" && cfg.Mode != "broadcast") return null;
         }
+        else if (arg.StartsWith("--idle="))
+        {
+            cfg.IdlePolicy = arg["--idle=".Length..];
+            if (cfg.IdlePolicy != "spin" && cfg.IdlePolicy != "adaptive") return null;
+        }
         else if (arg.StartsWith("--out=")) cfg.OutPath = arg["--out=".Length..];
         else { Console.Error.WriteLine($"unknown flag: {arg}"); return null; }
     }
@@ -119,6 +124,7 @@ static CsvRow RunServer(Config cfg)
     while (Stopwatch.GetTimestamp() < deadlineTicks)
     {
         manager.PollEvents();
+        bool didWork = inbox.Count > 0;
 
         foreach (var (peer, data) in inbox)
         {
@@ -135,7 +141,7 @@ static CsvRow RunServer(Config cfg)
         }
         inbox.Clear();
 
-        Thread.Sleep(0);
+        if (!didWork && cfg.IdlePolicy == "adaptive") Thread.Sleep(0);
     }
 
     ps.End();
@@ -155,6 +161,7 @@ static CsvRow RunServer(Config cfg)
         CpuPct = ps.CpuPct(),
         RssMb = ps.RssMbMax,
         Mode = cfg.Mode,
+        IdlePolicy = cfg.IdlePolicy,
     };
 }
 
@@ -251,6 +258,7 @@ static CsvRow RunClient(Config cfg)
 
         bool inDiag = nowTicks >= warmupEndTicks;
         bool inActiveSend = nowTicks >= warmupEndTicks && nowTicks < runEndTicks;
+        bool didWork = false;
         tick.RecordTick(nowTicks, inDiag);
 
         if (nowTicks < runEndTicks)
@@ -258,6 +266,7 @@ static CsvRow RunClient(Config cfg)
             for (uint i = 0; i < cfg.Conns; i++)
             {
                 if (nowTicks < nextSendTicks[i]) continue;
+                didWork = true;
                 ulong lagUs = 0;
                 if (cfg.Rate > 0 && nowTicks > nextSendTicks[i])
                     lagUs = TickUtil.TicksToUs(nowTicks - nextSendTicks[i]);
@@ -315,7 +324,10 @@ static CsvRow RunClient(Config cfg)
             }
         }
         if (inDiag && drainedThisTick > 0) tick.RecordRecvDrained(drainedThisTick);
+        if (drainedThisTick > 0) didWork = true;
         inbox.Clear();
+        if (!didWork && outstanding == 0 && cfg.IdlePolicy == "adaptive")
+            Thread.Sleep(0);
     }
 
     ps.End();
@@ -358,6 +370,7 @@ static CsvRow RunClient(Config cfg)
         ConnectMs = connectMs,
         DurationS = cfg.DurationS,
         Mode = cfg.Mode,
+        IdlePolicy = cfg.IdlePolicy,
         ClientTickGapP99Us = tickGapP99Us,
         ClientTickGapMaxUs = tick.TickGapMaxUs,
         ClientPacingLagP99Us = pacingLagP99Us,
@@ -381,7 +394,7 @@ static CsvRow RunClient(Config cfg)
 static string CsvHeader() =>
     "library,encryption,phase,reliable,size,conns,rate,loss," +
     "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us," +
-    "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode," +
+    "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode,idle_policy," +
     "client_tick_gap_p99_us,client_tick_gap_max_us," +
     "client_pacing_lag_p99_us,client_pacing_lag_max_us," +
     "client_missed_pacing,client_attempted,client_accepted," +
@@ -399,7 +412,7 @@ static string FormatRow(CsvRow r) =>
     $"{r.Delivered},{r.Accepted}," +
     $"{r.DeliveryRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.CpuPct.ToString("F2", CultureInfo.InvariantCulture)}," +
-    $"{r.RssMb},{r.ConnectMs},{r.DurationS},{r.Mode}," +
+    $"{r.RssMb},{r.ConnectMs},{r.DurationS},{r.Mode},{r.IdlePolicy}," +
     $"{r.ClientTickGapP99Us},{r.ClientTickGapMaxUs}," +
     $"{r.ClientPacingLagP99Us},{r.ClientPacingLagMaxUs}," +
     $"{r.ClientMissedPacing},{r.ClientAttempted},{r.ClientAccepted}," +
@@ -426,6 +439,7 @@ class Config
     public uint WarmupS = 5; // spec: JIT/GC ウォームアップのため 5 秒デフォルト
     public double Loss = 0.0;
     public string Mode = "echo";  // "echo" / "broadcast"
+    public string IdlePolicy = "spin"; // "spin" / "adaptive"
     public string OutPath = "";
 }
 
@@ -456,6 +470,7 @@ class CsvRow
     public ulong ConnectMs;
     public uint DurationS;
     public string Mode = "echo";
+    public string IdlePolicy = "spin";
     public ulong ClientTickGapP99Us;
     public ulong ClientTickGapMaxUs;
     public ulong ClientPacingLagP99Us;
