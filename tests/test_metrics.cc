@@ -16,14 +16,14 @@ TEST(LatencyHist, EmptyReturnsZero) {
   EXPECT_EQ(h.percentile_us(0.50), 0);
 }
 
-TEST(DeliveryTracker, CountsSentAndReceived) {
+TEST(DeliveryTracker, CountsAcceptedAndReceived) {
   DeliveryTracker d;
-  d.mark_sent(1, 0);
-  d.mark_sent(2, 0);
-  d.mark_sent(3, 0);
+  d.mark_accepted(1, 0);
+  d.mark_accepted(2, 0);
+  d.mark_accepted(3, 0);
   d.mark_received(1, 0);
   d.mark_received(3, 0);
-  EXPECT_EQ(d.sent(), 3u);
+  EXPECT_EQ(d.accepted(), 3u);
   EXPECT_EQ(d.received(), 2u);
   EXPECT_DOUBLE_EQ(d.delivery_ratio(), 2.0 / 3.0);
 }

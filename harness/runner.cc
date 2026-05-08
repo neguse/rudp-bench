@@ -54,7 +54,7 @@ struct ClientTickStats {
   BoundedHistogram pacing_lag_us{10'000};
   BoundedHistogram recv_drained{10'000};
   uint64_t missed_pacing = 0;
-  uint64_t offered = 0;
+  uint64_t attempted = 0;
   uint64_t accepted = 0;
   uint64_t outstanding_max = 0;
   bool have_last_tick = false;
@@ -71,13 +71,16 @@ struct ClientTickStats {
     have_last_tick = true;
   }
 
-  void record_send_due(uint64_t lag_us, uint64_t missed_budget_us) {
-    ++offered;
+  void record_send_due(uint64_t expected_deliveries, uint64_t lag_us,
+                       uint64_t missed_budget_us) {
+    attempted += expected_deliveries;
     pacing_lag_us.record(lag_us);
     if (lag_us > missed_budget_us) ++missed_pacing;
   }
 
-  void record_accepted() { ++accepted; }
+  void record_accepted(uint64_t expected_deliveries) {
+    accepted += expected_deliveries;
+  }
 
   void record_recv_drained(uint64_t n) { recv_drained.record(n); }
 
@@ -182,8 +185,10 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   std::vector<uint64_t> seq_counter(cfg.conns, 1);
   std::vector<uint8_t> rxbuf(65536);
   uint64_t outstanding = 0;
-  uint64_t target_offered =
-      static_cast<uint64_t>(cfg.rate_per_conn) * cfg.conns * cfg.duration_s;
+  uint32_t expected_per_send = (cfg.mode == ServerMode::Broadcast) ? cfg.conns : 1;
+  uint64_t target_attempted =
+      static_cast<uint64_t>(cfg.rate_per_conn) * cfg.conns * cfg.duration_s *
+      expected_per_send;
   uint64_t missed_budget = pacing_budget_us(cfg.rate_per_conn);
 
   bool reliable = (cfg.reliable == Reliability::Reliable);
@@ -207,7 +212,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
                   now - next_send[i])
                   .count());
         }
-        if (in_active_send) tick.record_send_due(lag_us, missed_budget);
+        if (in_active_send) tick.record_send_due(expected_per_send, lag_us, missed_budget);
         // ヘッダ書き込み: seq は (src_idx << 32 | local) でグローバルにユニーク化
         // (broadcast 時の dedup key が src 違いで衝突しないため)
         uint64_t local_seq = seq_counter[i]++;
@@ -218,13 +223,11 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
         std::memcpy(payload.data() + 8, &ts, 8);
         if (a.send(ids[i], payload.data(), payload.size(), reliable) == 0) {
           if (in_measure(now)) {
-            tick.record_accepted();
-            // echo: 期待受信 1, broadcast: 期待受信 cfg.conns
-            uint32_t expected = (cfg.mode == ServerMode::Broadcast) ? cfg.conns : 1;
-            for (uint32_t k = 0; k < expected; ++k) {
-              dt.mark_sent(global_seq, ids[i]);
+            tick.record_accepted(expected_per_send);
+            for (uint32_t k = 0; k < expected_per_send; ++k) {
+              dt.mark_accepted(global_seq, ids[i]);
             }
-            outstanding += expected;
+            outstanding += expected_per_send;
             tick.record_outstanding(outstanding);
           }
         }
@@ -276,7 +279,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.rtt_p95_us = rtt.percentile_us(0.95);
   row.rtt_p99_us = rtt.percentile_us(0.99);
   row.delivered = dt.received();
-  row.sent = dt.sent();
+  row.accepted = dt.accepted();
   row.delivery_ratio = dt.delivery_ratio();
   row.cpu_pct = ps.cpu_pct();
   row.rss_mb = ps.rss_max_mb();
@@ -288,16 +291,16 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.client_pacing_lag_p99_us = tick.pacing_lag_us.percentile_per_mille(990);
   row.client_pacing_lag_max_us = tick.pacing_lag_us.max();
   row.client_missed_pacing = tick.missed_pacing;
-  row.client_offered = tick.offered;
+  row.client_attempted = tick.attempted;
   row.client_accepted = tick.accepted;
-  row.client_offered_ratio =
-      target_offered ? static_cast<double>(tick.offered) /
-                           static_cast<double>(target_offered)
-                     : 1.0;
+  row.client_attempted_ratio =
+      target_attempted ? static_cast<double>(tick.attempted) /
+                             static_cast<double>(target_attempted)
+                       : 1.0;
   row.client_accepted_ratio =
-      tick.offered ? static_cast<double>(tick.accepted) /
-                         static_cast<double>(tick.offered)
-                   : 0.0;
+      tick.attempted ? static_cast<double>(tick.accepted) /
+                           static_cast<double>(tick.attempted)
+                     : 0.0;
   row.client_recv_drained_p99 = tick.recv_drained.percentile_per_mille(990);
   row.client_recv_drained_max = tick.recv_drained.max();
   row.client_outstanding_max = tick.outstanding_max;
@@ -305,7 +308,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
                  row.client_tick_gap_p99_us <= 250 &&
                  row.client_accepted_ratio >= 0.99;
   if (cfg.rate_per_conn) {
-    tick_ok = tick_ok && row.client_offered_ratio >= 0.99 &&
+    tick_ok = tick_ok && row.client_attempted_ratio >= 0.99 &&
               row.client_pacing_lag_p99_us <= missed_budget;
   }
   row.client_tick_ok = tick_ok ? 1 : 0;

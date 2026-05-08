@@ -101,7 +101,7 @@ stderr_path
   - `README.md`
 
   Done:
-  - Added `client_tick_gap_*`, `client_pacing_lag_*`, `client_offered`, `client_accepted`, `client_*_ratio`, `client_recv_drained_*`, `client_outstanding_max`, `client_tick_ok`.
+  - Added `client_tick_gap_*`, `client_pacing_lag_*`, `client_attempted`, `client_accepted`, `client_*_ratio`, `client_recv_drained_*`, `client_outstanding_max`, `client_tick_ok`.
   - Preserved existing CSV column order and appended diagnostic columns as an interim step before the canonical/diagnostic split.
   - Verified with `ctest --test-dir build --output-on-failure`.
 
@@ -174,7 +174,7 @@ stderr_path
   - Low `delivery_ratio` remains a valid performance result.
   - Added reducer tests for each invalid category.
 
-- [ ] **PERF-003: Track attempted, accepted, and delivered in diagnostics**
+- [x] **PERF-003: Track attempted, accepted, and delivered in diagnostics**
 
   Problem:
   - Runner counts `sent` only when `Adapter::send()` succeeds. Backpressure, queue-full, and `CanSendMessage=false` need to be visible for investigation, but not shown in the normal result view.
@@ -188,6 +188,12 @@ stderr_path
   Acceptance:
   - Overload can be diagnosed from `diagnostics.csv`.
   - Canonical result remains focused on delivery and RTT.
+
+  Done:
+  - Renamed raw role CSV `sent` to `accepted` and `client_offered` to `client_attempted`.
+  - C++ and LiteNetLib runners now count attempted/accepted as expected delivery slots, so broadcast uses the same denominator as delivery.
+  - Reducer fills diagnostics `attempted`, `accepted`, `delivered`, and recomputes `delivery_ratio = delivered / accepted`.
+  - Legacy raw `sent` / `client_offered` remain reducer fallbacks only.
 
 - [ ] **PERF-004: Decide and encode idle policy instead of ad hoc sleeps**
 

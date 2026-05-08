@@ -21,7 +21,7 @@ struct CsvRow {
   uint64_t rtt_p95_us = 0;
   uint64_t rtt_p99_us = 0;
   uint64_t delivered = 0;
-  uint64_t sent = 0;
+  uint64_t accepted = 0;
   double delivery_ratio = 0.0;
   double cpu_pct = 0.0;
   uint64_t rss_mb = 0;
@@ -33,9 +33,9 @@ struct CsvRow {
   uint64_t client_pacing_lag_p99_us = 0;
   uint64_t client_pacing_lag_max_us = 0;
   uint64_t client_missed_pacing = 0;
-  uint64_t client_offered = 0;
+  uint64_t client_attempted = 0;
   uint64_t client_accepted = 0;
-  double client_offered_ratio = 0.0;
+  double client_attempted_ratio = 0.0;
   double client_accepted_ratio = 0.0;
   uint64_t client_recv_drained_p99 = 0;
   uint64_t client_recv_drained_max = 0;

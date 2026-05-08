@@ -23,9 +23,9 @@ static uint64_t pack(uint64_t seq, uint32_t conn_id) {
   return (static_cast<uint64_t>(conn_id) << 48) | (seq & 0x0000FFFFFFFFFFFFULL);
 }
 
-void DeliveryTracker::mark_sent(uint64_t seq, uint32_t conn_id) {
-  ++sent_count_;
-  (void)pack(seq, conn_id);  // 送信側は count のみ管理
+void DeliveryTracker::mark_accepted(uint64_t seq, uint32_t conn_id) {
+  ++accepted_count_;
+  (void)pack(seq, conn_id);  // 受理側は count のみ管理
 }
 
 bool DeliveryTracker::mark_received(uint64_t seq, uint32_t conn_id) {

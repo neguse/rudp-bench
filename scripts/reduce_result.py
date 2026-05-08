@@ -156,10 +156,43 @@ def role_exit_reason(role: str, raw: Optional[Dict[str, str]], status: str) -> s
 def accepted_count(client: Optional[Dict[str, str]]) -> int:
     if client is None:
         return 0
+    accepted = int_or_none(client.get("accepted"))
+    if accepted is not None:
+        return accepted
     accepted = int_or_none(client.get("client_accepted"))
     if accepted is not None:
         return accepted
     return int_or_none(client.get("sent")) or 0
+
+
+def client_attempted(raw: Dict[str, str]) -> str:
+    return raw.get("client_attempted", raw.get("client_offered", ""))
+
+
+def client_accepted(raw: Dict[str, str]) -> str:
+    return raw.get("accepted", raw.get("client_accepted", raw.get("sent", "")))
+
+
+def client_accepted_ratio(raw: Dict[str, str]) -> str:
+    attempted = int_or_none(client_attempted(raw))
+    accepted = int_or_none(client_accepted(raw))
+    if attempted is None or accepted is None:
+        return raw.get("client_accepted_ratio", "")
+    if attempted == 0:
+        return "0.0000"
+    return f"{accepted / attempted:.4f}"
+
+
+def canonical_delivery_ratio(client: Optional[Dict[str, str]]) -> str:
+    if client is None:
+        return ""
+    delivered = int_or_none(client.get("delivered"))
+    accepted = accepted_count(client)
+    if delivered is None:
+        return client.get("delivery_ratio", "")
+    if accepted == 0:
+        return "0.0000"
+    return f"{delivered / accepted:.4f}"
 
 
 def invalid_reason(server: Optional[Dict[str, str]],
@@ -217,11 +250,11 @@ def diagnostic_row(run_id: str, scenario_id: str, role: str,
         "exit_status": status,
         "cpu_pct": raw.get("cpu_pct", ""),
         "rss_mb": raw.get("rss_mb", ""),
-        "attempted": raw.get("client_offered", "") if is_client else "",
-        "accepted": raw.get("client_accepted", raw.get("sent", "")) if is_client else "",
+        "attempted": client_attempted(raw) if is_client else "",
+        "accepted": client_accepted(raw) if is_client else "",
         "delivered": raw.get("delivered", "") if is_client else "",
-        "accepted_ratio": raw.get("client_accepted_ratio", "") if is_client else "",
-        "delivery_ratio": raw.get("delivery_ratio", "") if is_client else "",
+        "accepted_ratio": client_accepted_ratio(raw) if is_client else "",
+        "delivery_ratio": canonical_delivery_ratio(raw) if is_client else "",
         "client_tick_ok": raw.get("client_tick_ok", "") if is_client else "",
         "client_tick_gap_p99_us": raw.get("client_tick_gap_p99_us", "") if is_client else "",
         "client_pacing_lag_p99_us": raw.get("client_pacing_lag_p99_us", "") if is_client else "",
@@ -262,7 +295,7 @@ def append(args: argparse.Namespace) -> int:
         "library": args.library,
         "valid": valid,
         "invalid_reason": reason,
-        "delivery_ratio": client.get("delivery_ratio", "") if client else "",
+        "delivery_ratio": canonical_delivery_ratio(client),
         "rtt_p50_us": client.get("rtt_p50_us", "") if client else "",
         "rtt_p95_us": client.get("rtt_p95_us", "") if client else "",
         "rtt_p99_us": client.get("rtt_p99_us", "") if client else "",

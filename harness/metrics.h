@@ -29,15 +29,15 @@ class ThroughputCounter {
 
 class DeliveryTracker {
  public:
-  void mark_sent(uint64_t seq, uint32_t conn_id);
+  void mark_accepted(uint64_t seq, uint32_t conn_id);
   bool mark_received(uint64_t seq, uint32_t conn_id);
-  uint64_t sent() const { return sent_count_; }
+  uint64_t accepted() const { return accepted_count_; }
   uint64_t received() const { return received_count_; }
   double delivery_ratio() const {
-    return sent_count_ ? double(received_count_) / double(sent_count_) : 0.0;
+    return accepted_count_ ? double(received_count_) / double(accepted_count_) : 0.0;
   }
  private:
-  uint64_t sent_count_ = 0;
+  uint64_t accepted_count_ = 0;
   uint64_t received_count_ = 0;
   // 重複受信は数えない
   std::unordered_set<uint64_t> received_keys_;

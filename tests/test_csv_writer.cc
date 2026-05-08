@@ -22,7 +22,7 @@ TEST(CsvWriter, WritesHeaderAndRow) {
   r.rtt_p95_us = 80;
   r.rtt_p99_us = 200;
   r.delivered = 1000;
-  r.sent = 1000;
+  r.accepted = 1000;
   r.delivery_ratio = 1.0;
   r.cpu_pct = 5.5;
   r.rss_mb = 12;

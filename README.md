@@ -70,7 +70,7 @@ scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojim
 python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase1_table.md
 ```
 
-`results/phase1.csv` は比較用の canonical result で、主に `delivery_ratio` と RTT p50/p95/p99、`server_cpu_pct` だけを見る。スイープ時には調査用に `results/phase1_diagnostics.csv` と `results/phase1_scenarios.csv`、role 別 raw CSV を含む `results/phase1_raw/<run_id>/` も出力される。client tick や accepted/send 状態などの詳細は diagnostics 側を見る。
+`results/phase1.csv` は比較用の canonical result で、主に `delivery_ratio` と RTT p50/p95/p99、`server_cpu_pct` だけを見る。スイープ時には調査用に `results/phase1_diagnostics.csv` と `results/phase1_scenarios.csv`、role 別 raw CSV を含む `results/phase1_raw/<run_id>/` も出力される。client tick や attempted/accepted 状態などの詳細は diagnostics 側を見る。
 
 ## 既知の挙動・制限
 

@@ -4,7 +4,7 @@
 // CSV column order (mirrors harness/csv_writer.h write_row exactly):
 //   library,encryption,phase,reliable,size,conns,rate,loss,
 //   throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,
-//   delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s
+//   delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s
 
 using LiteNetLib;
 using System;
@@ -226,8 +226,9 @@ static CsvRow RunClient(Config cfg)
     // ペーシング: コネクションごとの次回送信時刻(ticks)
     long intervalTicks = cfg.Rate > 0 ? Stopwatch.Frequency / (long)cfg.Rate : 0;
     ulong missedBudgetUs = TickUtil.PacingBudgetUs(cfg.Rate);
-    ulong targetOffered = cfg.Rate > 0
-        ? (ulong)cfg.Rate * cfg.Conns * cfg.DurationS
+    uint expectedPerSend = cfg.Mode == "broadcast" ? cfg.Conns : 1u;
+    ulong targetAttempted = cfg.Rate > 0
+        ? (ulong)cfg.Rate * cfg.Conns * cfg.DurationS * expectedPerSend
         : 0;
     ulong outstanding = 0;
     var nextSendTicks = new long[cfg.Conns];
@@ -260,7 +261,7 @@ static CsvRow RunClient(Config cfg)
                 ulong lagUs = 0;
                 if (cfg.Rate > 0 && nowTicks > nextSendTicks[i])
                     lagUs = TickUtil.TicksToUs(nowTicks - nextSendTicks[i]);
-                if (inActiveSend) tick.RecordSendDue(lagUs, missedBudgetUs);
+                if (inActiveSend) tick.RecordSendDue(expectedPerSend, lagUs, missedBudgetUs);
 
                 ulong localSeq = seqCounters[i]++;
                 // src_idx を上位 32bit に乗せて global seq に
@@ -271,14 +272,13 @@ static CsvRow RunClient(Config cfg)
                 BitConverter.TryWriteBytes(payload.AsSpan(0, 8), globalSeq);
                 BitConverter.TryWriteBytes(payload.AsSpan(8, 8), tsNs);
 
-                // LiteNetLib 2.x: Send() は void を返す。送信失敗の検出は省略し常に MarkSent
+                // LiteNetLib 2.x: Send() は void を返す。送信失敗の検出は省略し常に accepted 扱い。
                 peers[i].Send(payload, deliveryMethod);
                 if (inActiveSend)
                 {
-                    tick.RecordAccepted();
-                    uint expected = cfg.Mode == "broadcast" ? cfg.Conns : 1u;
-                    for (uint k = 0; k < expected; k++) delivery.MarkSent(globalSeq, i);
-                    outstanding += expected;
+                    tick.RecordAccepted(expectedPerSend);
+                    for (uint k = 0; k < expectedPerSend; k++) delivery.MarkAccepted(globalSeq, i);
+                    outstanding += expectedPerSend;
                     tick.RecordOutstanding(outstanding);
                 }
 
@@ -323,15 +323,15 @@ static CsvRow RunClient(Config cfg)
 
     ulong tickGapP99Us = tick.TickGapP99Us;
     ulong pacingLagP99Us = tick.PacingLagP99Us;
-    double offeredRatio = targetOffered > 0 ? (double)tick.Offered / targetOffered : 1.0;
-    double acceptedRatio = tick.Offered > 0 ? (double)tick.Accepted / tick.Offered : 0.0;
+    double attemptedRatio = targetAttempted > 0 ? (double)tick.Attempted / targetAttempted : 1.0;
+    double acceptedRatio = tick.Attempted > 0 ? (double)tick.Accepted / tick.Attempted : 0.0;
     bool tickOk = tick.TickSamples > 0 &&
         tickGapP99Us <= 250 &&
         acceptedRatio >= 0.99;
     if (cfg.Rate > 0)
     {
         tickOk = tickOk &&
-            offeredRatio >= 0.99 &&
+            attemptedRatio >= 0.99 &&
             pacingLagP99Us <= missedBudgetUs;
     }
 
@@ -351,7 +351,7 @@ static CsvRow RunClient(Config cfg)
         RttP95Us = rtt.PercentileUs(0.95),
         RttP99Us = rtt.PercentileUs(0.99),
         Delivered = delivery.Received,
-        Sent = delivery.Sent,
+        Accepted = delivery.Accepted,
         DeliveryRatio = delivery.DeliveryRatio,
         CpuPct = ps.CpuPct(),
         RssMb = ps.RssMbMax,
@@ -363,9 +363,9 @@ static CsvRow RunClient(Config cfg)
         ClientPacingLagP99Us = pacingLagP99Us,
         ClientPacingLagMaxUs = tick.PacingLagMaxUs,
         ClientMissedPacing = tick.MissedPacing,
-        ClientOffered = tick.Offered,
+        ClientAttempted = tick.Attempted,
         ClientAccepted = tick.Accepted,
-        ClientOfferedRatio = offeredRatio,
+        ClientAttemptedRatio = attemptedRatio,
         ClientAcceptedRatio = acceptedRatio,
         ClientRecvDrainedP99 = tick.RecvDrainedP99,
         ClientRecvDrainedMax = tick.RecvDrainedMax,
@@ -381,11 +381,11 @@ static CsvRow RunClient(Config cfg)
 static string CsvHeader() =>
     "library,encryption,phase,reliable,size,conns,rate,loss," +
     "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us," +
-    "delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode," +
+    "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode," +
     "client_tick_gap_p99_us,client_tick_gap_max_us," +
     "client_pacing_lag_p99_us,client_pacing_lag_max_us," +
-    "client_missed_pacing,client_offered,client_accepted," +
-    "client_offered_ratio,client_accepted_ratio," +
+    "client_missed_pacing,client_attempted,client_accepted," +
+    "client_attempted_ratio,client_accepted_ratio," +
     "client_recv_drained_p99,client_recv_drained_max," +
     "client_outstanding_max,client_tick_ok";
 
@@ -396,14 +396,14 @@ static string FormatRow(CsvRow r) =>
     $"{r.ThroughputMbps.ToString("F3", CultureInfo.InvariantCulture)}," +
     $"{r.MsgPerSec}," +
     $"{r.RttP50Us},{r.RttP95Us},{r.RttP99Us}," +
-    $"{r.Delivered},{r.Sent}," +
+    $"{r.Delivered},{r.Accepted}," +
     $"{r.DeliveryRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.CpuPct.ToString("F2", CultureInfo.InvariantCulture)}," +
     $"{r.RssMb},{r.ConnectMs},{r.DurationS},{r.Mode}," +
     $"{r.ClientTickGapP99Us},{r.ClientTickGapMaxUs}," +
     $"{r.ClientPacingLagP99Us},{r.ClientPacingLagMaxUs}," +
-    $"{r.ClientMissedPacing},{r.ClientOffered},{r.ClientAccepted}," +
-    $"{r.ClientOfferedRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
+    $"{r.ClientMissedPacing},{r.ClientAttempted},{r.ClientAccepted}," +
+    $"{r.ClientAttemptedRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.ClientAcceptedRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.ClientRecvDrainedP99},{r.ClientRecvDrainedMax}," +
     $"{r.ClientOutstandingMax},{r.ClientTickOk}";
@@ -449,7 +449,7 @@ class CsvRow
     public ulong RttP95Us;
     public ulong RttP99Us;
     public ulong Delivered;
-    public ulong Sent;
+    public ulong Accepted;
     public double DeliveryRatio;
     public double CpuPct;
     public ulong RssMb;
@@ -461,9 +461,9 @@ class CsvRow
     public ulong ClientPacingLagP99Us;
     public ulong ClientPacingLagMaxUs;
     public ulong ClientMissedPacing;
-    public ulong ClientOffered;
+    public ulong ClientAttempted;
     public ulong ClientAccepted;
-    public double ClientOfferedRatio;
+    public double ClientAttemptedRatio;
     public double ClientAcceptedRatio;
     public ulong ClientRecvDrainedP99;
     public ulong ClientRecvDrainedMax;
@@ -533,7 +533,7 @@ class ClientTickStats
     private long lastTick_;
 
     public ulong MissedPacing { get; private set; }
-    public ulong Offered { get; private set; }
+    public ulong Attempted { get; private set; }
     public ulong Accepted { get; private set; }
     public ulong OutstandingMax { get; private set; }
 
@@ -545,14 +545,14 @@ class ClientTickStats
         haveLastTick_ = true;
     }
 
-    public void RecordSendDue(ulong lagUs, ulong missedBudgetUs)
+    public void RecordSendDue(ulong expectedDeliveries, ulong lagUs, ulong missedBudgetUs)
     {
-        Offered++;
+        Attempted += expectedDeliveries;
         pacingLagUs_.Record(lagUs);
         if (lagUs > missedBudgetUs) MissedPacing++;
     }
 
-    public void RecordAccepted() => Accepted++;
+    public void RecordAccepted(ulong expectedDeliveries) => Accepted += expectedDeliveries;
 
     public void RecordRecvDrained(ulong n) => recvDrained_.Record(n);
 
@@ -601,7 +601,7 @@ class ThroughputCounter
 
 class DeliveryTracker
 {
-    private ulong sentCount_;
+    private ulong acceptedCount_;
     private ulong receivedCount_;
     private readonly HashSet<ulong> receivedKeys_ = new();
 
@@ -609,7 +609,7 @@ class DeliveryTracker
     private static ulong Pack(ulong seq, uint connId) =>
         ((ulong)connId << 48) | (seq & 0x0000FFFFFFFFFFFFul);
 
-    public void MarkSent(ulong seq, uint connId) { sentCount_++; _ = Pack(seq, connId); }
+    public void MarkAccepted(ulong seq, uint connId) { acceptedCount_++; _ = Pack(seq, connId); }
     public bool MarkReceived(ulong seq, uint connId)
     {
         if (!receivedKeys_.Add(Pack(seq, connId))) return false;
@@ -617,9 +617,9 @@ class DeliveryTracker
         return true;
     }
 
-    public ulong Sent => sentCount_;
+    public ulong Accepted => acceptedCount_;
     public ulong Received => receivedCount_;
-    public double DeliveryRatio => sentCount_ > 0 ? (double)receivedCount_ / sentCount_ : 0.0;
+    public double DeliveryRatio => acceptedCount_ > 0 ? (double)receivedCount_ / acceptedCount_ : 0.0;
 }
 
 // ---------------------------------------------------------------------------

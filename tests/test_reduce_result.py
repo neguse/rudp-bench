@@ -12,11 +12,11 @@ REDUCE = ROOT / "scripts" / "reduce_result.py"
 RAW_HEADER = (
     "library,encryption,phase,reliable,size,conns,rate,loss,"
     "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,"
-    "delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
+    "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
     "mode,client_tick_gap_p99_us,client_tick_gap_max_us,"
     "client_pacing_lag_p99_us,client_pacing_lag_max_us,"
-    "client_missed_pacing,client_offered,client_accepted,"
-    "client_offered_ratio,client_accepted_ratio,"
+    "client_missed_pacing,client_attempted,client_accepted,"
+    "client_attempted_ratio,client_accepted_ratio,"
     "client_recv_drained_p99,client_recv_drained_max,"
     "client_outstanding_max,client_tick_ok\n"
 )
@@ -37,7 +37,7 @@ BASE_RAW_ROW = {
     "rtt_p95_us": "20",
     "rtt_p99_us": "30",
     "delivered": "200",
-    "sent": "200",
+    "accepted": "200",
     "delivery_ratio": "1.0000",
     "cpu_pct": "99.00",
     "rss_mb": "12",
@@ -49,9 +49,9 @@ BASE_RAW_ROW = {
     "client_pacing_lag_p99_us": "3",
     "client_pacing_lag_max_us": "8",
     "client_missed_pacing": "0",
-    "client_offered": "200",
+    "client_attempted": "200",
     "client_accepted": "200",
-    "client_offered_ratio": "1.0000",
+    "client_attempted_ratio": "1.0000",
     "client_accepted_ratio": "1.0000",
     "client_recv_drained_p99": "1",
     "client_recv_drained_max": "1",
@@ -114,13 +114,13 @@ def append_case(
                 "rtt_p95_us": "0",
                 "rtt_p99_us": "0",
                 "delivered": "0",
-                "sent": "0",
+                "accepted": "0",
                 "delivery_ratio": "0.0000",
                 "cpu_pct": "7.50",
                 "rss_mb": "11",
-                "client_offered": "0",
+                "client_attempted": "0",
                 "client_accepted": "0",
-                "client_offered_ratio": "0.0000",
+                "client_attempted_ratio": "0.0000",
                 "client_accepted_ratio": "0.0000",
             }
         )
@@ -270,7 +270,7 @@ def main() -> int:
             "no_accepted_messages",
             client_overrides={
                 "delivered": "0",
-                "sent": "0",
+                "accepted": "0",
                 "delivery_ratio": "0.0000",
                 "client_accepted": "0",
                 "client_accepted_ratio": "0.0000",
@@ -286,6 +286,18 @@ def main() -> int:
                 "delivered": "1",
                 "delivery_ratio": "0.0050",
                 "rtt_p95_us": "999",
+            },
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "ratio_recomputed",
+            client_overrides={
+                "delivered": "50",
+                "accepted": "100",
+                "delivery_ratio": "9.9999",
             },
         )
 
@@ -305,14 +317,24 @@ def main() -> int:
         assert canonical["no_accepted_messages"]["invalid_reason"] == "no_accepted_messages"
         assert canonical["low_delivery_is_valid"]["valid"] == "1"
         assert canonical["low_delivery_is_valid"]["invalid_reason"] == "ok"
+        assert canonical["ratio_recomputed"]["delivery_ratio"] == "0.5000"
 
         diag = read_rows(diagnostics)
-        assert len(diag) == 18
+        assert len(diag) == 20
         client_diag = [r for r in diag if r["scenario_id"] == "ok" and r["role"] == "client"][0]
         assert client_diag["attempted"] == "200"
         assert client_diag["accepted"] == "200"
+        assert client_diag["accepted_ratio"] == "1.0000"
+        assert client_diag["delivery_ratio"] == "1.0000"
         assert client_diag["exit_status"] == "0"
         assert client_diag["client_tick_ok"] == "1"
+
+        ratio_diag = [
+            r for r in diag if r["scenario_id"] == "ratio_recomputed" and r["role"] == "client"
+        ][0]
+        assert ratio_diag["accepted"] == "100"
+        assert ratio_diag["accepted_ratio"] == "0.5000"
+        assert ratio_diag["delivery_ratio"] == "0.5000"
 
         timeout_diag = [
             r for r in diag if r["scenario_id"] == "server_timeout" and r["role"] == "server"

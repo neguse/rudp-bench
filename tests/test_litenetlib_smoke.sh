@@ -48,7 +48,7 @@ cat "$TMP/client.csv"
 
 # delivery_ratio は CSV 16 列目 (1-indexed)
 # header: library,encryption,phase,reliable,size,conns,rate,loss,throughput_mbps,
-#         msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,sent,delivery_ratio,...
+#         msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,accepted,delivery_ratio,...
 DELIVERY_RATIO=$(tail -n1 "$TMP/client.csv" | cut -d',' -f16)
 echo "delivery_ratio = $DELIVERY_RATIO"
 
