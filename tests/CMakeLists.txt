@@ -18,6 +18,14 @@ add_executable(test_proc_sampler test_proc_sampler.cc)
 target_link_libraries(test_proc_sampler PRIVATE rudp_bench_harness GTest::gtest_main)
 add_test(NAME test_proc_sampler COMMAND test_proc_sampler)
 
+find_program(PYTHON3_EXECUTABLE python3)
+if(PYTHON3_EXECUTABLE)
+    add_test(
+        NAME test_reduce_result
+        COMMAND ${PYTHON3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_reduce_result.py"
+    )
+endif()
+
 add_executable(test_raw_udp_smoke test_raw_udp_smoke.cc)
 target_link_libraries(test_raw_udp_smoke PRIVATE adapter_raw_udp GTest::gtest_main)
 add_test(NAME test_raw_udp_smoke COMMAND test_raw_udp_smoke)

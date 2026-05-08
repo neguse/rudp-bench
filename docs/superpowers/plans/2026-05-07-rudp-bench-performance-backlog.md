@@ -105,7 +105,7 @@ stderr_path
 
 ## P0: Measurement Validity
 
-- [ ] **PERF-001: Replace current CSV with canonical result + diagnostic summary**
+- [x] **PERF-001: Replace current CSV with canonical result + diagnostic summary**
 
   Problem:
   - Current output mixes scenario conditions, client metrics, server metrics, diagnostic counters, and ranking metrics into one role-local CSV. The result viewer sees too much noise, while server CPU can still be lost by scripts that append only client rows.
@@ -132,6 +132,12 @@ stderr_path
   - `diagnostics.csv` contains one row per scenario x role and has enough detail to explain `valid=false`.
   - Plot/reporting tools read canonical results by default.
   - `ctest --test-dir build --output-on-failure` passes.
+
+  Done:
+  - Added `scripts/reduce_result.py`.
+  - Updated phase runners to produce canonical `results.csv`, `diagnostics.csv`, and `scenarios.csv`.
+  - Raw role CSVs are kept under `*_raw/<run_id>/` and linked from diagnostics.
+  - Reduced server grace from +5s to +2s so server rows normally complete before reducer merge.
 
 - [ ] **PERF-002: Add reducer validation rules for canonical `valid`**
 
@@ -378,7 +384,7 @@ stderr_path
 
 ## P2: Result Interpretation And Tooling
 
-- [ ] **PERF-018: Make reports use canonical results and hide diagnostics by default**
+- [x] **PERF-018: Make reports use canonical results and hide diagnostics by default**
 
   Problem:
   - Reports should answer the main question directly: delivery ratio and RTT p50/p95/p99 under each scenario. Diagnostic details should not be shown unless investigating invalid rows.
@@ -392,6 +398,10 @@ stderr_path
   Acceptance:
   - Normal reports can be read without understanding client tick or accepted counters.
   - Invalid rows are visible as invalid, with details delegated to diagnostics.
+
+  Done:
+  - `scripts/plot.py phase1-table` now reads canonical results and reports only delivery, RTT p50/p95/p99, and server CPU.
+  - Invalid rows are excluded from metric pivots and summarized by `invalid_reason`.
 
 - [ ] **PERF-019: Add capability metadata for unsupported scenario axes**
 

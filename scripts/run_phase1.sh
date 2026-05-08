@@ -11,6 +11,10 @@ set -euo pipefail
 LIBS="raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,litenetlib,msquic"
 BUILD_DIR="build"
 RESULTS="results/phase1.csv"
+DIAGNOSTICS=""
+SCENARIOS=""
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+RAW_DIR=""
 LOSS_INJECT="0"   # 0=skip, 1=apply via sudo
 
 for arg in "$@"; do
@@ -18,10 +22,24 @@ for arg in "$@"; do
     --libraries=*) LIBS="${arg#*=}" ;;
     --build-dir=*) BUILD_DIR="${arg#*=}" ;;
     --results=*) RESULTS="${arg#*=}" ;;
+    --diagnostics=*) DIAGNOSTICS="${arg#*=}" ;;
+    --scenarios=*) SCENARIOS="${arg#*=}" ;;
+    --run-id=*) RUN_ID="${arg#*=}" ;;
+    --raw-dir=*) RAW_DIR="${arg#*=}" ;;
     --loss-injection) LOSS_INJECT=1 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
+
+if [ -z "$DIAGNOSTICS" ]; then
+  DIAGNOSTICS="${RESULTS%.csv}_diagnostics.csv"
+fi
+if [ -z "$SCENARIOS" ]; then
+  SCENARIOS="${RESULTS%.csv}_scenarios.csv"
+fi
+if [ -z "$RAW_DIR" ]; then
+  RAW_DIR="${RESULTS%.csv}_raw/$RUN_ID"
+fi
 
 BIN="$BUILD_DIR/harness/rudp-bench"
 [ -x "$BIN" ] || { echo "binary not found: $BIN" >&2; exit 2; }
@@ -31,12 +49,11 @@ LITENETLIB_BIN="adapters/litenetlib/bin/Release/net10.0/litenetlib_adapter"
 # spec: JIT/GC ウォームアップのため warmup を 5 秒に引き上げる
 LITENETLIB_WARMUP=5
 
-mkdir -p "$(dirname "$RESULTS")"
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"; if [ "$LOSS_INJECT" = "1" ]; then sudo scripts/set_loss.sh clear >/dev/null 2>&1 || true; fi' EXIT
+mkdir -p "$(dirname "$RESULTS")" "$(dirname "$DIAGNOSTICS")" "$(dirname "$SCENARIOS")" "$RAW_DIR"
+trap 'if [ "$LOSS_INJECT" = "1" ]; then sudo scripts/set_loss.sh clear >/dev/null 2>&1 || true; fi' EXIT
 
-# CSV header (1回だけ)
-echo "library,encryption,phase,reliable,size,conns,rate,loss,throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode,client_tick_gap_p99_us,client_tick_gap_max_us,client_pacing_lag_p99_us,client_pacing_lag_max_us,client_missed_pacing,client_offered,client_accepted,client_offered_ratio,client_accepted_ratio,client_recv_drained_p99,client_recv_drained_max,client_outstanding_max,client_tick_ok" > "$RESULTS"
+python3 scripts/reduce_result.py init \
+  --results "$RESULTS" --diagnostics "$DIAGNOSTICS" --scenarios "$SCENARIOS"
 
 PORT_BASE=30000
 PORT=$PORT_BASE
@@ -53,8 +70,10 @@ for lib in ${LIBS//,/ }; do
               sudo scripts/set_loss.sh apply "$loss" >/dev/null
             fi
 
-            S_OUT="$TMP/s_${lib}_${reliable}_${size}_${conns}_${rate}_${mode}_${loss}.csv"
-            C_OUT="$TMP/c_${lib}_${reliable}_${size}_${conns}_${rate}_${mode}_${loss}.csv"
+            SCENARIO_ID="${lib}_${reliable}_${size}_${conns}_${rate}_${mode}_${loss}"
+            S_OUT="$RAW_DIR/s_${SCENARIO_ID}.csv"
+            C_OUT="$RAW_DIR/c_${SCENARIO_ID}.csv"
+            WARMUP_ARG=2
 
             # LiteNetLib は独立 .NET バイナリに dispatch。warmup は 5 秒固定。
             if [ "$lib" = "litenetlib" ]; then
@@ -75,6 +94,7 @@ for lib in ${LIBS//,/ }; do
                 --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
                 --duration=20 --warmup="$WARMUP_ARG" --loss="$loss" --mode="$mode" \
                 --out="$C_OUT" || true
+              wait "$SPID" 2>/dev/null || true
             else
               timeout 60s "$BIN" --library="$lib" --role=server --port="$PORT" \
                 --reliable="$reliable" --duration=20 --warmup=2 --loss="$loss" \
@@ -87,15 +107,16 @@ for lib in ${LIBS//,/ }; do
                 --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
                 --duration=20 --warmup=2 --loss="$loss" --mode="$mode" \
                 --out="$C_OUT" || true
+              wait "$SPID" 2>/dev/null || true
             fi
 
-            kill "$SPID" 2>/dev/null || true
-            wait "$SPID" 2>/dev/null || true
-
-            # client 行のみ抽出して追記(server 行は CPU/RSS 別計測なので別ファイル)
-            if [ -f "$C_OUT" ]; then
-              tail -n +2 "$C_OUT" >> "$RESULTS"
-            fi
+            python3 scripts/reduce_result.py append \
+              --results "$RESULTS" --diagnostics "$DIAGNOSTICS" --scenarios "$SCENARIOS" \
+              --server "$S_OUT" --client "$C_OUT" \
+              --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
+              --library "$lib" --reliable "$reliable" --size "$size" --conns "$conns" \
+              --rate "$rate" --loss "$loss" --mode "$mode" \
+              --duration 20 --warmup "$WARMUP_ARG"
 
             if [ "$LOSS_INJECT" = "1" ]; then
               sudo scripts/set_loss.sh clear >/dev/null
@@ -109,3 +130,7 @@ done
 
 echo "wrote $RESULTS"
 wc -l "$RESULTS"
+echo "wrote $DIAGNOSTICS"
+wc -l "$DIAGNOSTICS"
+echo "wrote $SCENARIOS"
+wc -l "$SCENARIOS"

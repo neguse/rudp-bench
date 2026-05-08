@@ -109,9 +109,9 @@ static CsvRow RunServer(Config cfg)
         ? DeliveryMethod.ReliableOrdered
         : DeliveryMethod.Unreliable;
 
-    // クライアントの warmup + duration + tail_drain を収容するため +5秒余裕
+    // クライアントの warmup + duration + tail_drain を収容するため +2秒余裕
     long deadlineTicks = Stopwatch.GetTimestamp() +
-        (long)((cfg.WarmupS + cfg.DurationS + 5) * Stopwatch.Frequency);
+        (long)((cfg.WarmupS + cfg.DurationS + 2) * Stopwatch.Frequency);
 
     var knownPeers = new HashSet<NetPeer>();
     bool broadcast = cfg.Mode == "broadcast";

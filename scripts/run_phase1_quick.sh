@@ -11,6 +11,10 @@ set -euo pipefail
 LIBS="raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,litenetlib,msquic"
 BUILD_DIR="build"
 RESULTS="results/phase1_quick.csv"
+DIAGNOSTICS=""
+SCENARIOS=""
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+RAW_DIR=""
 SIZE=100
 CONNS=10
 
@@ -19,11 +23,25 @@ for arg in "$@"; do
     --libraries=*) LIBS="${arg#*=}" ;;
     --build-dir=*) BUILD_DIR="${arg#*=}" ;;
     --results=*) RESULTS="${arg#*=}" ;;
+    --diagnostics=*) DIAGNOSTICS="${arg#*=}" ;;
+    --scenarios=*) SCENARIOS="${arg#*=}" ;;
+    --run-id=*) RUN_ID="${arg#*=}" ;;
+    --raw-dir=*) RAW_DIR="${arg#*=}" ;;
     --conns=*) CONNS="${arg#*=}" ;;
     --size=*) SIZE="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
+
+if [ -z "$DIAGNOSTICS" ]; then
+  DIAGNOSTICS="${RESULTS%.csv}_diagnostics.csv"
+fi
+if [ -z "$SCENARIOS" ]; then
+  SCENARIOS="${RESULTS%.csv}_scenarios.csv"
+fi
+if [ -z "$RAW_DIR" ]; then
+  RAW_DIR="${RESULTS%.csv}_raw/$RUN_ID"
+fi
 
 BIN="$BUILD_DIR/harness/rudp-bench"
 [ -x "$BIN" ] || { echo "binary not found: $BIN" >&2; exit 2; }
@@ -31,11 +49,10 @@ BIN="$BUILD_DIR/harness/rudp-bench"
 LITENETLIB_BIN="adapters/litenetlib/bin/Release/net10.0/litenetlib_adapter"
 LITENETLIB_WARMUP=5
 
-mkdir -p "$(dirname "$RESULTS")"
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$(dirname "$RESULTS")" "$(dirname "$DIAGNOSTICS")" "$(dirname "$SCENARIOS")" "$RAW_DIR"
 
-echo "library,encryption,phase,reliable,size,conns,rate,loss,throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,sent,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode,client_tick_gap_p99_us,client_tick_gap_max_us,client_pacing_lag_p99_us,client_pacing_lag_max_us,client_missed_pacing,client_offered,client_accepted,client_offered_ratio,client_accepted_ratio,client_recv_drained_p99,client_recv_drained_max,client_outstanding_max,client_tick_ok" > "$RESULTS"
+python3 scripts/reduce_result.py init \
+  --results "$RESULTS" --diagnostics "$DIAGNOSTICS" --scenarios "$SCENARIOS"
 
 # 軸固定 (size, conns は --size, --conns で上書き可能)
 RELIABLE=r
@@ -50,8 +67,10 @@ PORT=$PORT_BASE
 for lib in ${LIBS//,/ }; do
   PORT=$((PORT + 1))
 
-  S_OUT="$TMP/s_${lib}.csv"
-  C_OUT="$TMP/c_${lib}.csv"
+  SCENARIO_ID="${lib}_${RELIABLE}_${SIZE}_${CONNS}_${RATE}_${MODE}_${LOSS}"
+  S_OUT="$RAW_DIR/s_${SCENARIO_ID}.csv"
+  C_OUT="$RAW_DIR/c_${SCENARIO_ID}.csv"
+  WARMUP_ARG=2
 
   if [ "$lib" = "litenetlib" ]; then
     if [ ! -x "$LITENETLIB_BIN" ]; then
@@ -70,6 +89,7 @@ for lib in ${LIBS//,/ }; do
       --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
       --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" --mode="$MODE" \
       --out="$C_OUT" || true
+    wait "$SPID" 2>/dev/null || true
   else
     timeout 60s "$BIN" --library="$lib" --role=server --port="$PORT" \
       --reliable="$RELIABLE" --duration="$DURATION" --warmup=2 --loss="$LOSS" \
@@ -81,15 +101,21 @@ for lib in ${LIBS//,/ }; do
       --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
       --duration="$DURATION" --warmup=2 --loss="$LOSS" --mode="$MODE" \
       --out="$C_OUT" || true
+    wait "$SPID" 2>/dev/null || true
   fi
 
-  kill "$SPID" 2>/dev/null || true
-  wait "$SPID" 2>/dev/null || true
-
-  if [ -f "$C_OUT" ]; then
-    tail -n +2 "$C_OUT" >> "$RESULTS"
-  fi
+  python3 scripts/reduce_result.py append \
+    --results "$RESULTS" --diagnostics "$DIAGNOSTICS" --scenarios "$SCENARIOS" \
+    --server "$S_OUT" --client "$C_OUT" \
+    --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
+    --library "$lib" --reliable "$RELIABLE" --size "$SIZE" --conns "$CONNS" \
+    --rate "$RATE" --loss "$LOSS" --mode "$MODE" \
+    --duration "$DURATION" --warmup "$WARMUP_ARG"
 done
 
 echo "wrote $RESULTS"
 wc -l "$RESULTS"
+echo "wrote $DIAGNOSTICS"
+wc -l "$DIAGNOSTICS"
+echo "wrote $SCENARIOS"
+wc -l "$SCENARIOS"

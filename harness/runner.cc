@@ -103,7 +103,7 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   std::unordered_set<uint32_t> known_conns;  // broadcast 配信先
   bool reliable = (cfg.reliable == Reliability::Reliable);
   auto deadline = std::chrono::steady_clock::now() +
-                  std::chrono::seconds(cfg.duration_s + cfg.warmup_s + 5);
+                  std::chrono::seconds(cfg.duration_s + cfg.warmup_s + 2);
   while (std::chrono::steady_clock::now() < deadline) {
     a.poll();
     size_t n; uint32_t cid;

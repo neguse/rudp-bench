@@ -14,28 +14,44 @@ import pandas as pd
 
 def phase1_table(args: argparse.Namespace) -> int:
     df = pd.read_csv(args.in_path)
-    df["scenario"] = (
-        df["reliable"].astype(str)
-        + "/" + df["size"].astype(str)
-        + "/" + df["conns"].astype(str)
-        + "/" + df["rate"].astype(str)
-        + "/" + df["loss"].astype(str).str.rstrip("0").str.rstrip(".")
-    )
-    pivot_throughput = df.pivot_table(
-        index="scenario", columns="library", values="throughput_mbps", aggfunc="mean"
-    )
-    pivot_delivery = df.pivot_table(
-        index="scenario", columns="library", values="delivery_ratio", aggfunc="mean"
-    )
+    if "valid" in df.columns:
+        df = df[df["valid"].astype(str).isin(["1", "True", "true"])]
+    if "scenario_id" in df.columns:
+        df["scenario"] = df["scenario_id"].astype(str)
+    else:
+        df["scenario"] = (
+            df["reliable"].astype(str)
+            + "/" + df["size"].astype(str)
+            + "/" + df["conns"].astype(str)
+            + "/" + df["rate"].astype(str)
+            + "/" + df["loss"].astype(str).str.rstrip("0").str.rstrip(".")
+        )
     out = Path(args.out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w") as f:
         f.write("# Phase 1 results\n\n")
-        f.write("## throughput (Mbps)\n\n")
-        f.write(pivot_throughput.to_markdown())
-        f.write("\n\n## delivery_ratio\n\n")
-        f.write(pivot_delivery.to_markdown())
-        f.write("\n")
+        for metric in [
+            "delivery_ratio",
+            "rtt_p50_us",
+            "rtt_p95_us",
+            "rtt_p99_us",
+            "server_cpu_pct",
+        ]:
+            if metric not in df.columns:
+                continue
+            pivot = df.pivot_table(
+                index="scenario", columns="library", values=metric, aggfunc="mean"
+            )
+            f.write(f"## {metric}\n\n")
+            f.write(pivot.to_markdown())
+            f.write("\n\n")
+        if "invalid_reason" in pd.read_csv(args.in_path).columns:
+            all_rows = pd.read_csv(args.in_path)
+            invalid = all_rows[~all_rows["valid"].astype(str).isin(["1", "True", "true"])]
+            if not invalid.empty:
+                f.write("## invalid rows\n\n")
+                f.write(invalid["invalid_reason"].value_counts().to_markdown())
+                f.write("\n")
     print(f"wrote {out}")
     return 0
 
@@ -46,7 +62,9 @@ def phase2_plot(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_path)
     out_dir.mkdir(parents=True, exist_ok=True)
     axis_col = args.axis  # 例: "loss", "rate", "size", "conns"
-    for metric in ["throughput_mbps", "delivery_ratio", "rtt_p50_us"]:
+    for metric in ["delivery_ratio", "rtt_p50_us", "rtt_p95_us", "rtt_p99_us"]:
+        if metric not in df.columns:
+            continue
         fig, ax = plt.subplots(figsize=(8, 5))
         for lib, sub in df.groupby("library"):
             sub = sub.sort_values(axis_col)
