@@ -74,6 +74,8 @@ for lib in ${LIBS//,/ }; do
             S_OUT="$RAW_DIR/s_${SCENARIO_ID}.csv"
             C_OUT="$RAW_DIR/c_${SCENARIO_ID}.csv"
             WARMUP_ARG=2
+            S_STATUS=0
+            C_STATUS=0
 
             # LiteNetLib は独立 .NET バイナリに dispatch。warmup は 5 秒固定。
             if [ "$lib" = "litenetlib" ]; then
@@ -89,12 +91,16 @@ for lib in ${LIBS//,/ }; do
                 --out="$S_OUT" &
               SPID=$!
               sleep 0.5
+              set +e
               timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=client \
                 --host=127.0.0.1 --port="$PORT" \
                 --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
                 --duration=20 --warmup="$WARMUP_ARG" --loss="$loss" --mode="$mode" \
-                --out="$C_OUT" || true
-              wait "$SPID" 2>/dev/null || true
+                --out="$C_OUT"
+              C_STATUS=$?
+              wait "$SPID" 2>/dev/null
+              S_STATUS=$?
+              set -e
             else
               timeout 60s "$BIN" --library="$lib" --role=server --port="$PORT" \
                 --reliable="$reliable" --duration=20 --warmup=2 --loss="$loss" \
@@ -102,17 +108,22 @@ for lib in ${LIBS//,/ }; do
                 --out="$S_OUT" &
               SPID=$!
               sleep 0.2
+              set +e
               timeout 60s "$BIN" --library="$lib" --role=client \
                 --host=127.0.0.1 --port="$PORT" \
                 --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
                 --duration=20 --warmup=2 --loss="$loss" --mode="$mode" \
-                --out="$C_OUT" || true
-              wait "$SPID" 2>/dev/null || true
+                --out="$C_OUT"
+              C_STATUS=$?
+              wait "$SPID" 2>/dev/null
+              S_STATUS=$?
+              set -e
             fi
 
             python3 scripts/reduce_result.py append \
               --results "$RESULTS" --diagnostics "$DIAGNOSTICS" --scenarios "$SCENARIOS" \
               --server "$S_OUT" --client "$C_OUT" \
+              --server-status "$S_STATUS" --client-status "$C_STATUS" \
               --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
               --library "$lib" --reliable "$reliable" --size "$size" --conns "$conns" \
               --rate "$rate" --loss "$loss" --mode "$mode" \

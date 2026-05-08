@@ -8,6 +8,27 @@ from pathlib import Path
 from typing import Dict, Optional
 
 
+TIMEOUT_STATUS = 124
+MIN_PAYLOAD_BYTES = 16
+
+SUPPORTED_RELIABILITY = {
+    "raw_udp": {"u"},
+    "udt4": {"r"},
+}
+
+# Limits where the current adapter/harness would fail or truncate payloads.
+MAX_PAYLOAD_BYTES = {
+    "raw_udp": 65507,
+    "mini_rudp": 2042,
+    "yojimbo": 4096,
+}
+
+# These adapters currently multiplex requested logical conns over one real conn.
+MAX_CONNS = {
+    "slikenet": 1,
+    "yojimbo": 1,
+}
+
 RESULT_FIELDS = [
     "run_id",
     "scenario_id",
@@ -26,6 +47,7 @@ DIAGNOSTIC_FIELDS = [
     "scenario_id",
     "role",
     "exit_reason",
+    "exit_status",
     "cpu_pct",
     "rss_mb",
     "attempted",
@@ -80,33 +102,110 @@ def append_row(path: str, fields, row: Dict[str, object]) -> None:
         writer.writerow({k: row.get(k, "") for k in fields})
 
 
-def invalid_reason(server: Optional[Dict[str, str]],
-                   client: Optional[Dict[str, str]]) -> str:
-    if client is None:
-        return "client_timeout"
-    if server is None:
-        return "server_timeout"
-    if client.get("reliable") == "na":
+def int_or_none(value: object) -> Optional[int]:
+    try:
+        if value is None or value == "":
+            return None
+        return int(str(value))
+    except ValueError:
+        return None
+
+
+def unsupported_reliability(args: argparse.Namespace,
+                            server: Optional[Dict[str, str]],
+                            client: Optional[Dict[str, str]]) -> bool:
+    supported = SUPPORTED_RELIABILITY.get(args.library)
+    if supported is not None and args.reliable not in supported:
+        return True
+    return (server is not None and server.get("reliable") == "na") or (
+        client is not None and client.get("reliable") == "na"
+    )
+
+
+def unsupported_payload(args: argparse.Namespace) -> bool:
+    size = int_or_none(args.size)
+    if size is None:
+        return True
+    if size < MIN_PAYLOAD_BYTES:
+        return True
+    max_payload = MAX_PAYLOAD_BYTES.get(args.library)
+    return max_payload is not None and size > max_payload
+
+
+def unsupported_conns(args: argparse.Namespace) -> bool:
+    conns = int_or_none(args.conns)
+    if conns is None:
+        return True
+    max_conns = MAX_CONNS.get(args.library)
+    return max_conns is not None and conns > max_conns
+
+
+def role_exit_reason(role: str, raw: Optional[Dict[str, str]], status: str) -> str:
+    status_code = int_or_none(status)
+    if status_code == TIMEOUT_STATUS:
+        return f"{role}_timeout"
+    if status_code is not None and status_code != 0:
+        return f"{role}_crash"
+    if raw is None:
+        return "missing_raw_result"
+    if raw.get("reliable") == "na":
         return "unsupported_reliability"
+    return "ok"
+
+
+def accepted_count(client: Optional[Dict[str, str]]) -> int:
+    if client is None:
+        return 0
+    accepted = int_or_none(client.get("client_accepted"))
+    if accepted is not None:
+        return accepted
+    return int_or_none(client.get("sent")) or 0
+
+
+def invalid_reason(server: Optional[Dict[str, str]],
+                   client: Optional[Dict[str, str]],
+                   args: argparse.Namespace) -> str:
+    server_exit = role_exit_reason("server", server, args.server_status)
+    client_exit = role_exit_reason("client", client, args.client_status)
+
+    if unsupported_reliability(args, server, client):
+        return "unsupported_reliability"
+    if unsupported_payload(args):
+        return "unsupported_payload"
+    if unsupported_conns(args):
+        return "unsupported_conns"
+    if server_exit == "server_timeout":
+        return "server_timeout"
+    if client_exit == "client_timeout":
+        return "client_timeout"
+    if server_exit in ("server_crash", "missing_raw_result"):
+        return "server_crash"
+    if client_exit in ("client_crash", "missing_raw_result"):
+        return "client_crash"
     if client.get("client_tick_ok") == "0":
         return "client_tick"
-    try:
-        accepted = int(client.get("sent", "0"))
-    except ValueError:
-        accepted = 0
-    if accepted == 0:
+    if accepted_count(client) == 0:
         return "no_accepted_messages"
     return "ok"
 
 
 def diagnostic_row(run_id: str, scenario_id: str, role: str,
-                   raw: Optional[Dict[str, str]], raw_path: str) -> Dict[str, object]:
+                   raw: Optional[Dict[str, str]], raw_path: str,
+                   status: str, scenario_reason: str) -> Dict[str, object]:
+    exit_reason = role_exit_reason(role, raw, status)
+    if scenario_reason in (
+        "unsupported_reliability",
+        "unsupported_payload",
+        "unsupported_conns",
+    ):
+        exit_reason = scenario_reason
     if raw is None:
         return {
             "run_id": run_id,
             "scenario_id": scenario_id,
             "role": role,
-            "exit_reason": "missing_raw_result",
+            "exit_reason": exit_reason,
+            "exit_status": status,
             "raw_result_path": raw_path,
         }
     is_client = role == "client"
@@ -114,11 +213,12 @@ def diagnostic_row(run_id: str, scenario_id: str, role: str,
         "run_id": run_id,
         "scenario_id": scenario_id,
         "role": role,
-        "exit_reason": "ok",
+        "exit_reason": exit_reason,
+        "exit_status": status,
         "cpu_pct": raw.get("cpu_pct", ""),
         "rss_mb": raw.get("rss_mb", ""),
         "attempted": raw.get("client_offered", "") if is_client else "",
-        "accepted": raw.get("sent", "") if is_client else "",
+        "accepted": raw.get("client_accepted", raw.get("sent", "")) if is_client else "",
         "delivered": raw.get("delivered", "") if is_client else "",
         "accepted_ratio": raw.get("client_accepted_ratio", "") if is_client else "",
         "delivery_ratio": raw.get("delivery_ratio", "") if is_client else "",
@@ -132,7 +232,7 @@ def diagnostic_row(run_id: str, scenario_id: str, role: str,
 def append(args: argparse.Namespace) -> int:
     server = read_raw_row(args.server)
     client = read_raw_row(args.client)
-    reason = invalid_reason(server, client)
+    reason = invalid_reason(server, client, args)
     valid = "1" if reason == "ok" else "0"
 
     append_row(args.scenarios, SCENARIO_FIELDS, {
@@ -150,9 +250,11 @@ def append(args: argparse.Namespace) -> int:
     })
 
     append_row(args.diagnostics, DIAGNOSTIC_FIELDS,
-               diagnostic_row(args.run_id, args.scenario_id, "server", server, args.server))
+               diagnostic_row(args.run_id, args.scenario_id, "server", server,
+                              args.server, args.server_status, reason))
     append_row(args.diagnostics, DIAGNOSTIC_FIELDS,
-               diagnostic_row(args.run_id, args.scenario_id, "client", client, args.client))
+               diagnostic_row(args.run_id, args.scenario_id, "client", client,
+                              args.client, args.client_status, reason))
 
     append_row(args.results, RESULT_FIELDS, {
         "run_id": args.run_id,
@@ -198,6 +300,8 @@ def main() -> int:
     append_p.add_argument("--scenarios", required=True)
     append_p.add_argument("--server", required=True)
     append_p.add_argument("--client", required=True)
+    append_p.add_argument("--server-status", default="")
+    append_p.add_argument("--client-status", default="")
     append_p.add_argument("--run-id", required=True)
     append_p.add_argument("--scenario-id", required=True)
     append_p.add_argument("--library", required=True)

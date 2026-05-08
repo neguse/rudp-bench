@@ -71,6 +71,8 @@ for lib in ${LIBS//,/ }; do
   S_OUT="$RAW_DIR/s_${SCENARIO_ID}.csv"
   C_OUT="$RAW_DIR/c_${SCENARIO_ID}.csv"
   WARMUP_ARG=2
+  S_STATUS=0
+  C_STATUS=0
 
   if [ "$lib" = "litenetlib" ]; then
     if [ ! -x "$LITENETLIB_BIN" ]; then
@@ -84,29 +86,38 @@ for lib in ${LIBS//,/ }; do
       --mode="$MODE" --out="$S_OUT" &
     SPID=$!
     sleep 0.5
+    set +e
     timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=client \
       --host=127.0.0.1 --port="$PORT" \
       --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
       --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" --mode="$MODE" \
-      --out="$C_OUT" || true
-    wait "$SPID" 2>/dev/null || true
+      --out="$C_OUT"
+    C_STATUS=$?
+    wait "$SPID" 2>/dev/null
+    S_STATUS=$?
+    set -e
   else
     timeout 60s "$BIN" --library="$lib" --role=server --port="$PORT" \
       --reliable="$RELIABLE" --duration="$DURATION" --warmup=2 --loss="$LOSS" \
       --mode="$MODE" --out="$S_OUT" &
     SPID=$!
     sleep 0.2
+    set +e
     timeout 60s "$BIN" --library="$lib" --role=client \
       --host=127.0.0.1 --port="$PORT" \
       --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
       --duration="$DURATION" --warmup=2 --loss="$LOSS" --mode="$MODE" \
-      --out="$C_OUT" || true
-    wait "$SPID" 2>/dev/null || true
+      --out="$C_OUT"
+    C_STATUS=$?
+    wait "$SPID" 2>/dev/null
+    S_STATUS=$?
+    set -e
   fi
 
   python3 scripts/reduce_result.py append \
     --results "$RESULTS" --diagnostics "$DIAGNOSTICS" --scenarios "$SCENARIOS" \
     --server "$S_OUT" --client "$C_OUT" \
+    --server-status "$S_STATUS" --client-status "$C_STATUS" \
     --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
     --library "$lib" --reliable "$RELIABLE" --size "$SIZE" --conns "$CONNS" \
     --rate "$RATE" --loss "$LOSS" --mode "$MODE" \

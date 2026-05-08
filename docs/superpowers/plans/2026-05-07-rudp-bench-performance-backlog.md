@@ -69,12 +69,14 @@ run_id
 scenario_id
 role
 exit_reason
+exit_status
 cpu_pct
 rss_mb
 attempted
 accepted
 delivered
 accepted_ratio
+delivery_ratio
 client_tick_ok
 client_tick_gap_p99_us
 client_pacing_lag_p99_us
@@ -139,7 +141,7 @@ stderr_path
   - Raw role CSVs are kept under `*_raw/<run_id>/` and linked from diagnostics.
   - Reduced server grace from +5s to +2s so server rows normally complete before reducer merge.
 
-- [ ] **PERF-002: Add reducer validation rules for canonical `valid`**
+- [x] **PERF-002: Add reducer validation rules for canonical `valid`**
 
   Problem:
   - The final result needs to distinguish "bad library result" from "test did not run correctly". Low delivery can be a valid result; client tick failure is not.
@@ -165,6 +167,12 @@ stderr_path
   - Every canonical row has `valid` and `invalid_reason`.
   - Invalid rows are excluded by default from ranking tables.
   - Diagnostics explain every non-`ok` invalid reason.
+
+  Done:
+  - Reducer now applies ordered invalid reasons for unsupported reliability/payload/conns, timeout, crash, client tick failure, and zero accepted messages.
+  - Phase runners pass server/client process exit status into diagnostics.
+  - Low `delivery_ratio` remains a valid performance result.
+  - Added reducer tests for each invalid category.
 
 - [ ] **PERF-003: Track attempted, accepted, and delivered in diagnostics**
 

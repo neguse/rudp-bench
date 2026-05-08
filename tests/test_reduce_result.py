@@ -20,6 +20,44 @@ RAW_HEADER = (
     "client_recv_drained_p99,client_recv_drained_max,"
     "client_outstanding_max,client_tick_ok\n"
 )
+RAW_FIELDS = RAW_HEADER.strip().split(",")
+
+BASE_RAW_ROW = {
+    "library": "raw_udp",
+    "encryption": "off",
+    "phase": "1",
+    "reliable": "u",
+    "size": "64",
+    "conns": "1",
+    "rate": "100",
+    "loss": "0.000",
+    "throughput_mbps": "0.051",
+    "msg_per_sec": "100",
+    "rtt_p50_us": "10",
+    "rtt_p95_us": "20",
+    "rtt_p99_us": "30",
+    "delivered": "200",
+    "sent": "200",
+    "delivery_ratio": "1.0000",
+    "cpu_pct": "99.00",
+    "rss_mb": "12",
+    "connect_ms": "0",
+    "duration_s": "2",
+    "mode": "echo",
+    "client_tick_gap_p99_us": "4",
+    "client_tick_gap_max_us": "10",
+    "client_pacing_lag_p99_us": "3",
+    "client_pacing_lag_max_us": "8",
+    "client_missed_pacing": "0",
+    "client_offered": "200",
+    "client_accepted": "200",
+    "client_offered_ratio": "1.0000",
+    "client_accepted_ratio": "1.0000",
+    "client_recv_drained_p99": "1",
+    "client_recv_drained_max": "1",
+    "client_outstanding_max": "1",
+    "client_tick_ok": "1",
+}
 
 
 def read_rows(path: Path):
@@ -27,30 +65,131 @@ def read_rows(path: Path):
         return list(csv.DictReader(f))
 
 
+def write_raw(path: Path, **overrides):
+    row = BASE_RAW_ROW.copy()
+    row.update({k: str(v) for k, v in overrides.items()})
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=RAW_FIELDS)
+        writer.writeheader()
+        writer.writerow(row)
+
+
+def run_reduce(args):
+    subprocess.run(["python3", str(REDUCE), *args], check=True)
+
+
+def append_case(
+    tmp: Path,
+    results: Path,
+    diagnostics: Path,
+    scenarios: Path,
+    scenario_id: str,
+    *,
+    library: str = "raw_udp",
+    reliable: str = "u",
+    size: str = "64",
+    conns: str = "1",
+    server_raw=True,
+    client_raw=True,
+    server_status: str = "0",
+    client_status: str = "0",
+    server_overrides=None,
+    client_overrides=None,
+):
+    server = tmp / f"{scenario_id}_server.csv"
+    client = tmp / f"{scenario_id}_client.csv"
+    common = {
+        "library": library,
+        "reliable": reliable,
+        "size": size,
+        "conns": conns,
+    }
+    if server_raw:
+        server_values = common.copy()
+        server_values.update(
+            {
+                "throughput_mbps": "0.000",
+                "msg_per_sec": "0",
+                "rtt_p50_us": "0",
+                "rtt_p95_us": "0",
+                "rtt_p99_us": "0",
+                "delivered": "0",
+                "sent": "0",
+                "delivery_ratio": "0.0000",
+                "cpu_pct": "7.50",
+                "rss_mb": "11",
+                "client_offered": "0",
+                "client_accepted": "0",
+                "client_offered_ratio": "0.0000",
+                "client_accepted_ratio": "0.0000",
+            }
+        )
+        server_values.update(server_overrides or {})
+        write_raw(
+            server,
+            **server_values,
+        )
+    if client_raw:
+        client_values = common.copy()
+        client_values.update(client_overrides or {})
+        write_raw(client, **client_values)
+
+    run_reduce(
+        [
+            "append",
+            "--results",
+            str(results),
+            "--diagnostics",
+            str(diagnostics),
+            "--scenarios",
+            str(scenarios),
+            "--server",
+            str(server),
+            "--client",
+            str(client),
+            "--server-status",
+            server_status,
+            "--client-status",
+            client_status,
+            "--run-id",
+            "test-run",
+            "--scenario-id",
+            scenario_id,
+            "--library",
+            library,
+            "--reliable",
+            reliable,
+            "--size",
+            size,
+            "--conns",
+            conns,
+            "--rate",
+            "100",
+            "--loss",
+            "0",
+            "--mode",
+            "echo",
+            "--duration",
+            "2",
+            "--warmup",
+            "0",
+        ]
+    )
+
+
+def by_scenario(rows):
+    return {r["scenario_id"]: r for r in rows}
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        server = tmp / "server.csv"
-        client = tmp / "client.csv"
         results = tmp / "results.csv"
         diagnostics = tmp / "diagnostics.csv"
         scenarios = tmp / "scenarios.csv"
 
-        server.write_text(
-            RAW_HEADER
-            + "raw_udp,off,1,u,64,1,100,0.000,0.000,0,0,0,0,"
-            + "0,0,0.0000,7.50,11,0,2,echo,0,0,0,0,0,0,0,0.0000,0.0000,0,0,0,0\n"
-        )
-        client.write_text(
-            RAW_HEADER
-            + "raw_udp,off,1,u,64,1,100,0.000,0.051,100,10,20,30,"
-            + "200,200,1.0000,99.00,12,0,2,echo,4,10,3,8,0,200,200,1.0000,1.0000,1,1,1,1\n"
-        )
-
-        subprocess.run(
+        run_reduce(
             [
-                "python3",
-                str(REDUCE),
                 "init",
                 "--results",
                 str(results),
@@ -58,64 +197,135 @@ def main() -> int:
                 str(diagnostics),
                 "--scenarios",
                 str(scenarios),
-            ],
-            check=True,
-        )
-        subprocess.run(
-            [
-                "python3",
-                str(REDUCE),
-                "append",
-                "--results",
-                str(results),
-                "--diagnostics",
-                str(diagnostics),
-                "--scenarios",
-                str(scenarios),
-                "--server",
-                str(server),
-                "--client",
-                str(client),
-                "--run-id",
-                "test-run",
-                "--scenario-id",
-                "raw_udp_u_64_1_100_echo_0",
-                "--library",
-                "raw_udp",
-                "--reliable",
-                "u",
-                "--size",
-                "64",
-                "--conns",
-                "1",
-                "--rate",
-                "100",
-                "--loss",
-                "0",
-                "--mode",
-                "echo",
-                "--duration",
-                "2",
-                "--warmup",
-                "0",
-            ],
-            check=True,
+            ]
         )
 
-        canonical = read_rows(results)
-        assert len(canonical) == 1
-        assert canonical[0]["valid"] == "1"
-        assert canonical[0]["invalid_reason"] == "ok"
-        assert canonical[0]["delivery_ratio"] == "1.0000"
-        assert canonical[0]["rtt_p95_us"] == "20"
-        assert canonical[0]["server_cpu_pct"] == "7.50"
+        append_case(tmp, results, diagnostics, scenarios, "ok")
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "unsupported_reliability",
+            library="raw_udp",
+            reliable="r",
+            server_overrides={"reliable": "na"},
+            client_overrides={"reliable": "na"},
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "unsupported_payload",
+            library="yojimbo",
+            reliable="r",
+            size="4097",
+            server_raw=False,
+            client_raw=False,
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "unsupported_conns",
+            library="slikenet",
+            reliable="u",
+            conns="2",
+            server_raw=False,
+            client_raw=False,
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "server_timeout",
+            server_raw=False,
+            server_status="124",
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "client_crash",
+            client_raw=False,
+            client_status="2",
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "client_tick",
+            client_overrides={"client_tick_ok": "0"},
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "no_accepted_messages",
+            client_overrides={
+                "delivered": "0",
+                "sent": "0",
+                "delivery_ratio": "0.0000",
+                "client_accepted": "0",
+                "client_accepted_ratio": "0.0000",
+            },
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "low_delivery_is_valid",
+            client_overrides={
+                "delivered": "1",
+                "delivery_ratio": "0.0050",
+                "rtt_p95_us": "999",
+            },
+        )
+
+        canonical = by_scenario(read_rows(results))
+        assert canonical["ok"]["valid"] == "1"
+        assert canonical["ok"]["invalid_reason"] == "ok"
+        assert canonical["ok"]["delivery_ratio"] == "1.0000"
+        assert canonical["ok"]["rtt_p95_us"] == "20"
+        assert canonical["ok"]["server_cpu_pct"] == "7.50"
+
+        assert canonical["unsupported_reliability"]["invalid_reason"] == "unsupported_reliability"
+        assert canonical["unsupported_payload"]["invalid_reason"] == "unsupported_payload"
+        assert canonical["unsupported_conns"]["invalid_reason"] == "unsupported_conns"
+        assert canonical["server_timeout"]["invalid_reason"] == "server_timeout"
+        assert canonical["client_crash"]["invalid_reason"] == "client_crash"
+        assert canonical["client_tick"]["invalid_reason"] == "client_tick"
+        assert canonical["no_accepted_messages"]["invalid_reason"] == "no_accepted_messages"
+        assert canonical["low_delivery_is_valid"]["valid"] == "1"
+        assert canonical["low_delivery_is_valid"]["invalid_reason"] == "ok"
 
         diag = read_rows(diagnostics)
-        assert len(diag) == 2
-        client_diag = [r for r in diag if r["role"] == "client"][0]
+        assert len(diag) == 18
+        client_diag = [r for r in diag if r["scenario_id"] == "ok" and r["role"] == "client"][0]
         assert client_diag["attempted"] == "200"
         assert client_diag["accepted"] == "200"
+        assert client_diag["exit_status"] == "0"
         assert client_diag["client_tick_ok"] == "1"
+
+        timeout_diag = [
+            r for r in diag if r["scenario_id"] == "server_timeout" and r["role"] == "server"
+        ][0]
+        assert timeout_diag["exit_reason"] == "server_timeout"
+        assert timeout_diag["exit_status"] == "124"
+
+        unsupported_payload_diag = [
+            r
+            for r in diag
+            if r["scenario_id"] == "unsupported_payload" and r["role"] == "client"
+        ][0]
+        assert unsupported_payload_diag["exit_reason"] == "unsupported_payload"
 
     return 0
 
