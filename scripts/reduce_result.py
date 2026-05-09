@@ -34,7 +34,7 @@ MAX_PAYLOAD_BYTES = {
 # These adapters currently multiplex requested logical conns over one real conn.
 MAX_CONNS = {
     "slikenet": 1,
-    "yojimbo": 1,
+    "yojimbo": 64,
 }
 
 RESULT_FIELDS = [

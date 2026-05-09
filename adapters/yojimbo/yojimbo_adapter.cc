@@ -2,7 +2,7 @@
 // Glenn Fiedler の netcode+reliable+serialize+sodium スタック。
 // 暗号は必須(InsecureConnect を使っても libsodium による認証は有効)。
 // server/client ともに同じ BenchAdapter + BenchMessageFactory を使う。
-// conn_id: サーバ側 = clientIndex(0..MaxClients-1)、クライアント側 = 0固定。
+// conn_id: サーバ側 = clientIndex(0..MaxClients-1)、クライアント側 = client instance id。
 // チャネル: 0=reliable-ordered、1=unreliable-unordered。
 
 #pragma GCC diagnostic push
@@ -20,6 +20,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -137,8 +138,9 @@ public:
 
     uint32_t client_connect(const char* host, uint16_t port) override {
         is_server_ = false;
+        uint32_t id = next_client_id_++;
         yojimbo::Address bind_addr("0.0.0.0");
-        client_ = std::make_unique<yojimbo::Client>(
+        auto client = std::make_unique<yojimbo::Client>(
             yojimbo::GetDefaultAllocator(),
             bind_addr,
             config_,
@@ -148,15 +150,17 @@ public:
         uint64_t client_id = 0;
         yojimbo_random_bytes(reinterpret_cast<uint8_t*>(&client_id), 8);
         yojimbo::Address server_addr(host, port);
-        client_->InsecureConnect(kTestPrivateKey, client_id, server_addr);
-        return 0;  // 単一接続; conn_id は常に 0
+        client->InsecureConnect(kTestPrivateKey, client_id, server_addr);
+        clients_[id] = std::move(client);
+        return id;
     }
 
     bool is_connected(uint32_t conn_id) override {
         if (is_server_) {
             return server_ && server_->IsClientConnected((int)conn_id);
         }
-        return client_ && client_->IsConnected();
+        auto it = clients_.find(conn_id);
+        return it != clients_.end() && it->second->IsConnected();
     }
 
     int send(uint32_t conn_id, const void* data, size_t len, bool reliable) override {
@@ -175,14 +179,16 @@ public:
             std::memcpy(msg->data, data, actual_len);
             server_->SendMessage(ci, channel, msg);
         } else {
-            if (!client_) return -1;
-            if (!client_->IsConnected()) return -1;
-            if (!client_->CanSendMessage(channel)) return -1;
-            auto* msg = static_cast<BenchMessage*>(client_->CreateMessage(BENCH_MESSAGE));
+            auto it = clients_.find(conn_id);
+            if (it == clients_.end()) return -1;
+            auto* client = it->second.get();
+            if (!client->IsConnected()) return -1;
+            if (!client->CanSendMessage(channel)) return -1;
+            auto* msg = static_cast<BenchMessage*>(client->CreateMessage(BENCH_MESSAGE));
             if (!msg) return -1;
             msg->length = actual_len;
             std::memcpy(msg->data, data, actual_len);
-            client_->SendMessage(channel, msg);
+            client->SendMessage(channel, msg);
         }
         return 0;
     }
@@ -212,17 +218,20 @@ public:
             server_->ReceivePackets();
             server_->AdvanceTime(time_);
             drain_server_messages();
-        } else if (!is_server_ && client_) {
-            client_->SendPackets();
-            client_->ReceivePackets();
-            client_->AdvanceTime(time_);
-            drain_client_messages();
+        } else if (!is_server_) {
+            for (auto& [id, client] : clients_) {
+                client->SendPackets();
+                client->ReceivePackets();
+                client->AdvanceTime(time_);
+                drain_client_messages(id, client.get());
+            }
         }
     }
 
     void close() override {
         if (server_) { server_->Stop(); server_.reset(); }
-        if (client_) { client_->Disconnect(); client_.reset(); }
+        for (auto& [id, client] : clients_) client->Disconnect();
+        clients_.clear();
     }
 
     const char* name() const override { return "yojimbo"; }
@@ -253,16 +262,16 @@ private:
         }
     }
 
-    void drain_client_messages() {
+    void drain_client_messages(uint32_t conn_id, yojimbo::Client* client) {
         for (int ch = 0; ch < 2; ++ch) {
             yojimbo::Message* raw;
-            while ((raw = client_->ReceiveMessage(ch)) != nullptr) {
+            while ((raw = client->ReceiveMessage(ch)) != nullptr) {
                 auto* m = static_cast<BenchMessage*>(raw);
                 InboundMsg msg;
-                msg.conn_id = 0;
+                msg.conn_id = conn_id;
                 msg.data.assign(m->data, m->data + m->length);
                 inbox_.push_back(std::move(msg));
-                client_->ReleaseMessage(raw);
+                client->ReleaseMessage(raw);
             }
         }
     }
@@ -271,7 +280,8 @@ private:
     yojimbo::ClientServerConfig config_;
 
     std::unique_ptr<yojimbo::Server> server_;
-    std::unique_ptr<yojimbo::Client> client_;
+    std::unordered_map<uint32_t, std::unique_ptr<yojimbo::Client>> clients_;
+    uint32_t next_client_id_ = 0;
 
     bool is_server_ = true;
     std::chrono::steady_clock::time_point start_;

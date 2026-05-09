@@ -276,6 +276,28 @@ def main() -> int:
             results,
             diagnostics,
             scenarios,
+            "yojimbo_conns_2_valid",
+            library="yojimbo",
+            reliable="r",
+            conns="2",
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "yojimbo_conns_65_unsupported",
+            library="yojimbo",
+            reliable="r",
+            conns="65",
+            server_raw=False,
+            client_raw=False,
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
             "server_timeout",
             server_raw=False,
             server_status="124",
@@ -351,6 +373,8 @@ def main() -> int:
         assert canonical["msquic_unreliable_oversize"]["invalid_reason"] == "unsupported_payload"
         assert canonical["msquic_reliable_1001_valid"]["valid"] == "1"
         assert canonical["unsupported_conns"]["invalid_reason"] == "unsupported_conns"
+        assert canonical["yojimbo_conns_2_valid"]["valid"] == "1"
+        assert canonical["yojimbo_conns_65_unsupported"]["invalid_reason"] == "unsupported_conns"
         assert canonical["server_timeout"]["invalid_reason"] == "server_timeout"
         assert canonical["client_crash"]["invalid_reason"] == "client_crash"
         assert canonical["client_tick"]["invalid_reason"] == "client_tick"
@@ -361,7 +385,7 @@ def main() -> int:
         assert scenario_rows["ok"]["idle_policy"] == "spin"
 
         diag = read_rows(diagnostics)
-        assert len(diag) == 26
+        assert len(diag) == 30
         client_diag = [r for r in diag if r["scenario_id"] == "ok" and r["role"] == "client"][0]
         assert client_diag["attempted"] == "200"
         assert client_diag["accepted"] == "200"

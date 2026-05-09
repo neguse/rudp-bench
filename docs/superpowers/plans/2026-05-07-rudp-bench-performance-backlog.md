@@ -269,7 +269,7 @@ stderr_path
 
 ## P1: Fairness Across Adapters
 
-- [ ] **PERF-007: Fix `conns` semantics for yojimbo**
+- [x] **PERF-007: Fix `conns` semantics for yojimbo**
 
   Problem:
   - `yojimbo` currently returns conn_id 0 and recreates the client object on each `client_connect()`, so `conns > 1` is not represented as multiple client connections.
@@ -282,6 +282,12 @@ stderr_path
 
   Acceptance:
   - `conns` reflects actual yojimbo connection count, or canonical output marks the scenario `unsupported_conns`.
+
+  Done:
+  - yojimbo client side now owns one `yojimbo::Client` instance per harness conn id instead of replacing a single client.
+  - client-side receive paths preserve the local conn id, so echoed messages can be attributed to the correct requested connection.
+  - Reducer now allows yojimbo `conns <= 64` and keeps `conns > 64` as `unsupported_conns`.
+  - Added a two-client yojimbo smoke test and reducer coverage for `conns=2` and `conns=65`.
 
 - [ ] **PERF-008: Fix `conns` semantics for SLikeNet**
 
