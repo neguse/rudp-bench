@@ -237,6 +237,7 @@ public:
     const char* name() const override { return "yojimbo"; }
     bool supports(bool /*reliable*/) const override { return true; }
     size_t max_payload_bytes(bool /*reliable*/) const override { return kMaxPayloadBytes; }
+    uint32_t max_connections() const override { return yojimbo::MaxClients; }
     bool encryption_on() const override { return true; }
 
 private:

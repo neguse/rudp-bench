@@ -76,6 +76,7 @@ TEST(SLikeNetSmoke, Capability) {
   ASSERT_NE(a, nullptr);
   EXPECT_TRUE(a->supports(true));
   EXPECT_TRUE(a->supports(false));
+  EXPECT_EQ(a->max_connections(), 1u);
   EXPECT_FALSE(a->encryption_on());
   EXPECT_STREQ(a->name(), "slikenet");
 }

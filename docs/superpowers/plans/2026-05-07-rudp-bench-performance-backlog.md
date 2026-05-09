@@ -289,7 +289,7 @@ stderr_path
   - Reducer now allows yojimbo `conns <= 64` and keeps `conns > 64` as `unsupported_conns`.
   - Added a two-client yojimbo smoke test and reducer coverage for `conns=2` and `conns=65`.
 
-- [ ] **PERF-008: Fix `conns` semantics for SLikeNet**
+- [x] **PERF-008: Fix `conns` semantics for SLikeNet**
 
   Problem:
   - Multiple `client_connect()` calls to the same endpoint are mapped to one GUID / physical connection.
@@ -301,6 +301,12 @@ stderr_path
 
   Acceptance:
   - `conns` axis measures real SLikeNet connection count.
+
+  Done:
+  - Chose the explicit unsupported policy for current SLikeNet adapter behavior.
+  - Added `Adapter::max_connections()` and entrypoint validation so unsupported `conns` values emit skipped rows without opening sockets.
+  - SLikeNet reports `max_connections() == 1`; reducer keeps `conns > 1` as `unsupported_conns`.
+  - Added capability coverage for the SLikeNet connection cap.
 
 - [ ] **PERF-009: Rework msquic reliable mode to avoid one stream per message**
 

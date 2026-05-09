@@ -33,6 +33,9 @@ struct Adapter {
   virtual size_t max_payload_bytes(bool /*reliable*/) const {
     return std::numeric_limits<size_t>::max();
   }
+  virtual uint32_t max_connections() const {
+    return std::numeric_limits<uint32_t>::max();
+  }
   virtual bool encryption_on() const = 0;
 };
 

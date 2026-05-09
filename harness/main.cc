@@ -1,5 +1,6 @@
 #include <fstream>
 #include <iostream>
+#include <string>
 
 #include "harness/adapter_registry.h"
 #include "harness/csv_writer.h"
@@ -43,6 +44,32 @@ int main(int argc, const char* argv[]) {
     return 2;
   }
 
+  auto make_skipped_row = [&](const std::string& reliable) {
+    rudp_bench::CsvRow row;
+    row.library = cfg.library;
+    row.encryption = adapter->encryption_on() ? "on" : "off";
+    row.reliable = reliable;
+    row.size = cfg.size_bytes;
+    row.conns = cfg.conns;
+    row.rate = cfg.rate_per_conn;
+    row.loss = cfg.loss_pct;
+    row.duration_s = cfg.duration_s;
+    row.mode = (cfg.mode == rudp_bench::ServerMode::Broadcast) ? "broadcast" : "echo";
+    row.idle_policy = rudp_bench::idle_policy_name(cfg.idle_policy);
+    return row;
+  };
+
+  auto write_output = [&](const rudp_bench::CsvRow& row) {
+    if (!cfg.out_path.empty()) {
+      std::ofstream f(cfg.out_path);
+      rudp_bench::write_header(f);
+      rudp_bench::write_row(f, row);
+    } else {
+      rudp_bench::write_header(std::cout);
+      rudp_bench::write_row(std::cout, row);
+    }
+  };
+
   // capability check: emit na row if the requested mode is unsupported
   {
     bool want_reliable = (cfg.reliable == rudp_bench::Reliability::Reliable);
@@ -51,25 +78,7 @@ int main(int argc, const char* argv[]) {
                 << (want_reliable ? " does not support reliable"
                                   : " does not support unreliable")
                 << "; emit na row\n";
-      rudp_bench::CsvRow row;
-      row.library = cfg.library;
-      row.encryption = adapter->encryption_on() ? "on" : "off";
-      row.reliable = "na";
-      row.size = cfg.size_bytes;
-      row.conns = cfg.conns;
-      row.rate = cfg.rate_per_conn;
-      row.loss = cfg.loss_pct;
-      row.duration_s = cfg.duration_s;
-      row.mode = (cfg.mode == rudp_bench::ServerMode::Broadcast) ? "broadcast" : "echo";
-      row.idle_policy = rudp_bench::idle_policy_name(cfg.idle_policy);
-      if (!cfg.out_path.empty()) {
-        std::ofstream f(cfg.out_path);
-        rudp_bench::write_header(f);
-        rudp_bench::write_row(f, row);
-      } else {
-        rudp_bench::write_header(std::cout);
-        rudp_bench::write_row(std::cout, row);
-      }
+      write_output(make_skipped_row("na"));
       return 0;
     }
     const size_t min_payload = 16;
@@ -77,25 +86,14 @@ int main(int argc, const char* argv[]) {
     if (cfg.size_bytes < min_payload || cfg.size_bytes > max_payload) {
       std::cerr << "library " << cfg.library << " supports payload size "
                 << min_payload << ".." << max_payload << " bytes; emit skipped row\n";
-      rudp_bench::CsvRow row;
-      row.library = cfg.library;
-      row.encryption = adapter->encryption_on() ? "on" : "off";
-      row.reliable = want_reliable ? "r" : "u";
-      row.size = cfg.size_bytes;
-      row.conns = cfg.conns;
-      row.rate = cfg.rate_per_conn;
-      row.loss = cfg.loss_pct;
-      row.duration_s = cfg.duration_s;
-      row.mode = (cfg.mode == rudp_bench::ServerMode::Broadcast) ? "broadcast" : "echo";
-      row.idle_policy = rudp_bench::idle_policy_name(cfg.idle_policy);
-      if (!cfg.out_path.empty()) {
-        std::ofstream f(cfg.out_path);
-        rudp_bench::write_header(f);
-        rudp_bench::write_row(f, row);
-      } else {
-        rudp_bench::write_header(std::cout);
-        rudp_bench::write_row(std::cout, row);
-      }
+      write_output(make_skipped_row(want_reliable ? "r" : "u"));
+      return 0;
+    }
+    const uint32_t max_conns = adapter->max_connections();
+    if (cfg.conns > max_conns) {
+      std::cerr << "library " << cfg.library << " supports up to "
+                << max_conns << " connections; emit skipped row\n";
+      write_output(make_skipped_row(want_reliable ? "r" : "u"));
       return 0;
     }
   }
@@ -105,13 +103,6 @@ int main(int argc, const char* argv[]) {
           ? rudp_bench::run_server(*adapter, cfg)
           : rudp_bench::run_client(*adapter, cfg);
 
-  if (!cfg.out_path.empty()) {
-    std::ofstream f(cfg.out_path);
-    rudp_bench::write_header(f);
-    rudp_bench::write_row(f, row);
-  } else {
-    rudp_bench::write_header(std::cout);
-    rudp_bench::write_row(std::cout, row);
-  }
+  write_output(row);
   return 0;
 }
