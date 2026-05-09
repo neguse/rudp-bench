@@ -160,8 +160,9 @@ public:
     }
 
     int send(uint32_t conn_id, const void* data, size_t len, bool reliable) override {
+        if (len > max_payload_bytes(reliable)) return -1;
         int channel = reliable ? 0 : 1;
-        uint32_t actual_len = (uint32_t)std::min(len, (size_t)kMaxPayloadBytes);
+        uint32_t actual_len = (uint32_t)len;
 
         if (is_server_) {
             if (!server_) return -1;
@@ -226,6 +227,7 @@ public:
 
     const char* name() const override { return "yojimbo"; }
     bool supports(bool /*reliable*/) const override { return true; }
+    size_t max_payload_bytes(bool /*reliable*/) const override { return kMaxPayloadBytes; }
     bool encryption_on() const override { return true; }
 
 private:

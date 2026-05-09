@@ -67,9 +67,9 @@ scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojim
 # conservative default matrix:
 #   reliable=r,u size=64,1000 conns=1,50 rate=50 msg/sec/conn loss=0 mode=echo,broadcast
 
-# historical stress matrix reproduction:
+# high-rate/high-conn matrix without invalid payload sizes:
 scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib \
-    --sizes=64,65536 --conns=1,1000 --rates=100,100000 --losses=0,5 \
+    --sizes=64,1000 --conns=1,1000 --rates=100,100000 --losses=0,5 \
     --modes=echo,broadcast --reliabilities=r,u --results=results/phase1_stress.csv
 
 # with tc loss injection (requires sudo)
@@ -87,7 +87,7 @@ python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase
 
 - `delivery_ratio` は warmup 期間との境界で `> 1.0` になることがある。warmup 中の send は計測対象外だが、その echo が post-warmup 区間に到着して received としてカウントされるため。これは loopback の RTT が warmup 終了後の echo にまで影響することによる既知のアーティファクトで、長時間ランほど影響は薄まる。
 - `raw_udp` は reliable モードを持たないため、`--reliable=r` シナリオは `na` 行として記録される(計測なし)。
-- **size = 65536 シナリオは現状ペイロード切り詰めが起きる**: UDP の最大データグラムサイズ(65507B)を超えるため、`sendto` が `EMSGSIZE` で失敗し送信側で記録されない、または受信側の 2KB 内部バッファで切り詰められる。Phase 2 までに `mini_rudp` でアプリ層フラグメンテーションを実装するか、シナリオ最大サイズを 8KB 程度に下げる対応が必要。
+- oversized payload は実送信せず `valid=0, invalid_reason=unsupported_payload` として扱う。共通 Phase 1 matrix は全 adapter / reliable mode で有効な `size=64,1000` に固定し、より大きい payload は adapter ごとの `max_payload` を確認して個別に走らせる。
 - canonical result の `valid=0` は、unsupported axis、process timeout/crash、client tick failure、accepted message なしを意味する。低い `delivery_ratio` 自体は有効な性能結果として扱う。
 - `LatencyHist::samples_` と `DeliveryTracker::received_keys_` は計測中に成長し続けるため、高 throughput × 長時間ランで RSS 計測が harness 自身のオーバーヘッドに引っ張られる。Phase 2 実装前にリザーバサンプリング等の対策を入れる予定。
 - `enet` adapter は `poll()` 末尾で 1 回だけ `enet_host_flush` を呼ぶ(ENet 標準の使い方)。`raw_udp` / `mini_rudp` は `send()` 内で kernel に即時 flush するため、高 conns 時に ENet は batching 有利・per-msg latency でやや不利の方向にバイアスする。比較時は留意のこと。

@@ -232,6 +232,38 @@ def main() -> int:
             results,
             diagnostics,
             scenarios,
+            "mini_payload_3000_valid",
+            library="mini_rudp",
+            reliable="r",
+            size="3000",
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "msquic_unreliable_oversize",
+            library="msquic",
+            reliable="u",
+            size="1001",
+            server_raw=False,
+            client_raw=False,
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "msquic_reliable_1001_valid",
+            library="msquic",
+            reliable="r",
+            size="1001",
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
             "unsupported_conns",
             library="slikenet",
             reliable="u",
@@ -314,6 +346,10 @@ def main() -> int:
 
         assert canonical["unsupported_reliability"]["invalid_reason"] == "unsupported_reliability"
         assert canonical["unsupported_payload"]["invalid_reason"] == "unsupported_payload"
+        assert canonical["mini_payload_3000_valid"]["valid"] == "1"
+        assert canonical["mini_payload_3000_valid"]["invalid_reason"] == "ok"
+        assert canonical["msquic_unreliable_oversize"]["invalid_reason"] == "unsupported_payload"
+        assert canonical["msquic_reliable_1001_valid"]["valid"] == "1"
         assert canonical["unsupported_conns"]["invalid_reason"] == "unsupported_conns"
         assert canonical["server_timeout"]["invalid_reason"] == "server_timeout"
         assert canonical["client_crash"]["invalid_reason"] == "client_crash"
@@ -325,7 +361,7 @@ def main() -> int:
         assert scenario_rows["ok"]["idle_policy"] == "spin"
 
         diag = read_rows(diagnostics)
-        assert len(diag) == 20
+        assert len(diag) == 26
         client_diag = [r for r in diag if r["scenario_id"] == "ok" and r["role"] == "client"][0]
         assert client_diag["attempted"] == "200"
         assert client_diag["accepted"] == "200"

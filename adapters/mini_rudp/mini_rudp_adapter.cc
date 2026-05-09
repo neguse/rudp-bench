@@ -18,6 +18,7 @@ namespace {
 
 constexpr uint16_t FLAG_ACK = 1;
 constexpr uint16_t FLAG_REL = 2;
+constexpr size_t MAX_UDP_PAYLOAD = 65507;
 
 struct Header {
   uint16_t flags;
@@ -76,6 +77,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
   bool is_connected(uint32_t) override { return true; }
 
   int send(uint32_t conn_id, const void* data, size_t len, bool reliable) override {
+    if (len > max_payload_bytes(reliable)) return -1;
     auto* c = find_conn(conn_id);
     if (!c) return -1;
     Header h;
@@ -103,7 +105,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
       // client: poll all conn fds
       for (auto& [id, c] : conns_) {
         sockaddr_in s{}; socklen_t s_sl = sizeof(s);
-        uint8_t pkt[2048];
+        uint8_t pkt[MAX_UDP_PAYLOAD];
         ssize_t n = ::recvfrom(c.fd, pkt, sizeof(pkt), 0,
                               reinterpret_cast<sockaddr*>(&s), &s_sl);
         if (n <= 0) continue;
@@ -115,7 +117,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
       return 0;
     }
     // server: single fd
-    uint8_t pkt[2048];
+    uint8_t pkt[MAX_UDP_PAYLOAD];
     ssize_t n = ::recvfrom(fd, pkt, sizeof(pkt), 0,
                           reinterpret_cast<sockaddr*>(&src), &sl);
     if (n <= 0) return 0;
@@ -160,6 +162,9 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
 
   const char* name() const override { return "mini_rudp"; }
   bool supports(bool) const override { return true; }
+  size_t max_payload_bytes(bool /*reliable*/) const override {
+    return MAX_UDP_PAYLOAD - sizeof(Header);
+  }
   bool encryption_on() const override { return false; }
 
  private:

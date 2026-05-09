@@ -150,6 +150,7 @@ class EnetAdapter : public rudp_bench::Adapter {
 
   const char* name() const override { return "enet"; }
   bool supports(bool /*reliable*/) const override { return true; }
+  size_t max_payload_bytes(bool /*reliable*/) const override { return 65536; }
   bool encryption_on() const override { return false; }
 
  private:

@@ -188,6 +188,7 @@ class KcpAdapter : public rudp_bench::Adapter {
   // conv を含めることで server/client 双方が conn_id を特定できる。
   // ----------------------------------------------------------
   int send(uint32_t conn_id, const void* data, size_t len, bool reliable) override {
+    if (len > max_payload_bytes(reliable)) return -1;
     auto it = conns_.find(conn_id);
     if (it == conns_.end()) return -1;
     KcpConn* conn = it->second.get();
@@ -250,6 +251,9 @@ class KcpAdapter : public rudp_bench::Adapter {
 
   const char* name() const override { return "kcp"; }
   bool supports(bool) const override { return true; }
+  size_t max_payload_bytes(bool reliable) const override {
+    return reliable ? 65536 : 65502;
+  }
   bool encryption_on() const override { return false; }
 
  private:

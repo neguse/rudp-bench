@@ -193,6 +193,7 @@ class GnsAdapter : public rudp_bench::Adapter {
 
   const char* name() const override { return "gns"; }
   bool supports(bool /*reliable*/) const override { return true; }
+  size_t max_payload_bytes(bool /*reliable*/) const override { return 65536; }
   bool encryption_on() const override { return true; }
 
   // gns_status_callback から呼ばれる (g_gns.mtx は既に解放済み)

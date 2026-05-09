@@ -61,6 +61,33 @@ int main(int argc, const char* argv[]) {
       row.loss = cfg.loss_pct;
       row.duration_s = cfg.duration_s;
       row.mode = (cfg.mode == rudp_bench::ServerMode::Broadcast) ? "broadcast" : "echo";
+      row.idle_policy = rudp_bench::idle_policy_name(cfg.idle_policy);
+      if (!cfg.out_path.empty()) {
+        std::ofstream f(cfg.out_path);
+        rudp_bench::write_header(f);
+        rudp_bench::write_row(f, row);
+      } else {
+        rudp_bench::write_header(std::cout);
+        rudp_bench::write_row(std::cout, row);
+      }
+      return 0;
+    }
+    const size_t min_payload = 16;
+    const size_t max_payload = adapter->max_payload_bytes(want_reliable);
+    if (cfg.size_bytes < min_payload || cfg.size_bytes > max_payload) {
+      std::cerr << "library " << cfg.library << " supports payload size "
+                << min_payload << ".." << max_payload << " bytes; emit skipped row\n";
+      rudp_bench::CsvRow row;
+      row.library = cfg.library;
+      row.encryption = adapter->encryption_on() ? "on" : "off";
+      row.reliable = want_reliable ? "r" : "u";
+      row.size = cfg.size_bytes;
+      row.conns = cfg.conns;
+      row.rate = cfg.rate_per_conn;
+      row.loss = cfg.loss_pct;
+      row.duration_s = cfg.duration_s;
+      row.mode = (cfg.mode == rudp_bench::ServerMode::Broadcast) ? "broadcast" : "echo";
+      row.idle_policy = rudp_bench::idle_policy_name(cfg.idle_policy);
       if (!cfg.out_path.empty()) {
         std::ofstream f(cfg.out_path);
         rudp_bench::write_header(f);

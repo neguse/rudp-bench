@@ -114,7 +114,7 @@ for lib in ${LIBS//,/ }; do
                 TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + 10))
                 timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
                   --reliable="$reliable" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" \
-                  --mode="$mode" --idle="$IDLE" \
+                  --size="$size" --conns="$conns" --rate="$rate" --mode="$mode" --idle="$IDLE" \
                   --out="$S_OUT" &
                 SPID=$!
                 sleep 0.5
@@ -132,7 +132,7 @@ for lib in ${LIBS//,/ }; do
                 TIMEOUT_S=$((DURATION + WARMUP + 10))
                 timeout "${TIMEOUT_S}s" "$BIN" --library="$lib" --role=server --port="$PORT" \
                   --reliable="$reliable" --duration="$DURATION" --warmup="$WARMUP" --loss="$loss" \
-                  --mode="$mode" --idle="$IDLE" \
+                  --size="$size" --conns="$conns" --rate="$rate" --mode="$mode" --idle="$IDLE" \
                   --out="$S_OUT" &
                 SPID=$!
                 sleep 0.2

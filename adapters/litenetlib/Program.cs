@@ -27,7 +27,8 @@ if (cfg == null)
     return 2;
 }
 
-CsvRow row = cfg.Role == "server" ? RunServer(cfg) : RunClient(cfg);
+CsvRow row = PayloadSupported(cfg) ? (cfg.Role == "server" ? RunServer(cfg) : RunClient(cfg))
+                                   : UnsupportedPayloadRow(cfg);
 
 string header = CsvHeader();
 string line = FormatRow(row);
@@ -41,6 +42,24 @@ else
     Console.WriteLine(line);
 }
 return 0;
+
+static bool PayloadSupported(Config cfg) =>
+    cfg.SizeBytes >= Config.MinPayloadBytes && cfg.SizeBytes <= Config.MaxPayloadBytes;
+
+static CsvRow UnsupportedPayloadRow(Config cfg) => new()
+{
+    Library = cfg.Library,
+    Encryption = "off",
+    Phase = 1,
+    Reliable = cfg.ReliableMode,
+    Size = cfg.SizeBytes,
+    Conns = cfg.Conns,
+    Rate = cfg.Rate,
+    Loss = cfg.Loss,
+    DurationS = cfg.DurationS,
+    Mode = cfg.Mode,
+    IdlePolicy = cfg.IdlePolicy,
+};
 
 // ---------------------------------------------------------------------------
 // CLI parsing
@@ -427,6 +446,9 @@ static string FormatRow(CsvRow r) =>
 
 class Config
 {
+    public const uint MinPayloadBytes = 16;
+    public const uint MaxPayloadBytes = 1000;
+
     public string Library = "litenetlib";
     public string Role = "client";
     public string Host = "127.0.0.1";

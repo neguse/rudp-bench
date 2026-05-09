@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -29,6 +30,9 @@ struct Adapter {
 
   virtual const char* name() const = 0;
   virtual bool supports(bool reliable) const = 0;
+  virtual size_t max_payload_bytes(bool /*reliable*/) const {
+    return std::numeric_limits<size_t>::max();
+  }
   virtual bool encryption_on() const = 0;
 };
 

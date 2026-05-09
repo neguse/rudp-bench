@@ -213,6 +213,9 @@ class MsquicAdapter : public rudp_bench::Adapter {
 
   const char* name() const override { return "msquic"; }
   bool supports(bool /*reliable*/) const override { return true; }
+  size_t max_payload_bytes(bool reliable) const override {
+    return reliable ? 65536 : 1000;
+  }
   bool encryption_on() const override { return true; }
 
   // --- Callback dispatchers (called from msquic internal threads) ---

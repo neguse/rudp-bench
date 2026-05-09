@@ -71,6 +71,7 @@ TEST(RawUdpSmoke, ReportsCapability) {
   auto a = create_adapter("raw_udp");
   EXPECT_TRUE(a->supports(false));
   EXPECT_FALSE(a->supports(true));
+  EXPECT_EQ(a->max_payload_bytes(false), 65507u);
   EXPECT_FALSE(a->encryption_on());
   EXPECT_STREQ(a->name(), "raw_udp");
 }

@@ -16,11 +16,19 @@ SUPPORTED_RELIABILITY = {
     "udt4": {"r"},
 }
 
-# Limits where the current adapter/harness would fail or truncate payloads.
+# Payload caps mirror adapter capability checks. Values are application payload
+# bytes, not wire bytes.
 MAX_PAYLOAD_BYTES = {
-    "raw_udp": 65507,
-    "mini_rudp": 2042,
-    "yojimbo": 4096,
+    "raw_udp": {"u": 65507},
+    "mini_rudp": {"r": 65501, "u": 65501},
+    "enet": {"r": 65536, "u": 65536},
+    "kcp": {"r": 65536, "u": 65502},
+    "slikenet": {"r": 65536, "u": 65536},
+    "udt4": {"r": 65536},
+    "yojimbo": {"r": 4096, "u": 4096},
+    "gns": {"r": 65536, "u": 65536},
+    "msquic": {"r": 65536, "u": 1000},
+    "litenetlib": {"r": 1000, "u": 1000},
 }
 
 # These adapters currently multiplex requested logical conns over one real conn.
@@ -129,7 +137,7 @@ def unsupported_payload(args: argparse.Namespace) -> bool:
         return True
     if size < MIN_PAYLOAD_BYTES:
         return True
-    max_payload = MAX_PAYLOAD_BYTES.get(args.library)
+    max_payload = MAX_PAYLOAD_BYTES.get(args.library, {}).get(args.reliable)
     return max_payload is not None and size > max_payload
 
 

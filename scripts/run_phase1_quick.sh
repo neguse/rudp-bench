@@ -90,7 +90,7 @@ for lib in ${LIBS//,/ }; do
     TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + 10))
     timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
       --reliable="$RELIABLE" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" \
-      --mode="$MODE" --idle="$IDLE" --out="$S_OUT" &
+      --size="$SIZE" --conns="$CONNS" --rate="$RATE" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" &
     SPID=$!
     sleep 0.5
     set +e
@@ -106,7 +106,7 @@ for lib in ${LIBS//,/ }; do
   else
     timeout 60s "$BIN" --library="$lib" --role=server --port="$PORT" \
       --reliable="$RELIABLE" --duration="$DURATION" --warmup=2 --loss="$LOSS" \
-      --mode="$MODE" --idle="$IDLE" --out="$S_OUT" &
+      --size="$SIZE" --conns="$CONNS" --rate="$RATE" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" &
     SPID=$!
     sleep 0.2
     set +e

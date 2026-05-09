@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <thread>
+#include <vector>
 
 namespace rudp_bench { void register_yojimbo_adapter(); }
 
@@ -22,6 +23,8 @@ TEST(YojimboSmoke, Capability) {
     ASSERT_NE(a, nullptr);
     EXPECT_TRUE(a->supports(true));
     EXPECT_TRUE(a->supports(false));
+    EXPECT_EQ(a->max_payload_bytes(true), 4096u);
+    EXPECT_EQ(a->max_payload_bytes(false), 4096u);
     EXPECT_TRUE(a->encryption_on());   // yojimbo は暗号必須
     EXPECT_STREQ(a->name(), "yojimbo");
 }
@@ -66,6 +69,9 @@ TEST(YojimboSmoke, ReliableEcho) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     ASSERT_TRUE(client->is_connected(cid));
+
+    std::vector<uint8_t> oversized(client->max_payload_bytes(true) + 1);
+    EXPECT_EQ(client->send(cid, oversized.data(), oversized.size(), /*reliable=*/true), -1);
 
     const char msg[] = "yojimbo-hello";
     EXPECT_EQ(client->send(cid, msg, sizeof(msg), /*reliable=*/true), 0);

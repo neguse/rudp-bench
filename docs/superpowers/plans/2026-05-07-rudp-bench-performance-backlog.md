@@ -241,7 +241,7 @@ stderr_path
   - Saturation helper defaults to `adaptive` idle and stops on canonical `delivery_ratio`, diagnostics `accepted_ratio`, or canonical `server_cpu_pct`; client CPU remains diagnostic-only.
   - Quick sweep remains a fixed-axis smoke runner.
 
-- [ ] **PERF-006: Remove invalid large-payload scenarios or implement fragmentation**
+- [x] **PERF-006: Remove invalid large-payload scenarios or implement fragmentation**
 
   Problem:
   - 64KB payloads are invalid for raw UDP and currently get truncated or rejected by multiple adapters. yojimbo truncates to 4096B, mini_rudp receives into 2048B buffers, and raw UDP exceeds datagram limits.
@@ -257,6 +257,15 @@ stderr_path
   Acceptance:
   - No adapter silently reports successful delivery with a smaller payload than requested.
   - Phase matrix does not include invalid payload sizes unless fragmentation is implemented.
+
+  Done:
+  - Chose the conservative policy: common Phase 1 payloads stay at `64,1000`; larger payloads must respect per-adapter caps.
+  - Added `Adapter::max_payload_bytes(reliable)` and C++ entrypoint validation that emits a row without sending unsupported payloads.
+  - Added LiteNetLib payload validation with a conservative 1000B cap.
+  - Replaced yojimbo truncation with send failure for payloads above 4096B.
+  - Increased mini_rudp receive buffers so payloads above 2042B are no longer silently truncated.
+  - Updated reducer payload validation to use reliability-specific per-adapter caps.
+  - Added oversize / larger-payload coverage in reducer and adapter tests.
 
 ## P1: Fairness Across Adapters
 
