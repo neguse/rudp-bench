@@ -219,7 +219,7 @@ stderr_path
   - Phase runners pass idle policy through to server/client and record it in `scenarios.csv`.
   - Raw role CSVs include `idle_policy` for standalone runs.
 
-- [ ] **PERF-005: Make Phase 1 script match the intended benchmark matrix**
+- [x] **PERF-005: Make Phase 1 script match the intended benchmark matrix**
 
   Problem:
   - Current sweep uses `size=64,1000`, `conns=1,50`, `rate=50`, `loss=0`. Design calls for larger payloads, higher conns, loss injection, and saturation-rate exploration.
@@ -233,6 +233,13 @@ stderr_path
   Acceptance:
   - Running Phase 1 can reproduce the documented matrix.
   - Quick sweep remains available as smoke, clearly named as such.
+
+  Done:
+  - `scripts/run_phase1.sh` now accepts configurable `--reliabilities`, `--sizes`, `--conns`, `--rates`, `--losses`, `--modes`, `--duration`, and `--warmup` axes.
+  - Conservative default matrix is explicit, and the historical stress matrix is documented as a reproducible command.
+  - Added `scripts/run_saturation.py` for 100 -> 1k -> 10k -> 100k msg/sec/conn discovery.
+  - Saturation helper defaults to `adaptive` idle and stops on canonical `delivery_ratio`, diagnostics `accepted_ratio`, or canonical `server_cpu_pct`; client CPU remains diagnostic-only.
+  - Quick sweep remains a fixed-axis smoke runner.
 
 - [ ] **PERF-006: Remove invalid large-payload scenarios or implement fragmentation**
 

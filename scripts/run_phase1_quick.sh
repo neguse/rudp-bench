@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 1 quick sweep — axis を 1 シナリオに固定して 10 lib 一巡(~5min)。
+# Phase 1 quick smoke sweep — axis を 1 シナリオに固定して 10 lib 一巡(~5min)。
 # 軸: size=100, conns=10, mode=echo, reliable=r, rate=50, loss=0,
 #     duration=20, warmup=2 (litenetlib のみ 5)
 #
