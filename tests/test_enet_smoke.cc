@@ -76,6 +76,7 @@ TEST(EnetSmoke, Capability) {
   ASSERT_NE(a, nullptr);
   EXPECT_TRUE(a->supports(true));
   EXPECT_TRUE(a->supports(false));
+  EXPECT_EQ(a->max_connections(), 4095u);
   EXPECT_FALSE(a->encryption_on());
   EXPECT_STREQ(a->name(), "enet");
 }

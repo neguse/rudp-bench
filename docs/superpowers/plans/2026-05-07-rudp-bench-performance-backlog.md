@@ -504,7 +504,7 @@ delivery_dedup_policy
   - `scripts/plot.py phase1-table` now reads canonical results and reports only delivery, RTT p50/p95/p99, and server CPU.
   - Invalid rows are excluded from metric pivots and summarized by `invalid_reason`.
 
-- [ ] **PERF-019: Add capability metadata for unsupported scenario axes**
+- [x] **PERF-019: Add capability metadata for unsupported scenario axes**
 
   Problem:
   - Unsupported reliability is handled, but max payload, max conns, stream/datagram support, and batching policy are not consistently surfaced.
@@ -516,6 +516,12 @@ delivery_dedup_policy
 
   Acceptance:
   - Invalid comparisons become canonical `valid=false` rows with explicit `invalid_reason`, not silent low throughput.
+
+  Done:
+  - Added a shared static capability table for reducer/reporting metadata: reliability support, payload cap, connection cap, transport mode, and flush policy.
+  - Extended `scenarios.csv` with row-level capability metadata so unsupported axes can be explained without inspecting raw role CSVs.
+  - Added ENet's 4095 peer cap to adapter metadata and reducer validation.
+  - Updated README with the capability table and added reducer coverage for unsupported payload/conns metadata.
 
 - [ ] **PERF-020: Pin process roles or document scheduler policy**
 

@@ -20,6 +20,23 @@ Plan 3-9 complete (all 10 adapters): harness + `raw_udp` + `mini_rudp` baselines
 | litenetlib | off (.NET 8 独立バイナリ) | ✅ |
 | msquic | **on** (QUIC TLS, self-signed cert) | ✅ |
 
+## Capability Metadata
+
+`results/*_scenarios.csv` には各 scenario の `supports_reliability`, `min_payload_bytes`, `max_payload_bytes`, `max_connections`, `transport_mode`, `flush_policy` が出力される。unsupported axis は実送信せず、canonical result で `valid=0` と明示する。
+
+| library | reliable | unreliable | max payload r/u | max conns | transport r/u | flush r/u |
+|---|---:|---:|---:|---:|---|---|
+| raw_udp | no | yes | - / 65507 | unbounded | - / udp_datagram | unsupported / immediate |
+| mini_rudp | yes | yes | 65501 / 65501 | unbounded | udp_datagram_ack / udp_datagram | immediate_retransmit_poll / immediate |
+| enet | yes | yes | 65536 / 65536 | 4095 | enet_packet / enet_packet | poll_flush / poll_flush |
+| kcp | yes | yes | 65536 / 65502 | unbounded | kcp_arq / udp_datagram | poll_update / immediate |
+| slikenet | yes | yes | 65536 / 65536 | 1 | slikenet_message / slikenet_message | library_internal / library_internal |
+| udt4 | yes | no | 65536 / - | unbounded | stream / - | blocking_stream / unsupported |
+| yojimbo | yes | yes | 4096 / 4096 | 64 | yojimbo_message / yojimbo_message | poll_send_packets / poll_send_packets |
+| gns | yes | yes | 65536 / 65536 | unbounded | gns_message / gns_message | no_nagle / no_nagle |
+| msquic | yes | yes | 65536 / 1000 | unbounded | quic_stream / quic_datagram | async_internal / async_internal |
+| litenetlib | yes | yes | 1000 / 1000 | unbounded | litenetlib_message / litenetlib_message | library_internal / library_internal |
+
 ## Dependencies
 
 ```
@@ -81,7 +98,7 @@ python3 scripts/run_saturation.py --libraries=mini_rudp,enet,kcp,slikenet,udt4,y
 python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase1_table.md
 ```
 
-`results/phase1.csv` は比較用の canonical result で、主に `delivery_ratio` と RTT p50/p95/p99、`server_cpu_pct` だけを見る。スイープ時には調査用に `results/phase1_diagnostics.csv` と `results/phase1_scenarios.csv`、role 別 raw CSV を含む `results/phase1_raw/<run_id>/` も出力される。client tick や attempted/accepted 状態などの詳細は diagnostics 側を見る。`results/phase1_scenarios.csv` は `idle_policy` と `flush_policy` を持ち、flush/batching の前提を scenario metadata として記録する。`scripts/run_saturation.py` は 100 -> 1k -> 10k -> 100k msg/sec/conn を順に試し、`delivery_ratio` または diagnostics の `accepted_ratio` が閾値未満になるか、`server_cpu_pct` が閾値以上になったところで次の library に進む。Phase 1 runner の idle policy は既定 `spin`、saturation helper は CPU 閾値を意味ある値にするため既定 `adaptive`。`raw_udp` の saturation は `--libraries=raw_udp --reliable=u` で別に走らせる。
+`results/phase1.csv` は比較用の canonical result で、主に `delivery_ratio` と RTT p50/p95/p99、`server_cpu_pct` だけを見る。スイープ時には調査用に `results/phase1_diagnostics.csv` と `results/phase1_scenarios.csv`、role 別 raw CSV を含む `results/phase1_raw/<run_id>/` も出力される。client tick や attempted/accepted 状態などの詳細は diagnostics 側を見る。`results/phase1_scenarios.csv` は `idle_policy`、capability metadata、`flush_policy` を持ち、unsupported axis や flush/batching の前提を scenario metadata として記録する。`scripts/run_saturation.py` は 100 -> 1k -> 10k -> 100k msg/sec/conn を順に試し、`delivery_ratio` または diagnostics の `accepted_ratio` が閾値未満になるか、`server_cpu_pct` が閾値以上になったところで次の library に進む。Phase 1 runner の idle policy は既定 `spin`、saturation helper は CPU 閾値を意味ある値にするため既定 `adaptive`。`raw_udp` の saturation は `--libraries=raw_udp --reliable=u` で別に走らせる。
 
 ## 既知の挙動・制限
 

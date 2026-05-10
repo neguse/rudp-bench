@@ -136,6 +136,7 @@ class EnetAdapter : public rudp_bench::Adapter {
   const char* name() const override { return "enet"; }
   bool supports(bool /*reliable*/) const override { return true; }
   size_t max_payload_bytes(bool /*reliable*/) const override { return 65536; }
+  uint32_t max_connections() const override { return 4095; }
   const char* flush_policy(bool /*reliable*/) const override { return "poll_flush"; }
   bool encryption_on() const override { return false; }
 

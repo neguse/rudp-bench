@@ -7,49 +7,10 @@ import os
 from pathlib import Path
 from typing import Dict, Optional
 
+import capabilities
+
 
 TIMEOUT_STATUS = 124
-MIN_PAYLOAD_BYTES = 16
-
-SUPPORTED_RELIABILITY = {
-    "raw_udp": {"u"},
-    "udt4": {"r"},
-}
-
-# Payload caps mirror adapter capability checks. Values are application payload
-# bytes, not wire bytes.
-MAX_PAYLOAD_BYTES = {
-    "raw_udp": {"u": 65507},
-    "mini_rudp": {"r": 65501, "u": 65501},
-    "enet": {"r": 65536, "u": 65536},
-    "kcp": {"r": 65536, "u": 65502},
-    "slikenet": {"r": 65536, "u": 65536},
-    "udt4": {"r": 65536},
-    "yojimbo": {"r": 4096, "u": 4096},
-    "gns": {"r": 65536, "u": 65536},
-    "msquic": {"r": 65536, "u": 1000},
-    "litenetlib": {"r": 1000, "u": 1000},
-}
-
-# These adapters currently multiplex requested logical conns over one real conn.
-MAX_CONNS = {
-    "slikenet": 1,
-    "yojimbo": 64,
-}
-
-# Flush/batching metadata is diagnostic scenario context, not a ranking metric.
-FLUSH_POLICY = {
-    "raw_udp": {"r": "unsupported", "u": "immediate"},
-    "mini_rudp": {"r": "immediate_retransmit_poll", "u": "immediate"},
-    "enet": {"r": "poll_flush", "u": "poll_flush"},
-    "kcp": {"r": "poll_update", "u": "immediate"},
-    "slikenet": {"r": "library_internal", "u": "library_internal"},
-    "udt4": {"r": "blocking_stream", "u": "unsupported"},
-    "yojimbo": {"r": "poll_send_packets", "u": "poll_send_packets"},
-    "gns": {"r": "no_nagle", "u": "no_nagle"},
-    "msquic": {"r": "async_internal", "u": "async_internal"},
-    "litenetlib": {"r": "library_internal", "u": "library_internal"},
-}
 
 RESULT_FIELDS = [
     "run_id",
@@ -98,6 +59,11 @@ SCENARIO_FIELDS = [
     "warmup_s",
     "idle_policy",
     "flush_policy",
+    "supports_reliability",
+    "min_payload_bytes",
+    "max_payload_bytes",
+    "max_connections",
+    "transport_mode",
 ]
 
 
@@ -139,8 +105,7 @@ def int_or_none(value: object) -> Optional[int]:
 def unsupported_reliability(args: argparse.Namespace,
                             server: Optional[Dict[str, str]],
                             client: Optional[Dict[str, str]]) -> bool:
-    supported = SUPPORTED_RELIABILITY.get(args.library)
-    if supported is not None and args.reliable not in supported:
+    if not capabilities.supports_reliability(args.library, args.reliable):
         return True
     return (server is not None and server.get("reliable") == "na") or (
         client is not None and client.get("reliable") == "na"
@@ -151,9 +116,9 @@ def unsupported_payload(args: argparse.Namespace) -> bool:
     size = int_or_none(args.size)
     if size is None:
         return True
-    if size < MIN_PAYLOAD_BYTES:
+    if size < capabilities.MIN_PAYLOAD_BYTES:
         return True
-    max_payload = MAX_PAYLOAD_BYTES.get(args.library, {}).get(args.reliable)
+    max_payload = capabilities.max_payload_bytes(args.library, args.reliable)
     return max_payload is not None and size > max_payload
 
 
@@ -161,7 +126,7 @@ def unsupported_conns(args: argparse.Namespace) -> bool:
     conns = int_or_none(args.conns)
     if conns is None:
         return True
-    max_conns = MAX_CONNS.get(args.library)
+    max_conns = capabilities.max_connections(args.library)
     return max_conns is not None and conns > max_conns
 
 
@@ -223,11 +188,12 @@ def canonical_delivery_ratio(client: Optional[Dict[str, str]]) -> str:
 def scenario_flush_policy(args: argparse.Namespace,
                           server: Optional[Dict[str, str]],
                           client: Optional[Dict[str, str]]) -> str:
+    if not capabilities.supports_reliability(args.library, args.reliable):
+        return capabilities.flush_policy(args.library, args.reliable)
     for raw in (client, server):
         if raw is not None and raw.get("flush_policy"):
             return raw["flush_policy"]
-    by_reliability = FLUSH_POLICY.get(args.library, {})
-    return by_reliability.get(args.reliable, "unknown")
+    return capabilities.flush_policy(args.library, args.reliable)
 
 
 def invalid_reason(server: Optional[Dict[str, str]],
@@ -303,6 +269,7 @@ def append(args: argparse.Namespace) -> int:
     client = read_raw_row(args.client)
     reason = invalid_reason(server, client, args)
     valid = "1" if reason == "ok" else "0"
+    capability_metadata = capabilities.scenario_metadata(args.library, args.reliable)
 
     append_row(args.scenarios, SCENARIO_FIELDS, {
         "run_id": args.run_id,
@@ -318,6 +285,7 @@ def append(args: argparse.Namespace) -> int:
         "warmup_s": args.warmup,
         "idle_policy": args.idle,
         "flush_policy": scenario_flush_policy(args, server, client),
+        **capability_metadata,
     })
 
     append_row(args.diagnostics, DIAGNOSTIC_FIELDS,

@@ -301,6 +301,18 @@ def main() -> int:
             results,
             diagnostics,
             scenarios,
+            "enet_conns_4096_unsupported",
+            library="enet",
+            reliable="r",
+            conns="4096",
+            server_raw=False,
+            client_raw=False,
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
             "server_timeout",
             server_raw=False,
             server_status="124",
@@ -378,6 +390,7 @@ def main() -> int:
         assert canonical["unsupported_conns"]["invalid_reason"] == "unsupported_conns"
         assert canonical["yojimbo_conns_2_valid"]["valid"] == "1"
         assert canonical["yojimbo_conns_65_unsupported"]["invalid_reason"] == "unsupported_conns"
+        assert canonical["enet_conns_4096_unsupported"]["invalid_reason"] == "unsupported_conns"
         assert canonical["server_timeout"]["invalid_reason"] == "server_timeout"
         assert canonical["client_crash"]["invalid_reason"] == "client_crash"
         assert canonical["client_tick"]["invalid_reason"] == "client_tick"
@@ -387,10 +400,21 @@ def main() -> int:
         assert canonical["ratio_recomputed"]["delivery_ratio"] == "0.5000"
         assert scenario_rows["ok"]["idle_policy"] == "spin"
         assert scenario_rows["ok"]["flush_policy"] == "immediate"
+        assert scenario_rows["ok"]["supports_reliability"] == "1"
+        assert scenario_rows["ok"]["max_payload_bytes"] == "65507"
+        assert scenario_rows["ok"]["max_connections"] == "unbounded"
+        assert scenario_rows["ok"]["transport_mode"] == "udp_datagram"
+        assert scenario_rows["unsupported_reliability"]["supports_reliability"] == "0"
+        assert scenario_rows["unsupported_reliability"]["flush_policy"] == "unsupported"
+        assert scenario_rows["unsupported_reliability"]["transport_mode"] == "unsupported"
         assert scenario_rows["unsupported_payload"]["flush_policy"] == "poll_send_packets"
+        assert scenario_rows["unsupported_payload"]["max_payload_bytes"] == "4096"
+        assert scenario_rows["unsupported_payload"]["max_connections"] == "64"
+        assert scenario_rows["unsupported_conns"]["max_connections"] == "1"
+        assert scenario_rows["enet_conns_4096_unsupported"]["max_connections"] == "4095"
 
         diag = read_rows(diagnostics)
-        assert len(diag) == 30
+        assert len(diag) == 32
         client_diag = [r for r in diag if r["scenario_id"] == "ok" and r["role"] == "client"][0]
         assert client_diag["attempted"] == "200"
         assert client_diag["accepted"] == "200"
