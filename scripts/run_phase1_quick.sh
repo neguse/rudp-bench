@@ -16,6 +16,8 @@ SCENARIOS=""
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RAW_DIR=""
 IDLE="spin"
+SERVER_CPU=""
+CLIENT_CPU=""
 SIZE=100
 CONNS=10
 
@@ -29,6 +31,8 @@ for arg in "$@"; do
     --run-id=*) RUN_ID="${arg#*=}" ;;
     --raw-dir=*) RAW_DIR="${arg#*=}" ;;
     --idle=*) IDLE="${arg#*=}" ;;
+    --server-cpu=*) SERVER_CPU="${arg#*=}" ;;
+    --client-cpu=*) CLIENT_CPU="${arg#*=}" ;;
     --conns=*) CONNS="${arg#*=}" ;;
     --size=*) SIZE="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
@@ -37,6 +41,10 @@ done
 
 if [ "$IDLE" != "spin" ] && [ "$IDLE" != "adaptive" ]; then
   echo "invalid --idle: $IDLE" >&2
+  exit 2
+fi
+if { [ -n "$SERVER_CPU" ] || [ -n "$CLIENT_CPU" ]; } && ! command -v taskset >/dev/null; then
+  echo "--server-cpu/--client-cpu require taskset" >&2
   exit 2
 fi
 
@@ -60,6 +68,17 @@ mkdir -p "$(dirname "$RESULTS")" "$(dirname "$DIAGNOSTICS")" "$(dirname "$SCENAR
 
 python3 scripts/reduce_result.py init \
   --results "$RESULTS" --diagnostics "$DIAGNOSTICS" --scenarios "$SCENARIOS"
+
+run_timeout() {
+  local cpu="$1"
+  local timeout_s="$2"
+  shift 2
+  if [ -n "$cpu" ]; then
+    timeout "${timeout_s}s" taskset -c "$cpu" "$@"
+  else
+    timeout "${timeout_s}s" "$@"
+  fi
+}
 
 # 軸固定 (size, conns は --size, --conns で上書き可能)
 RELIABLE=r
@@ -88,13 +107,13 @@ for lib in ${LIBS//,/ }; do
     fi
     WARMUP_ARG="$LITENETLIB_WARMUP"
     TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + 10))
-    timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
+    run_timeout "$SERVER_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
       --reliable="$RELIABLE" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" \
       --size="$SIZE" --conns="$CONNS" --rate="$RATE" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" &
     SPID=$!
     sleep 0.5
     set +e
-    timeout "${TIMEOUT_S}s" "$LITENETLIB_BIN" --library="$lib" --role=client \
+    run_timeout "$CLIENT_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=client \
       --host=127.0.0.1 --port="$PORT" \
       --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
       --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
@@ -104,13 +123,13 @@ for lib in ${LIBS//,/ }; do
     S_STATUS=$?
     set -e
   else
-    timeout 60s "$BIN" --library="$lib" --role=server --port="$PORT" \
+    run_timeout "$SERVER_CPU" 60 "$BIN" --library="$lib" --role=server --port="$PORT" \
       --reliable="$RELIABLE" --duration="$DURATION" --warmup=2 --loss="$LOSS" \
       --size="$SIZE" --conns="$CONNS" --rate="$RATE" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" &
     SPID=$!
     sleep 0.2
     set +e
-    timeout 60s "$BIN" --library="$lib" --role=client \
+    run_timeout "$CLIENT_CPU" 60 "$BIN" --library="$lib" --role=client \
       --host=127.0.0.1 --port="$PORT" \
       --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
       --duration="$DURATION" --warmup=2 --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
@@ -128,7 +147,8 @@ for lib in ${LIBS//,/ }; do
     --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
     --library "$lib" --reliable "$RELIABLE" --size "$SIZE" --conns "$CONNS" \
     --rate "$RATE" --loss "$LOSS" --mode "$MODE" \
-    --duration "$DURATION" --warmup "$WARMUP_ARG" --idle "$IDLE"
+    --duration "$DURATION" --warmup "$WARMUP_ARG" --idle "$IDLE" \
+    --server-cpu-pin "$SERVER_CPU" --client-cpu-pin "$CLIENT_CPU"
 done
 
 echo "wrote $RESULTS"

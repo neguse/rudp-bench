@@ -523,7 +523,7 @@ delivery_dedup_policy
   - Added ENet's 4095 peer cap to adapter metadata and reducer validation.
   - Updated README with the capability table and added reducer coverage for unsupported payload/conns metadata.
 
-- [ ] **PERF-020: Pin process roles or document scheduler policy**
+- [x] **PERF-020: Pin process roles or document scheduler policy**
 
   Problem:
   - On one host, spinning client can steal CPU from server/protocol workers if processes are not pinned.
@@ -535,6 +535,11 @@ delivery_dedup_policy
 
   Acceptance:
   - Benchmark output records whether client/server were pinned.
+
+  Done:
+  - Added `--server-cpu` and `--client-cpu` to phase runners; specified roles are launched through `taskset -c`.
+  - Added `server_cpu_pin`, `client_cpu_pin`, and `pinning_policy` to `scenarios.csv` and saturation summaries.
+  - Documented the recommended same-host policy: pin server/client to separate CPUs for latency-focused runs, otherwise treat `pinning_policy=none` as OS-scheduled.
 
 ## Suggested Execution Order
 

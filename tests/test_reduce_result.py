@@ -99,6 +99,8 @@ def append_case(
     client_status: str = "0",
     server_overrides=None,
     client_overrides=None,
+    server_cpu_pin: str = "",
+    client_cpu_pin: str = "",
 ):
     server = tmp / f"{scenario_id}_server.csv"
     client = tmp / f"{scenario_id}_client.csv"
@@ -179,6 +181,10 @@ def append_case(
             "0",
             "--idle",
             "spin",
+            "--server-cpu-pin",
+            server_cpu_pin,
+            "--client-cpu-pin",
+            client_cpu_pin,
         ]
     )
 
@@ -207,6 +213,15 @@ def main() -> int:
         )
 
         append_case(tmp, results, diagnostics, scenarios, "ok")
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "pinned",
+            server_cpu_pin="0",
+            client_cpu_pin="1",
+        )
         append_case(
             tmp,
             results,
@@ -380,6 +395,7 @@ def main() -> int:
         assert canonical["ok"]["delivery_ratio"] == "1.0000"
         assert canonical["ok"]["rtt_p95_us"] == "20"
         assert canonical["ok"]["server_cpu_pct"] == "7.50"
+        assert canonical["pinned"]["valid"] == "1"
 
         assert canonical["unsupported_reliability"]["invalid_reason"] == "unsupported_reliability"
         assert canonical["unsupported_payload"]["invalid_reason"] == "unsupported_payload"
@@ -399,6 +415,7 @@ def main() -> int:
         assert canonical["low_delivery_is_valid"]["invalid_reason"] == "ok"
         assert canonical["ratio_recomputed"]["delivery_ratio"] == "0.5000"
         assert scenario_rows["ok"]["idle_policy"] == "spin"
+        assert scenario_rows["ok"]["pinning_policy"] == "none"
         assert scenario_rows["ok"]["flush_policy"] == "immediate"
         assert scenario_rows["ok"]["supports_reliability"] == "1"
         assert scenario_rows["ok"]["max_payload_bytes"] == "65507"
@@ -412,9 +429,12 @@ def main() -> int:
         assert scenario_rows["unsupported_payload"]["max_connections"] == "64"
         assert scenario_rows["unsupported_conns"]["max_connections"] == "1"
         assert scenario_rows["enet_conns_4096_unsupported"]["max_connections"] == "4095"
+        assert scenario_rows["pinned"]["server_cpu_pin"] == "0"
+        assert scenario_rows["pinned"]["client_cpu_pin"] == "1"
+        assert scenario_rows["pinned"]["pinning_policy"] == "server=0;client=1"
 
         diag = read_rows(diagnostics)
-        assert len(diag) == 32
+        assert len(diag) == 34
         client_diag = [r for r in diag if r["scenario_id"] == "ok" and r["role"] == "client"][0]
         assert client_diag["attempted"] == "200"
         assert client_diag["accepted"] == "200"

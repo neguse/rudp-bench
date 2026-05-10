@@ -23,6 +23,9 @@ SUMMARY_FIELDS = [
     "loss",
     "mode",
     "idle_policy",
+    "server_cpu_pin",
+    "client_cpu_pin",
+    "pinning_policy",
     "flush_policy",
     "valid",
     "invalid_reason",
@@ -70,6 +73,12 @@ def to_float(value: object) -> Optional[float]:
 
 def is_valid(value: object) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes")
+
+
+def format_pinning_policy(server_pin: str, client_pin: str) -> str:
+    if not server_pin and not client_pin:
+        return "none"
+    return f"server={server_pin or 'none'};client={client_pin or 'none'}"
 
 
 def classify_stop_reason(
@@ -139,6 +148,8 @@ def run_phase1(args: argparse.Namespace, lib: str, rate: str, run_dir: Path) -> 
         f"--raw-dir={raw_dir}",
         f"--run-id={scenario_run_id}",
         f"--idle={args.idle}",
+        f"--server-cpu={args.server_cpu}",
+        f"--client-cpu={args.client_cpu}",
         f"--reliabilities={args.reliable}",
         f"--sizes={args.size}",
         f"--conns={args.conns}",
@@ -177,6 +188,11 @@ def run_phase1(args: argparse.Namespace, lib: str, rate: str, run_dir: Path) -> 
         "loss": args.loss,
         "mode": args.mode,
         "idle_policy": args.idle,
+        "server_cpu_pin": scenario.get("server_cpu_pin", "") if scenario else args.server_cpu,
+        "client_cpu_pin": scenario.get("client_cpu_pin", "") if scenario else args.client_cpu,
+        "pinning_policy": scenario.get("pinning_policy", "") if scenario else format_pinning_policy(
+            args.server_cpu, args.client_cpu
+        ),
         "flush_policy": scenario.get("flush_policy", "") if scenario else "",
         "valid": result.get("valid", "") if result else "0",
         "invalid_reason": result.get("invalid_reason", "") if result else stop_reason,
@@ -228,6 +244,8 @@ def main() -> int:
     p.add_argument("--duration", default="10")
     p.add_argument("--warmup", default="2")
     p.add_argument("--idle", default="adaptive", choices=["spin", "adaptive"])
+    p.add_argument("--server-cpu", default="")
+    p.add_argument("--client-cpu", default="")
     p.add_argument("--min-delivery", type=float, default=0.95)
     p.add_argument("--min-accepted", type=float, default=0.95)
     p.add_argument("--max-server-cpu", type=float, default=95.0)

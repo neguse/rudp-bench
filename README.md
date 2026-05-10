@@ -89,6 +89,9 @@ scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojim
     --sizes=64,1000 --conns=1,1000 --rates=100,100000 --losses=0,5 \
     --modes=echo,broadcast --reliabilities=r,u --results=results/phase1_stress.csv
 
+# optional CPU pinning for same-host runs:
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp --server-cpu=0 --client-cpu=1 --results=results/phase1_pinned.csv
+
 # with tc loss injection (requires sudo)
 scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib --results=results/phase1.csv --loss-injection
 
@@ -98,7 +101,7 @@ python3 scripts/run_saturation.py --libraries=mini_rudp,enet,kcp,slikenet,udt4,y
 python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase1_table.md
 ```
 
-`results/phase1.csv` は比較用の canonical result で、主に `delivery_ratio` と RTT p50/p95/p99、`server_cpu_pct` だけを見る。スイープ時には調査用に `results/phase1_diagnostics.csv` と `results/phase1_scenarios.csv`、role 別 raw CSV を含む `results/phase1_raw/<run_id>/` も出力される。client tick や attempted/accepted 状態などの詳細は diagnostics 側を見る。`results/phase1_scenarios.csv` は `idle_policy`、capability metadata、`flush_policy` を持ち、unsupported axis や flush/batching の前提を scenario metadata として記録する。`scripts/run_saturation.py` は 100 -> 1k -> 10k -> 100k msg/sec/conn を順に試し、`delivery_ratio` または diagnostics の `accepted_ratio` が閾値未満になるか、`server_cpu_pct` が閾値以上になったところで次の library に進む。Phase 1 runner の idle policy は既定 `spin`、saturation helper は CPU 閾値を意味ある値にするため既定 `adaptive`。`raw_udp` の saturation は `--libraries=raw_udp --reliable=u` で別に走らせる。
+`results/phase1.csv` は比較用の canonical result で、主に `delivery_ratio` と RTT p50/p95/p99、`server_cpu_pct` だけを見る。スイープ時には調査用に `results/phase1_diagnostics.csv` と `results/phase1_scenarios.csv`、role 別 raw CSV を含む `results/phase1_raw/<run_id>/` も出力される。client tick や attempted/accepted 状態などの詳細は diagnostics 側を見る。`results/phase1_scenarios.csv` は `idle_policy`、`server_cpu_pin`、`client_cpu_pin`、`pinning_policy`、capability metadata、`flush_policy` を持ち、scheduler/pinning、unsupported axis、flush/batching の前提を scenario metadata として記録する。`scripts/run_saturation.py` は 100 -> 1k -> 10k -> 100k msg/sec/conn を順に試し、`delivery_ratio` または diagnostics の `accepted_ratio` が閾値未満になるか、`server_cpu_pct` が閾値以上になったところで次の library に進む。Phase 1 runner の idle policy は既定 `spin`、saturation helper は CPU 閾値を意味ある値にするため既定 `adaptive`。`raw_udp` の saturation は `--libraries=raw_udp --reliable=u` で別に走らせる。
 
 ## 既知の挙動・制限
 
@@ -114,3 +117,4 @@ python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase
 - `kcp` adapter の unreliable は KCP を完全バイパスし raw sendto で実装するため、同モードの RTT は raw_udp と同程度になる。信頼性は持たない。
 - `udt4` は unreliable モードを持たないため、`--reliable=u` シナリオは `na` 行として記録される(計測なし)。adapter の `supports(false)` が false を返すことで harness が自動的に na を出力する。UDT4 は SOCK_STREAM over UDP でありメッセージ境界を持たないため、adapter 内部で 4 バイト LE 長プレフィックスによるフレーミングを行っている。ソースは system apt パッケージ `libudt-dev 4.11+dfsg1` を使用(GitHub fork は環境から到達不可のため)。
 - `diagnostics.csv` の `client_*` 列は client が負荷発生器として破綻していないかを見る診断値。主目的の ranking 指標ではないが、`client_tick_ok=0` のシナリオは canonical result で `valid=0, invalid_reason=client_tick` になる。
+- 同一ホストで latency を比較する場合は、client の spin が server/protocol worker から CPU を奪わないよう `--server-cpu` / `--client-cpu` で別 CPU に pin することを推奨する。未指定の場合は `pinning_policy=none` として記録され、OS scheduler 任せの結果として扱う。

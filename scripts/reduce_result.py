@@ -58,6 +58,9 @@ SCENARIO_FIELDS = [
     "duration_s",
     "warmup_s",
     "idle_policy",
+    "server_cpu_pin",
+    "client_cpu_pin",
+    "pinning_policy",
     "flush_policy",
     "supports_reliability",
     "min_payload_bytes",
@@ -196,6 +199,14 @@ def scenario_flush_policy(args: argparse.Namespace,
     return capabilities.flush_policy(args.library, args.reliable)
 
 
+def pinning_policy(args: argparse.Namespace) -> str:
+    server_pin = args.server_cpu_pin or ""
+    client_pin = args.client_cpu_pin or ""
+    if not server_pin and not client_pin:
+        return "none"
+    return f"server={server_pin or 'none'};client={client_pin or 'none'}"
+
+
 def invalid_reason(server: Optional[Dict[str, str]],
                    client: Optional[Dict[str, str]],
                    args: argparse.Namespace) -> str:
@@ -284,6 +295,9 @@ def append(args: argparse.Namespace) -> int:
         "duration_s": args.duration,
         "warmup_s": args.warmup,
         "idle_policy": args.idle,
+        "server_cpu_pin": args.server_cpu_pin,
+        "client_cpu_pin": args.client_cpu_pin,
+        "pinning_policy": pinning_policy(args),
         "flush_policy": scenario_flush_policy(args, server, client),
         **capability_metadata,
     })
@@ -353,6 +367,8 @@ def main() -> int:
     append_p.add_argument("--duration", required=True)
     append_p.add_argument("--warmup", required=True)
     append_p.add_argument("--idle", default="spin", choices=["spin", "adaptive"])
+    append_p.add_argument("--server-cpu-pin", default="")
+    append_p.add_argument("--client-cpu-pin", default="")
     append_p.set_defaults(func=append)
 
     args = p.parse_args()
