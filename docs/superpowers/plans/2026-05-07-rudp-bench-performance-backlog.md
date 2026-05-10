@@ -349,7 +349,7 @@ stderr_path
 
 ## P1: Harness Overhead
 
-- [ ] **PERF-011: Bound latency sampling memory**
+- [x] **PERF-011: Bound latency sampling memory**
 
   Problem:
   - `LatencyHist::samples_` stores every RTT sample and sorts at the end. High throughput and long runs can make harness memory and final sort cost dominate.
@@ -361,6 +361,12 @@ stderr_path
 
   Acceptance:
   - Latency memory use is bounded by configuration, not message count.
+
+  Done:
+  - Replaced full RTT sample vectors with bounded fixed histograms in C++ and LiteNetLib.
+  - Kept p50/p95/p99 output columns unchanged.
+  - Exact 1us bins are used through 10ms, 100us bins through 1s, and 1ms bins through 60s; larger values are tracked as overflow and return the observed max when selected by percentile.
+  - Added tests for exact percentiles, bounded storage, and coarse-bin percentile behavior.
 
 - [ ] **PERF-012: Bound delivery dedup memory**
 

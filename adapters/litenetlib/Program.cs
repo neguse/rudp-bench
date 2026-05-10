@@ -621,17 +621,65 @@ class ClientTickStats
 
 class LatencyHist
 {
-    private readonly List<ulong> samples_ = new();
-    private bool sorted_ = false;
+    private const ulong ExactMaxUs = 10_000UL;
+    private const ulong FineMaxUs = 1_000_000UL;
+    private const ulong CoarseMaxUs = 60_000_000UL;
+    private const ulong FineBinUs = 100UL;
+    private const ulong CoarseBinUs = 1_000UL;
+    private const int ExactBins = 10_001;
+    private const int FineBins = 9_900;
+    private const int CoarseBins = 59_000;
+    private const int BinCount = ExactBins + FineBins + CoarseBins;
 
-    public void RecordUs(ulong us) { samples_.Add(us); sorted_ = false; }
+    private readonly ulong[] bins_ = new ulong[BinCount];
+    private ulong count_;
+    private ulong overflow_;
+    private ulong max_;
+
+    public void RecordUs(ulong us)
+    {
+        count_++;
+        if (us > max_) max_ = us;
+        int index = BinIndex(us);
+        if (index < 0)
+        {
+            overflow_++;
+            return;
+        }
+        bins_[index]++;
+    }
 
     public ulong PercentileUs(double p)
     {
-        if (samples_.Count == 0) return 0;
-        if (!sorted_) { samples_.Sort(); sorted_ = true; }
-        int idx = (int)(p * (samples_.Count - 1));
-        return samples_[idx];
+        if (count_ == 0) return 0;
+        double q = Math.Clamp(p, 0.0, 1.0);
+        ulong target = (ulong)(q * (double)(count_ - 1)) + 1;
+        ulong seen = 0;
+        for (int i = 0; i < bins_.Length; i++)
+        {
+            seen += bins_[i];
+            if (seen >= target) return BinUpperBoundUs(i);
+        }
+        _ = overflow_;
+        return max_;
+    }
+
+    private static int BinIndex(ulong us)
+    {
+        if (us <= ExactMaxUs) return (int)us;
+        if (us <= FineMaxUs)
+            return ExactBins + (int)((us - ExactMaxUs - 1) / FineBinUs);
+        if (us <= CoarseMaxUs)
+            return ExactBins + FineBins + (int)((us - FineMaxUs - 1) / CoarseBinUs);
+        return -1;
+    }
+
+    private static ulong BinUpperBoundUs(int index)
+    {
+        if (index < ExactBins) return (ulong)index;
+        if (index < ExactBins + FineBins)
+            return ExactMaxUs + ((ulong)(index - ExactBins) + 1) * FineBinUs;
+        return FineMaxUs + ((ulong)(index - ExactBins - FineBins) + 1) * CoarseBinUs;
     }
 }
 
