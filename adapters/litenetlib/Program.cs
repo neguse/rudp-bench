@@ -9,6 +9,7 @@
 
 using LiteNetLib;
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -126,12 +127,12 @@ static CsvRow RunServer(Config cfg)
     var manager = new NetManager(listener) { AutoRecycle = true };
 
     // 受信メッセージキュー（PollEvents()内で同期的にpushされる）
-    var inbox = new List<(NetPeer peer, byte[] data)>();
+    var inbox = new PooledInbox<NetPeer>();
 
     listener.ConnectionRequestEvent += req => req.AcceptIfKey("rudpbench");
     listener.NetworkReceiveEvent += (peer, reader, _, _) =>
     {
-        inbox.Add((peer, reader.GetRemainingBytes()));
+        inbox.Add(peer, reader);
     };
 
     manager.Start(cfg.Port);
@@ -157,17 +158,17 @@ static CsvRow RunServer(Config cfg)
         manager.PollEvents();
         bool didWork = inbox.Count > 0;
 
-        foreach (var (peer, data) in inbox)
+        foreach (var msg in inbox.Entries)
         {
-            knownPeers.Add(peer);
+            knownPeers.Add(msg.Conn);
             if (broadcast)
             {
                 foreach (var target in knownPeers)
-                    target.Send(data, deliveryMethod);
+                    target.Send(new ReadOnlySpan<byte>(msg.Buffer, 0, msg.Length), 0, deliveryMethod);
             }
             else
             {
-                peer.Send(data, deliveryMethod);
+                msg.Conn.Send(new ReadOnlySpan<byte>(msg.Buffer, 0, msg.Length), 0, deliveryMethod);
             }
         }
         inbox.Clear();
@@ -213,7 +214,7 @@ static CsvRow RunClient(Config cfg)
     var connected = new bool[cfg.Conns];
 
     // 受信メッセージキュー（各 listener から conn_id 付きで push）
-    var inbox = new List<(uint connId, byte[] data)>();
+    var inbox = new PooledInbox<uint>();
 
     for (uint i = 0; i < cfg.Conns; i++)
     {
@@ -221,7 +222,7 @@ static CsvRow RunClient(Config cfg)
         var listener = new EventBasedNetListener();
         listener.PeerConnectedEvent += _ => connected[connId] = true;
         listener.NetworkReceiveEvent += (_, reader, _, _) =>
-            inbox.Add((connId, reader.GetRemainingBytes()));
+            inbox.Add(connId, reader);
 
         var manager = new NetManager(listener) { AutoRecycle = true };
         if (!manager.Start())
@@ -336,24 +337,24 @@ static CsvRow RunClient(Config cfg)
         for (uint i = 0; i < cfg.Conns; i++) managers[i].PollEvents();
 
         ulong drainedThisTick = 0;
-        foreach (var (connId, data) in inbox)
+        foreach (var msg in inbox.Entries)
         {
             drainedThisTick++;
             nowTicks = Stopwatch.GetTimestamp();
             bool inMeasureNow = nowTicks >= warmupEndTicks;
 
-            if (data.Length < 16) continue;
+            if (msg.Length < 16) continue;
 
-            ulong seq = BitConverter.ToUInt64(data, 0);
-            ulong tsNs = BitConverter.ToUInt64(data, 8);
+            ulong seq = BitConverter.ToUInt64(msg.Buffer, 0);
+            ulong tsNs = BitConverter.ToUInt64(msg.Buffer, 8);
             ulong nowNs = (ulong)(nowTicks * 1_000_000_000L / Stopwatch.Frequency);
             ulong rttUs = (nowNs > tsNs) ? (nowNs - tsNs) / 1000 : 0;
 
             if (inMeasureNow)
             {
                 rtt.RecordUs(rttUs);
-                throughput.Record((ulong)data.Length);
-                if (delivery.MarkReceived(seq, connId) && outstanding > 0)
+                throughput.Record((ulong)msg.Length);
+                if (delivery.MarkReceived(seq, msg.Conn) && outstanding > 0)
                     outstanding--;
             }
         }
@@ -527,6 +528,43 @@ class CsvRow
     public ulong ClientOutstandingMax;
     public uint ClientTickOk;
     public string DeliveryDedupPolicy = DeliveryTracker.DedupPolicy;
+}
+
+sealed class PooledInbox<TConn>
+{
+    public readonly struct Entry
+    {
+        public Entry(TConn conn, byte[] buffer, int length)
+        {
+            Conn = conn;
+            Buffer = buffer;
+            Length = length;
+        }
+
+        public TConn Conn { get; }
+        public byte[] Buffer { get; }
+        public int Length { get; }
+    }
+
+    private readonly List<Entry> entries_ = new();
+
+    public IReadOnlyList<Entry> Entries => entries_;
+    public int Count => entries_.Count;
+
+    public void Add(TConn conn, NetPacketReader reader)
+    {
+        int len = reader.AvailableBytes;
+        byte[] buf = ArrayPool<byte>.Shared.Rent(len);
+        reader.GetBytes(buf, len);
+        entries_.Add(new Entry(conn, buf, len));
+    }
+
+    public void Clear()
+    {
+        foreach (var entry in entries_)
+            ArrayPool<byte>.Shared.Return(entry.Buffer);
+        entries_.Clear();
+    }
 }
 
 static class TickUtil

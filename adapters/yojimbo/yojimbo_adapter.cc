@@ -14,6 +14,7 @@
 
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
+#include "harness/inbound_queue.h"
 
 #include <chrono>
 #include <cstring>
@@ -194,19 +195,7 @@ public:
     }
 
     int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
-        if (inbox_.empty()) return 0;
-        auto& m = inbox_.front();
-        if (m.data.size() > cap) {
-            *out_len = m.data.size();
-            *out_conn_id = m.conn_id;
-            inbox_.pop_front();
-            return -1;
-        }
-        std::memcpy(buf, m.data.data(), m.data.size());
-        *out_len = m.data.size();
-        *out_conn_id = m.conn_id;
-        inbox_.pop_front();
-        return 1;
+        return inbox_.recv(buf, cap, out_len, out_conn_id);
     }
 
     void poll() override {
@@ -242,11 +231,6 @@ public:
     bool encryption_on() const override { return true; }
 
 private:
-    struct InboundMsg {
-        uint32_t conn_id;
-        std::vector<uint8_t> data;
-    };
-
     void drain_server_messages() {
         for (int ci = 0; ci < server_->GetMaxClients(); ++ci) {
             if (!server_->IsClientConnected(ci)) continue;
@@ -254,10 +238,7 @@ private:
                 yojimbo::Message* raw;
                 while ((raw = server_->ReceiveMessage(ci, ch)) != nullptr) {
                     auto* m = static_cast<BenchMessage*>(raw);
-                    InboundMsg msg;
-                    msg.conn_id = (uint32_t)ci;
-                    msg.data.assign(m->data, m->data + m->length);
-                    inbox_.push_back(std::move(msg));
+                    inbox_.enqueue((uint32_t)ci, m->data, m->length);
                     server_->ReleaseMessage(ci, raw);
                 }
             }
@@ -269,10 +250,7 @@ private:
             yojimbo::Message* raw;
             while ((raw = client->ReceiveMessage(ch)) != nullptr) {
                 auto* m = static_cast<BenchMessage*>(raw);
-                InboundMsg msg;
-                msg.conn_id = conn_id;
-                msg.data.assign(m->data, m->data + m->length);
-                inbox_.push_back(std::move(msg));
+                inbox_.enqueue(conn_id, m->data, m->length);
                 client->ReleaseMessage(raw);
             }
         }
@@ -289,7 +267,7 @@ private:
     std::chrono::steady_clock::time_point start_;
     double time_ = 0.0;
 
-    std::deque<InboundMsg> inbox_;
+    rudp_bench::ReusableInboundQueue inbox_;
 };
 
 }  // namespace

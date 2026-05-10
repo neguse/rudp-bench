@@ -407,7 +407,7 @@ delivery_dedup_policy
   - C++ and LiteNetLib runner loops sample RSS about every 100ms and keep `rss_mb` as sampled max RSS.
   - Added coverage that samples a transient anonymous mapping before it is unmapped.
 
-- [ ] **PERF-014: Reduce adapter receive-path copies and allocations**
+- [x] **PERF-014: Reduce adapter receive-path copies and allocations**
 
   Problem:
   - Many adapters copy incoming messages into `std::vector` / `byte[]` inboxes, then runner copies again into its buffer.
@@ -420,6 +420,12 @@ delivery_dedup_policy
 
   Acceptance:
   - Hot receive path avoids per-message heap allocation where practical.
+
+  Done:
+  - Added `ReusableInboundQueue` for C++ adapters that need an inbox while keeping the existing copy-out `recv()` API.
+  - Applied it to ENet, KCP, SLikeNet, UDT4, yojimbo, GNS, and msquic queued receive paths.
+  - LiteNetLib now rents inbox byte arrays from `ArrayPool<byte>` instead of allocating with `GetRemainingBytes()`.
+  - Added unit coverage for order/conn-id preservation, oversize drop, and buffer reuse.
 
 ## P2: Scalability Hotspots
 

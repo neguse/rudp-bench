@@ -18,6 +18,10 @@ add_executable(test_proc_sampler test_proc_sampler.cc)
 target_link_libraries(test_proc_sampler PRIVATE rudp_bench_harness GTest::gtest_main)
 add_test(NAME test_proc_sampler COMMAND test_proc_sampler)
 
+add_executable(test_inbound_queue test_inbound_queue.cc)
+target_link_libraries(test_inbound_queue PRIVATE rudp_bench_harness GTest::gtest_main)
+add_test(NAME test_inbound_queue COMMAND test_inbound_queue)
+
 find_program(PYTHON3_EXECUTABLE python3)
 if(PYTHON3_EXECUTABLE)
     add_test(

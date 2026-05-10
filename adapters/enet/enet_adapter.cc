@@ -1,5 +1,6 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
+#include "harness/inbound_queue.h"
 
 #include <enet/enet.h>
 
@@ -77,20 +78,7 @@ class EnetAdapter : public rudp_bench::Adapter {
   }
 
   int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
-    if (inbox_.empty()) return 0;
-    auto& m = inbox_.front();
-    if (m.data.size() > cap) {
-      // 切り詰めず破棄して err。caller がバッファサイズを判断できるよう必要サイズだけ書く。
-      *out_len = m.data.size();
-      *out_conn_id = m.conn_id;
-      inbox_.pop_front();
-      return -1;
-    }
-    std::memcpy(buf, m.data.data(), m.data.size());
-    *out_len = m.data.size();
-    *out_conn_id = m.conn_id;
-    inbox_.pop_front();
-    return 1;
+    return inbox_.recv(buf, cap, out_len, out_conn_id);
   }
 
   void poll() override {
@@ -121,10 +109,7 @@ class EnetAdapter : public rudp_bench::Adapter {
           } else {
             id = it->second;
           }
-          InboundMsg m;
-          m.conn_id = id;
-          m.data.assign(ev.packet->data, ev.packet->data + ev.packet->dataLength);
-          inbox_.push_back(std::move(m));
+          inbox_.enqueue(id, ev.packet->data, ev.packet->dataLength);
           enet_packet_destroy(ev.packet);
           break;
         }
@@ -155,11 +140,6 @@ class EnetAdapter : public rudp_bench::Adapter {
   bool encryption_on() const override { return false; }
 
  private:
-  struct InboundMsg {
-    uint32_t conn_id;
-    std::vector<uint8_t> data;
-  };
-
   ENetHost* host_ = nullptr;
 
   // peer ↔ conn_id マッピング(双方向)
@@ -169,7 +149,7 @@ class EnetAdapter : public rudp_bench::Adapter {
   uint32_t next_id_ = 1;
 
   // 受信メッセージのキュー
-  std::deque<InboundMsg> inbox_;
+  rudp_bench::ReusableInboundQueue inbox_;
 };
 
 }  // namespace

@@ -1,5 +1,6 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
+#include "harness/inbound_queue.h"
 
 #include <msquic.h>
 
@@ -173,19 +174,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
 
   int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
     std::lock_guard<std::mutex> lock(mtx_);
-    if (inbox_.empty()) return 0;
-    auto& m = inbox_.front();
-    if (m.data.size() > cap) {
-      *out_len = m.data.size();
-      *out_conn_id = m.conn_id;
-      inbox_.pop_front();
-      return -1;
-    }
-    std::memcpy(buf, m.data.data(), m.data.size());
-    *out_len = m.data.size();
-    *out_conn_id = m.conn_id;
-    inbox_.pop_front();
-    return 1;
+    return inbox_.recv(buf, cap, out_len, out_conn_id);
   }
 
   void poll() override {
@@ -277,12 +266,9 @@ class MsquicAdapter : public rudp_bench::Adapter {
           if (it != conn_to_id_.end()) cid = it->second;
         }
         const auto* buf = ev->DATAGRAM_RECEIVED.Buffer;
-        InboundMsg m;
-        m.conn_id = cid;
-        m.data.assign(buf->Buffer, buf->Buffer + buf->Length);
         {
           std::lock_guard<std::mutex> lock(mtx_);
-          inbox_.push_back(std::move(m));
+          inbox_.enqueue(cid, buf->Buffer, buf->Length);
         }
         break;
       }
@@ -352,19 +338,11 @@ class MsquicAdapter : public rudp_bench::Adapter {
   }
 
   void enqueue_msg(uint32_t conn_id, const uint8_t* data, size_t len) {
-    InboundMsg m;
-    m.conn_id = conn_id;
-    m.data.assign(data, data + len);
     std::lock_guard<std::mutex> lock(mtx_);
-    inbox_.push_back(std::move(m));
+    inbox_.enqueue(conn_id, data, len);
   }
 
  private:
-  struct InboundMsg {
-    uint32_t conn_id;
-    std::vector<uint8_t> data;
-  };
-
   HQUIC reliable_stream(HQUIC conn) {
     {
       std::lock_guard<std::mutex> lock(mtx_);
@@ -474,7 +452,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
   std::unordered_set<uint32_t> connected_ids_;
   uint32_t next_id_ = 1;
 
-  std::deque<InboundMsg> inbox_;
+  rudp_bench::ReusableInboundQueue inbox_;
 };
 
 }  // namespace

@@ -1,5 +1,6 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
+#include "harness/inbound_queue.h"
 
 // UDT4 SDK 4.11 — vendored via FetchContent in adapters/udt4/CMakeLists.txt
 #include <udt.h>
@@ -52,11 +53,6 @@ struct ConnState {
     UDTSOCKET sock = kInvalidSock;
     uint32_t id = 0;
     std::vector<uint8_t> partial;
-};
-
-struct InboundMsg {
-    uint32_t conn_id;
-    std::vector<uint8_t> data;
 };
 
 class Udt4Adapter : public rudp_bench::Adapter {
@@ -155,19 +151,7 @@ class Udt4Adapter : public rudp_bench::Adapter {
 
     int recv(void* buf, size_t cap, size_t* out_len,
              uint32_t* out_conn_id) override {
-        if (inbox_.empty()) return 0;
-        auto& m = inbox_.front();
-        if (m.data.size() > cap) {
-            *out_len = m.data.size();
-            *out_conn_id = m.conn_id;
-            inbox_.pop_front();
-            return -1;
-        }
-        std::memcpy(buf, m.data.data(), m.data.size());
-        *out_len = m.data.size();
-        *out_conn_id = m.conn_id;
-        inbox_.pop_front();
-        return 1;
+        return inbox_.recv(buf, cap, out_len, out_conn_id);
     }
 
     void poll() override {
@@ -289,11 +273,7 @@ class Udt4Adapter : public rudp_bench::Adapter {
 
             if (conn.partial.size() < 4 + msg_len) break;
 
-            InboundMsg m;
-            m.conn_id = id;
-            m.data.assign(conn.partial.begin() + 4,
-                          conn.partial.begin() + 4 + msg_len);
-            inbox_.push_back(std::move(m));
+            inbox_.enqueue(id, conn.partial.data() + 4, msg_len);
 
             conn.partial.erase(conn.partial.begin(),
                                conn.partial.begin() + 4 + msg_len);
@@ -308,7 +288,7 @@ class Udt4Adapter : public rudp_bench::Adapter {
     std::unordered_map<uint32_t, ConnState> conns_;
     std::unordered_map<UDTSOCKET, uint32_t> sock_to_id_;
     std::unordered_set<uint32_t> connected_ids_;
-    std::deque<InboundMsg> inbox_;
+    rudp_bench::ReusableInboundQueue inbox_;
 };
 
 }  // namespace

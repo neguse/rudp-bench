@@ -1,5 +1,6 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
+#include "harness/inbound_queue.h"
 
 #include <slikenet/MessageIdentifiers.h>
 #include <slikenet/PacketPriority.h>
@@ -81,19 +82,7 @@ class SLikeNetAdapter : public rudp_bench::Adapter {
   }
 
   int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
-    if (inbox_.empty()) return 0;
-    auto& m = inbox_.front();
-    if (m.data.size() > cap) {
-      *out_len = m.data.size();
-      *out_conn_id = m.conn_id;
-      inbox_.pop_front();
-      return -1;
-    }
-    std::memcpy(buf, m.data.data(), m.data.size());
-    *out_len = m.data.size();
-    *out_conn_id = m.conn_id;
-    inbox_.pop_front();
-    return 1;
+    return inbox_.recv(buf, cap, out_len, out_conn_id);
   }
 
   void poll() override {
@@ -134,10 +123,7 @@ class SLikeNetAdapter : public rudp_bench::Adapter {
           // ユーザデータ: data[0] はヘッダ識別子なので data[1..] が実ペイロード
           if (p->length > 1) {
             uint32_t id = get_or_register_guid(p->guid);
-            InboundMsg m;
-            m.conn_id = id;
-            m.data.assign(p->data + 1, p->data + p->length);
-            inbox_.push_back(std::move(m));
+            inbox_.enqueue(id, p->data + 1, p->length - 1);
           }
           break;
         }
@@ -163,11 +149,6 @@ class SLikeNetAdapter : public rudp_bench::Adapter {
   bool encryption_on() const override { return false; }
 
  private:
-  struct InboundMsg {
-    uint32_t conn_id;
-    std::vector<uint8_t> data;
-  };
-
   // GUID を新規登録して conn_id を返す
   uint32_t register_guid(const SLNet::RakNetGUID& guid) {
     uint32_t id = next_id_++;
@@ -196,7 +177,7 @@ class SLikeNetAdapter : public rudp_bench::Adapter {
   std::deque<uint32_t> pending_ids_;
 
   // 受信メッセージのキュー
-  std::deque<InboundMsg> inbox_;
+  rudp_bench::ReusableInboundQueue inbox_;
 };
 
 }  // namespace
