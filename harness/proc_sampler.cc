@@ -33,14 +33,21 @@ uint64_t rss_kb_now() {
 void ProcSampler::begin() {
   t0_ = std::chrono::steady_clock::now();
   cpu_us_begin_ = cpu_us_now();
-  rss_mb_max_ = rss_kb_now() / 1024;
+  rss_mb_max_ = 0;
+  rss_samples_ = 0;
+  sample_rss();
+}
+
+void ProcSampler::sample_rss() {
+  uint64_t now = rss_kb_now() / 1024;
+  if (now > rss_mb_max_) rss_mb_max_ = now;
+  ++rss_samples_;
 }
 
 void ProcSampler::end() {
   t1_ = std::chrono::steady_clock::now();
   cpu_us_end_ = cpu_us_now();
-  uint64_t now = rss_kb_now() / 1024;
-  if (now > rss_mb_max_) rss_mb_max_ = now;
+  sample_rss();
 }
 
 double ProcSampler::cpu_pct() const {

@@ -96,9 +96,18 @@ uint64_t pacing_budget_us(uint32_t rate_per_conn) {
 }
 
 constexpr std::chrono::microseconds kAdaptiveIdleCap{20};
+constexpr std::chrono::milliseconds kRssSampleInterval{100};
 
 void adaptive_idle_for(std::chrono::microseconds d) {
   if (d.count() > 0) std::this_thread::sleep_for(d);
+}
+
+void sample_rss_if_due(ProcSampler& ps,
+                       std::chrono::steady_clock::time_point now,
+                       std::chrono::steady_clock::time_point& next_sample) {
+  if (now < next_sample) return;
+  ps.sample_rss();
+  next_sample = now + kRssSampleInterval;
 }
 
 }  // namespace
@@ -113,7 +122,9 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   bool reliable = (cfg.reliable == Reliability::Reliable);
   auto deadline = std::chrono::steady_clock::now() +
                   std::chrono::seconds(cfg.duration_s + cfg.warmup_s + 2);
+  auto next_rss_sample = std::chrono::steady_clock::now() + kRssSampleInterval;
   while (std::chrono::steady_clock::now() < deadline) {
+    sample_rss_if_due(ps, std::chrono::steady_clock::now(), next_rss_sample);
     a.poll();
     size_t n; uint32_t cid;
     int r = a.recv(buf.data(), buf.size(), &n, &cid);
@@ -206,9 +217,11 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
 
   // tail drain: 送信終了後しばらく recv だけ
   auto tail_until = run_end + std::chrono::milliseconds(500);
+  auto next_rss_sample = clock::now() + kRssSampleInterval;
 
   while (clock::now() < tail_until) {
     auto now = clock::now();
+    sample_rss_if_due(ps, now, next_rss_sample);
     bool in_active_send = now >= warmup_end && now < run_end;
     bool in_diag = now >= warmup_end;
     bool did_work = false;

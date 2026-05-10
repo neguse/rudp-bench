@@ -389,7 +389,7 @@ delivery_dedup_policy
   - Added `delivery_dedup_policy` to raw role CSV and diagnostics.
   - Added tests for duplicate suppression, per-connection dedup, and window eviction.
 
-- [ ] **PERF-013: Sample RSS during the run**
+- [x] **PERF-013: Sample RSS during the run**
 
   Problem:
   - `ProcSampler` checks RSS only at begin/end, so transient queue growth is missed.
@@ -401,6 +401,11 @@ delivery_dedup_policy
 
   Acceptance:
   - A test or stress run can show RSS max exceeding final RSS when memory is freed before end.
+
+  Done:
+  - `ProcSampler` now exposes `sample_rss()`; begin/end still bound CPU accounting.
+  - C++ and LiteNetLib runner loops sample RSS about every 100ms and keep `rss_mb` as sampled max RSS.
+  - Added coverage that samples a transient anonymous mapping before it is unmapped.
 
 - [ ] **PERF-014: Reduce adapter receive-path copies and allocations**
 

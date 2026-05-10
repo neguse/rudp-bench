@@ -47,6 +47,14 @@ return 0;
 static bool PayloadSupported(Config cfg) =>
     cfg.SizeBytes >= Config.MinPayloadBytes && cfg.SizeBytes <= Config.MaxPayloadBytes;
 
+static void SampleRssIfDue(ProcSampler ps, ref long nextSampleTicks)
+{
+    long nowTicks = Stopwatch.GetTimestamp();
+    if (nowTicks < nextSampleTicks) return;
+    ps.SampleRss();
+    nextSampleTicks = nowTicks + ProcSampler.RssSampleIntervalTicks;
+}
+
 static CsvRow UnsupportedPayloadRow(Config cfg) => new()
 {
     Library = cfg.Library,
@@ -130,6 +138,7 @@ static CsvRow RunServer(Config cfg)
 
     var ps = new ProcSampler();
     ps.Begin();
+    long nextRssSampleTicks = Stopwatch.GetTimestamp() + ProcSampler.RssSampleIntervalTicks;
 
     var deliveryMethod = cfg.ReliableMode == "r"
         ? DeliveryMethod.ReliableOrdered
@@ -144,6 +153,7 @@ static CsvRow RunServer(Config cfg)
 
     while (Stopwatch.GetTimestamp() < deadlineTicks)
     {
+        SampleRssIfDue(ps, ref nextRssSampleTicks);
         manager.PollEvents();
         bool didWork = inbox.Count > 0;
 
@@ -240,6 +250,7 @@ static CsvRow RunClient(Config cfg)
 
     var ps = new ProcSampler();
     ps.Begin();
+    long nextRssSampleTicks = Stopwatch.GetTimestamp() + ProcSampler.RssSampleIntervalTicks;
 
     // タイミングは Stopwatch ベース（DateTime.UtcNow より高精度）
     long nowTicks = Stopwatch.GetTimestamp();
@@ -277,6 +288,7 @@ static CsvRow RunClient(Config cfg)
     {
         nowTicks = Stopwatch.GetTimestamp();
         if (nowTicks >= tailUntilTicks) break;
+        SampleRssIfDue(ps, ref nextRssSampleTicks);
 
         bool inDiag = nowTicks >= warmupEndTicks;
         bool inActiveSend = nowTicks >= warmupEndTicks && nowTicks < runEndTicks;
@@ -742,11 +754,14 @@ class DeliveryTracker
 
 class ProcSampler
 {
+    public static readonly long RssSampleIntervalTicks = Math.Max(1L, Stopwatch.Frequency / 10);
+
     private TimeSpan cpuBefore_;
     private TimeSpan cpuAfter_;
     private long wallBeforeTicks_;
     private long wallAfterTicks_;
     private ulong rssMbMax_;
+    private ulong rssSamples_;
 
     public void Begin()
     {
@@ -754,7 +769,16 @@ class ProcSampler
         proc.Refresh();
         cpuBefore_ = proc.TotalProcessorTime;
         wallBeforeTicks_ = Stopwatch.GetTimestamp();
-        rssMbMax_ = ReadRssMb();
+        rssMbMax_ = 0;
+        rssSamples_ = 0;
+        SampleRss();
+    }
+
+    public void SampleRss()
+    {
+        ulong now = ReadRssMb();
+        if (now > rssMbMax_) rssMbMax_ = now;
+        rssSamples_++;
     }
 
     public void End()
@@ -763,8 +787,7 @@ class ProcSampler
         proc.Refresh();
         cpuAfter_ = proc.TotalProcessorTime;
         wallAfterTicks_ = Stopwatch.GetTimestamp();
-        ulong now = ReadRssMb();
-        if (now > rssMbMax_) rssMbMax_ = now;
+        SampleRss();
     }
 
     public double CpuPct()
@@ -775,6 +798,7 @@ class ProcSampler
     }
 
     public ulong RssMbMax => rssMbMax_;
+    public ulong RssSamples => rssSamples_;
 
     // /proc/self/status の VmRSS 行から RSS を読む (harness/proc_sampler.cc と同じアプローチ)
     private static ulong ReadRssMb()
