@@ -1,9 +1,11 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
+#include "harness/inbound_queue.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -36,6 +38,11 @@ struct Conn {
   uint32_t next_seq = 1;
   std::unordered_map<uint32_t, PendingSend> pending;     // 未 ACK
   std::unordered_set<uint32_t> received_seq;             // 重複排除
+};
+
+struct PayloadView {
+  const uint8_t* data = nullptr;
+  size_t len = 0;
 };
 
 uint64_t addr_key(const sockaddr_in& a) {
@@ -71,6 +78,8 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     inet_pton(AF_INET, host, &c.peer.sin_addr);
     uint32_t id = next_id_++;
     conns_[id] = std::move(c);
+    pollfds_.push_back(pollfd{conns_[id].fd, POLLIN, 0});
+    poll_conn_ids_.push_back(id);
     return id;
   }
 
@@ -102,19 +111,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     socklen_t sl = sizeof(src);
     int fd = (server_fd_ >= 0) ? server_fd_ : -1;
     if (fd < 0) {
-      // client: poll all conn fds
-      for (auto& [id, c] : conns_) {
-        sockaddr_in s{}; socklen_t s_sl = sizeof(s);
-        uint8_t pkt[MAX_UDP_PAYLOAD];
-        ssize_t n = ::recvfrom(c.fd, pkt, sizeof(pkt), 0,
-                              reinterpret_cast<sockaddr*>(&s), &s_sl);
-        if (n <= 0) continue;
-        if (handle_packet(c, pkt, n, buf, cap, out_len)) {
-          *out_conn_id = id;
-          return 1;
-        }
-      }
-      return 0;
+      return inbox_.recv(buf, cap, out_len, out_conn_id);
     }
     // server: single fd
     uint8_t pkt[MAX_UDP_PAYLOAD];
@@ -133,7 +130,11 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     } else {
       id = it->second;
     }
-    if (handle_packet(conns_[id], pkt, n, buf, cap, out_len)) {
+    PayloadView payload;
+    if (handle_packet(conns_[id], pkt, n, &payload)) {
+      if (payload.len > cap) return 0;
+      if (payload.len > 0) std::memcpy(buf, payload.data, payload.len);
+      *out_len = payload.len;
       *out_conn_id = id;
       return 1;
     }
@@ -141,6 +142,8 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
   }
 
   void poll() override {
+    poll_client_sockets();
+
     auto now = std::chrono::steady_clock::now();
     for (auto& [id, c] : conns_) {
       for (auto& [seq, ps] : c.pending) {
@@ -158,6 +161,9 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     if (server_fd_ >= 0) { ::close(server_fd_); server_fd_ = -1; }
     for (auto& [id, c] : conns_) if (c.fd >= 0) ::close(c.fd);
     conns_.clear();
+    pollfds_.clear();
+    poll_conn_ids_.clear();
+    inbox_.clear();
   }
 
   const char* name() const override { return "mini_rudp"; }
@@ -176,8 +182,30 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     return it == conns_.end() ? nullptr : &it->second;
   }
 
+  void poll_client_sockets() {
+    if (server_fd_ >= 0 || pollfds_.empty()) return;
+    int ready = ::poll(pollfds_.data(), static_cast<nfds_t>(pollfds_.size()), 0);
+    if (ready <= 0) return;
+
+    uint8_t pkt[MAX_UDP_PAYLOAD];
+    for (size_t i = 0; i < pollfds_.size() && ready > 0; ++i) {
+      if ((pollfds_[i].revents & POLLIN) == 0) continue;
+      --ready;
+      Conn* c = find_conn(poll_conn_ids_[i]);
+      if (!c) continue;
+      for (;;) {
+        ssize_t n = ::recv(pollfds_[i].fd, pkt, sizeof(pkt), 0);
+        if (n <= 0) break;
+        PayloadView payload;
+        if (handle_packet(*c, pkt, n, &payload)) {
+          inbox_.enqueue(poll_conn_ids_[i], payload.data, payload.len);
+        }
+      }
+    }
+  }
+
   bool handle_packet(Conn& c, const uint8_t* pkt, ssize_t n,
-                     void* buf, size_t cap, size_t* out_len) {
+                     PayloadView* payload_out) {
     if (n < static_cast<ssize_t>(sizeof(Header))) return false;
     Header h;
     std::memcpy(&h, pkt, sizeof(h));
@@ -195,15 +223,17 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
               reinterpret_cast<sockaddr*>(&c.peer), sizeof(c.peer));
       if (!c.received_seq.insert(h.seq).second) return false;
     }
-    if (payload > cap) return false;
-    std::memcpy(buf, pkt + sizeof(h), payload);
-    *out_len = payload;
+    payload_out->data = pkt + sizeof(h);
+    payload_out->len = payload;
     return true;
   }
 
   int server_fd_ = -1;
   std::unordered_map<uint32_t, Conn> conns_;
   std::unordered_map<uint64_t, uint32_t> id_by_key_;
+  std::vector<pollfd> pollfds_;
+  std::vector<uint32_t> poll_conn_ids_;
+  rudp_bench::ReusableInboundQueue inbox_;
   uint32_t next_id_ = 1;
 };
 

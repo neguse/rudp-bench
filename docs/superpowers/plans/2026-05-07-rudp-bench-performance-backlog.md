@@ -447,7 +447,7 @@ delivery_dedup_policy
   - raw_udp client `recv()` now pops queued packets, preserving per-client connection ids without an O(conns) scan per receive attempt.
   - Added a 128-connection smoke test that sends and echoes one datagram per client connection and verifies client-side conn-id identity.
 
-- [ ] **PERF-016: Replace mini_rudp client O(conns) recv scan**
+- [x] **PERF-016: Replace mini_rudp client O(conns) recv scan**
 
   Problem:
   - mini_rudp mirrors the raw_udp scanning pattern and has the same high-conns bias.
@@ -458,6 +458,12 @@ delivery_dedup_policy
 
   Acceptance:
   - mini_rudp receive overhead scales with ready sockets rather than total conns.
+
+  Done:
+  - mini_rudp client `poll()` now readiness-checks client sockets and drains readable packets into `ReusableInboundQueue`.
+  - ACK handling, reliable duplicate suppression, and retransmit state remain per connection before payloads are queued.
+  - mini_rudp client `recv()` now pops queued payloads instead of scanning every connection fd.
+  - Added a 128-connection reliable echo smoke test that verifies client-side conn-id identity.
 
 - [ ] **PERF-017: Optimize GNS polling**
 
