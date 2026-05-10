@@ -308,7 +308,7 @@ stderr_path
   - SLikeNet reports `max_connections() == 1`; reducer keeps `conns > 1` as `unsupported_conns`.
   - Added capability coverage for the SLikeNet connection cap.
 
-- [ ] **PERF-009: Rework msquic reliable mode to avoid one stream per message**
+- [x] **PERF-009: Rework msquic reliable mode to avoid one stream per message**
 
   Problem:
   - Reliable msquic sends open/start/close a new QUIC stream per message, adding heavy per-message overhead that is not representative for throughput/RTT comparison.
@@ -321,6 +321,12 @@ stderr_path
 
   Acceptance:
   - Reliable msquic no longer allocates and opens a stream for every message in the default benchmark path.
+
+  Done:
+  - msquic reliable mode now opens one outbound unidirectional stream per connection and reuses it.
+  - Existing length-prefix framing is kept on the persistent stream.
+  - The per-message stream policy was removed rather than kept as an alternate mode.
+  - Added smoke coverage for two reliable messages over one connection.
 
 - [ ] **PERF-010: Normalize or expose flush/batching policy**
 

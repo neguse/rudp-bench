@@ -43,9 +43,14 @@ struct SendCtx {
 struct StreamCtx {
   class MsquicAdapter* adapter;
   uint32_t conn_id;
+  HQUIC conn;
+  bool outbound;
   std::vector<uint8_t> recv_buf;
   uint32_t frame_len = 0;
   bool have_len = false;
+
+  StreamCtx(class MsquicAdapter* adapter, uint32_t conn_id, HQUIC conn, bool outbound)
+      : adapter(adapter), conn_id(conn_id), conn(conn), outbound(outbound) {}
 };
 
 class MsquicAdapter : public rudp_bench::Adapter {
@@ -199,6 +204,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
       for (auto& [id, conn] : id_to_conn_) to_close.push_back(conn);
       id_to_conn_.clear();
       conn_to_id_.clear();
+      reliable_stream_by_conn_.clear();
       connected_ids_.clear();
       inbox_.clear();
     }
@@ -257,7 +263,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
           auto it = conn_to_id_.find(conn);
           if (it != conn_to_id_.end()) cid = it->second;
         }
-        auto* sctx = new StreamCtx{this, cid, {}, 0, false};
+        auto* sctx = new StreamCtx(this, cid, conn, false);
         MsQuic->SetCallbackHandler(stream, (void*)stream_cb, sctx);
         return QUIC_STATUS_SUCCESS;
       }
@@ -291,6 +297,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
           uint32_t id = it->second;
           connected_ids_.erase(id);
           id_to_conn_.erase(id);
+          reliable_stream_by_conn_.erase(conn);
           conn_to_id_.erase(it);
         }
         break;
@@ -326,6 +333,13 @@ class MsquicAdapter : public rudp_bench::Adapter {
         break;
 
       case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+        if (sctx->outbound) {
+          std::lock_guard<std::mutex> lock(mtx_);
+          auto it = reliable_stream_by_conn_.find(sctx->conn);
+          if (it != reliable_stream_by_conn_.end() && it->second == stream) {
+            reliable_stream_by_conn_.erase(it);
+          }
+        }
         MsQuic->StreamClose(stream);
         delete sctx;
         return QUIC_STATUS_SUCCESS;
@@ -350,14 +364,39 @@ class MsquicAdapter : public rudp_bench::Adapter {
     std::vector<uint8_t> data;
   };
 
-  int send_stream(HQUIC conn, const void* data, size_t len) {
+  HQUIC reliable_stream(HQUIC conn) {
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      auto sit = reliable_stream_by_conn_.find(conn);
+      if (sit != reliable_stream_by_conn_.end()) return sit->second;
+    }
+
+    uint32_t cid = 0;
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      auto it = conn_to_id_.find(conn);
+      if (it == conn_to_id_.end()) return nullptr;
+      cid = it->second;
+    }
+
     HQUIC stream = nullptr;
-    auto* sctx = new StreamCtx{this, 0, {}, 0, false};
+    auto* sctx = new StreamCtx(this, cid, conn, true);
     QUIC_STATUS status;
     status = MsQuic->StreamOpen(conn, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, stream_cb, sctx, &stream);
-    if (QUIC_FAILED(status)) { delete sctx; return -1; }
+    if (QUIC_FAILED(status)) { delete sctx; return nullptr; }
     status = MsQuic->StreamStart(stream, QUIC_STREAM_START_FLAG_IMMEDIATE);
-    if (QUIC_FAILED(status)) { MsQuic->StreamClose(stream); delete sctx; return -1; }
+    if (QUIC_FAILED(status)) { MsQuic->StreamClose(stream); delete sctx; return nullptr; }
+
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      reliable_stream_by_conn_[conn] = stream;
+    }
+    return stream;
+  }
+
+  int send_stream(HQUIC conn, const void* data, size_t len) {
+    HQUIC stream = reliable_stream(conn);
+    if (!stream) return -1;
 
     // Length-prefix (4 bytes big-endian) + payload
     auto* ctx = new SendCtx();
@@ -368,8 +407,8 @@ class MsquicAdapter : public rudp_bench::Adapter {
     ctx->buf.Buffer = ctx->data.data();
     ctx->buf.Length = static_cast<uint32_t>(ctx->data.size());
 
-    status = MsQuic->StreamSend(stream, &ctx->buf, 1, QUIC_SEND_FLAG_FIN, ctx);
-    if (QUIC_FAILED(status)) { delete ctx; MsQuic->StreamClose(stream); delete sctx; return -1; }
+    QUIC_STATUS status = MsQuic->StreamSend(stream, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx);
+    if (QUIC_FAILED(status)) { delete ctx; return -1; }
     return 0;
   }
 
@@ -430,6 +469,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
   std::mutex mtx_;
   std::unordered_map<uint32_t, HQUIC> id_to_conn_;
   std::unordered_map<HQUIC, uint32_t> conn_to_id_;
+  std::unordered_map<HQUIC, HQUIC> reliable_stream_by_conn_;
   std::unordered_set<uint32_t> connected_ids_;
   uint32_t next_id_ = 1;
 
