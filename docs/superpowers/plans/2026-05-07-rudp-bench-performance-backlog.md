@@ -429,7 +429,7 @@ delivery_dedup_policy
 
 ## P2: Scalability Hotspots
 
-- [ ] **PERF-015: Replace raw_udp client O(conns) recv scan**
+- [x] **PERF-015: Replace raw_udp client O(conns) recv scan**
 
   Problem:
   - raw_udp client `recv()` scans all connection fds every call, which becomes O(conns) per receive attempt.
@@ -441,6 +441,11 @@ delivery_dedup_policy
 
   Acceptance:
   - raw_udp receive overhead scales with ready sockets rather than total conns.
+
+  Done:
+  - raw_udp client `poll()` now checks all client sockets once per tick and drains only sockets reported readable into `ReusableInboundQueue`.
+  - raw_udp client `recv()` now pops queued packets, preserving per-client connection ids without an O(conns) scan per receive attempt.
+  - Added a 128-connection smoke test that sends and echoes one datagram per client connection and verifies client-side conn-id identity.
 
 - [ ] **PERF-016: Replace mini_rudp client O(conns) recv scan**
 

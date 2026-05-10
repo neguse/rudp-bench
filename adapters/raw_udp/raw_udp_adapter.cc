@@ -1,9 +1,11 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
+#include "harness/inbound_queue.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -12,6 +14,8 @@
 #include <vector>
 
 namespace {
+
+constexpr size_t MAX_UDP_PAYLOAD = 65507;
 
 struct Conn {
   int fd = -1;
@@ -50,6 +54,8 @@ class RawUdpAdapter : public rudp_bench::Adapter {
     inet_pton(AF_INET, host, &c.peer.sin_addr);
     uint32_t id = next_id_++;
     conns_[id] = c;
+    pollfds_.push_back(pollfd{c.fd, POLLIN, 0});
+    poll_conn_ids_.push_back(id);
     return id;
   }
 
@@ -92,28 +98,38 @@ class RawUdpAdapter : public rudp_bench::Adapter {
       *out_conn_id = id;
       return 1;
     }
-    for (auto& [id, c] : conns_) {
-      ssize_t n = ::recv(c.fd, buf, cap, 0);
-      if (n > 0) {
-        *out_len = static_cast<size_t>(n);
-        *out_conn_id = id;
-        return 1;
-      }
-    }
-    return 0;
+    return inbox_.recv(buf, cap, out_len, out_conn_id);
   }
 
-  void poll() override {}
+  void poll() override {
+    if (server_fd_ >= 0 || pollfds_.empty()) return;
+    int ready = ::poll(pollfds_.data(), static_cast<nfds_t>(pollfds_.size()), 0);
+    if (ready <= 0) return;
+
+    uint8_t pkt[MAX_UDP_PAYLOAD];
+    for (size_t i = 0; i < pollfds_.size() && ready > 0; ++i) {
+      if ((pollfds_[i].revents & POLLIN) == 0) continue;
+      --ready;
+      for (;;) {
+        ssize_t n = ::recv(pollfds_[i].fd, pkt, sizeof(pkt), 0);
+        if (n <= 0) break;
+        inbox_.enqueue(poll_conn_ids_[i], pkt, static_cast<size_t>(n));
+      }
+    }
+  }
 
   void close() override {
     if (server_fd_ >= 0) { ::close(server_fd_); server_fd_ = -1; }
     for (auto& [id, c] : conns_) ::close(c.fd);
     conns_.clear();
+    pollfds_.clear();
+    poll_conn_ids_.clear();
+    inbox_.clear();
   }
 
   const char* name() const override { return "raw_udp"; }
   bool supports(bool reliable) const override { return !reliable; }
-  size_t max_payload_bytes(bool /*reliable*/) const override { return 65507; }
+  size_t max_payload_bytes(bool /*reliable*/) const override { return MAX_UDP_PAYLOAD; }
   const char* flush_policy(bool reliable) const override {
     return reliable ? "unsupported" : "immediate";
   }
@@ -124,6 +140,9 @@ class RawUdpAdapter : public rudp_bench::Adapter {
   std::unordered_map<uint32_t, Conn> conns_;
   std::unordered_map<uint64_t, uint32_t> id_by_key_;
   std::unordered_map<uint32_t, sockaddr_in> peer_by_id_;
+  std::vector<pollfd> pollfds_;
+  std::vector<uint32_t> poll_conn_ids_;
+  rudp_bench::ReusableInboundQueue inbox_;
   uint32_t next_id_ = 1;
 };
 
