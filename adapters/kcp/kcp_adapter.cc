@@ -254,6 +254,9 @@ class KcpAdapter : public rudp_bench::Adapter {
   size_t max_payload_bytes(bool reliable) const override {
     return reliable ? 65536 : 65502;
   }
+  const char* flush_policy(bool reliable) const override {
+    return reliable ? "poll_update" : "immediate";
+  }
   bool encryption_on() const override { return false; }
 
  private:

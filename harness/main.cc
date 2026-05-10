@@ -55,7 +55,9 @@ int main(int argc, const char* argv[]) {
     row.loss = cfg.loss_pct;
     row.duration_s = cfg.duration_s;
     row.mode = (cfg.mode == rudp_bench::ServerMode::Broadcast) ? "broadcast" : "echo";
+    const bool want_reliable = cfg.reliable == rudp_bench::Reliability::Reliable;
     row.idle_policy = rudp_bench::idle_policy_name(cfg.idle_policy);
+    row.flush_policy = adapter->flush_policy(want_reliable);
     return row;
   };
 

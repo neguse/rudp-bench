@@ -36,6 +36,7 @@ struct Adapter {
   virtual uint32_t max_connections() const {
     return std::numeric_limits<uint32_t>::max();
   }
+  virtual const char* flush_policy(bool /*reliable*/) const { return "immediate"; }
   virtual bool encryption_on() const = 0;
 };
 

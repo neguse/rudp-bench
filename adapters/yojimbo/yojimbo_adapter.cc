@@ -238,6 +238,7 @@ public:
     bool supports(bool /*reliable*/) const override { return true; }
     size_t max_payload_bytes(bool /*reliable*/) const override { return kMaxPayloadBytes; }
     uint32_t max_connections() const override { return yojimbo::MaxClients; }
+    const char* flush_policy(bool /*reliable*/) const override { return "poll_send_packets"; }
     bool encryption_on() const override { return true; }
 
 private:

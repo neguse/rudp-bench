@@ -4,7 +4,8 @@
 // CSV column order (mirrors harness/csv_writer.h write_row exactly):
 //   library,encryption,phase,reliable,size,conns,rate,loss,
 //   throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,
-//   delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s
+//   delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,
+//   mode,idle_policy,flush_policy,...
 
 using LiteNetLib;
 using System;
@@ -59,6 +60,7 @@ static CsvRow UnsupportedPayloadRow(Config cfg) => new()
     DurationS = cfg.DurationS,
     Mode = cfg.Mode,
     IdlePolicy = cfg.IdlePolicy,
+    FlushPolicy = FlushPolicy(cfg),
 };
 
 // ---------------------------------------------------------------------------
@@ -181,6 +183,7 @@ static CsvRow RunServer(Config cfg)
         RssMb = ps.RssMbMax,
         Mode = cfg.Mode,
         IdlePolicy = cfg.IdlePolicy,
+        FlushPolicy = FlushPolicy(cfg),
     };
 }
 
@@ -390,6 +393,7 @@ static CsvRow RunClient(Config cfg)
         DurationS = cfg.DurationS,
         Mode = cfg.Mode,
         IdlePolicy = cfg.IdlePolicy,
+        FlushPolicy = FlushPolicy(cfg),
         ClientTickGapP99Us = tickGapP99Us,
         ClientTickGapMaxUs = tick.TickGapMaxUs,
         ClientPacingLagP99Us = pacingLagP99Us,
@@ -410,11 +414,14 @@ static CsvRow RunClient(Config cfg)
 // CSV — カラム順は harness/csv_writer.h の write_row と完全一致させること
 // ---------------------------------------------------------------------------
 
+static string FlushPolicy(Config _) => "library_internal";
+
 static string CsvHeader() =>
     "library,encryption,phase,reliable,size,conns,rate,loss," +
     "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us," +
-    "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,mode,idle_policy," +
-    "client_tick_gap_p99_us,client_tick_gap_max_us," +
+    "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s," +
+    "mode,idle_policy,flush_policy,client_tick_gap_p99_us," +
+    "client_tick_gap_max_us," +
     "client_pacing_lag_p99_us,client_pacing_lag_max_us," +
     "client_missed_pacing,client_attempted,client_accepted," +
     "client_attempted_ratio,client_accepted_ratio," +
@@ -431,7 +438,7 @@ static string FormatRow(CsvRow r) =>
     $"{r.Delivered},{r.Accepted}," +
     $"{r.DeliveryRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.CpuPct.ToString("F2", CultureInfo.InvariantCulture)}," +
-    $"{r.RssMb},{r.ConnectMs},{r.DurationS},{r.Mode},{r.IdlePolicy}," +
+    $"{r.RssMb},{r.ConnectMs},{r.DurationS},{r.Mode},{r.IdlePolicy},{r.FlushPolicy}," +
     $"{r.ClientTickGapP99Us},{r.ClientTickGapMaxUs}," +
     $"{r.ClientPacingLagP99Us},{r.ClientPacingLagMaxUs}," +
     $"{r.ClientMissedPacing},{r.ClientAttempted},{r.ClientAccepted}," +
@@ -493,6 +500,7 @@ class CsvRow
     public uint DurationS;
     public string Mode = "echo";
     public string IdlePolicy = "spin";
+    public string FlushPolicy = "library_internal";
     public ulong ClientTickGapP99Us;
     public ulong ClientTickGapMaxUs;
     public ulong ClientPacingLagP99Us;

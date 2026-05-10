@@ -151,6 +151,7 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   row.duration_s = cfg.duration_s;
   row.mode = (cfg.mode == ServerMode::Broadcast) ? "broadcast" : "echo";
   row.idle_policy = idle_policy_name(cfg.idle_policy);
+  row.flush_policy = a.flush_policy(reliable);
   return row;
 }
 
@@ -310,6 +311,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.duration_s = cfg.duration_s;
   row.mode = (cfg.mode == ServerMode::Broadcast) ? "broadcast" : "echo";
   row.idle_policy = idle_policy_name(cfg.idle_policy);
+  row.flush_policy = a.flush_policy(reliable);
   row.client_tick_gap_p99_us = tick.tick_gap_us.percentile_per_mille(990);
   row.client_tick_gap_max_us = tick.tick_gap_us.max();
   row.client_pacing_lag_p99_us = tick.pacing_lag_us.percentile_per_mille(990);

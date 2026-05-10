@@ -165,6 +165,9 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
   size_t max_payload_bytes(bool /*reliable*/) const override {
     return MAX_UDP_PAYLOAD - sizeof(Header);
   }
+  const char* flush_policy(bool reliable) const override {
+    return reliable ? "immediate_retransmit_poll" : "immediate";
+  }
   bool encryption_on() const override { return false; }
 
  private:

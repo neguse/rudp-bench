@@ -222,6 +222,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
   size_t max_payload_bytes(bool reliable) const override {
     return reliable ? 65536 : 1000;
   }
+  const char* flush_policy(bool /*reliable*/) const override { return "async_internal"; }
   bool encryption_on() const override { return true; }
 
   // --- Callback dispatchers (called from msquic internal threads) ---

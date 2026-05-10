@@ -208,6 +208,9 @@ class Udt4Adapter : public rudp_bench::Adapter {
     // UDT4 is reliable-only; no unreliable datagram mode.
     bool supports(bool reliable) const override { return reliable; }
     size_t max_payload_bytes(bool /*reliable*/) const override { return 65536; }
+    const char* flush_policy(bool reliable) const override {
+        return reliable ? "blocking_stream" : "unsupported";
+    }
     bool encryption_on() const override { return false; }
 
  private:

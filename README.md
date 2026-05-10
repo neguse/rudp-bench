@@ -81,7 +81,7 @@ python3 scripts/run_saturation.py --libraries=mini_rudp,enet,kcp,slikenet,udt4,y
 python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase1_table.md
 ```
 
-`results/phase1.csv` は比較用の canonical result で、主に `delivery_ratio` と RTT p50/p95/p99、`server_cpu_pct` だけを見る。スイープ時には調査用に `results/phase1_diagnostics.csv` と `results/phase1_scenarios.csv`、role 別 raw CSV を含む `results/phase1_raw/<run_id>/` も出力される。client tick や attempted/accepted 状態などの詳細は diagnostics 側を見る。`scripts/run_saturation.py` は 100 -> 1k -> 10k -> 100k msg/sec/conn を順に試し、`delivery_ratio` または diagnostics の `accepted_ratio` が閾値未満になるか、`server_cpu_pct` が閾値以上になったところで次の library に進む。Phase 1 runner の idle policy は既定 `spin`、saturation helper は CPU 閾値を意味ある値にするため既定 `adaptive`。`raw_udp` の saturation は `--libraries=raw_udp --reliable=u` で別に走らせる。
+`results/phase1.csv` は比較用の canonical result で、主に `delivery_ratio` と RTT p50/p95/p99、`server_cpu_pct` だけを見る。スイープ時には調査用に `results/phase1_diagnostics.csv` と `results/phase1_scenarios.csv`、role 別 raw CSV を含む `results/phase1_raw/<run_id>/` も出力される。client tick や attempted/accepted 状態などの詳細は diagnostics 側を見る。`results/phase1_scenarios.csv` は `idle_policy` と `flush_policy` を持ち、flush/batching の前提を scenario metadata として記録する。`scripts/run_saturation.py` は 100 -> 1k -> 10k -> 100k msg/sec/conn を順に試し、`delivery_ratio` または diagnostics の `accepted_ratio` が閾値未満になるか、`server_cpu_pct` が閾値以上になったところで次の library に進む。Phase 1 runner の idle policy は既定 `spin`、saturation helper は CPU 閾値を意味ある値にするため既定 `adaptive`。`raw_udp` の saturation は `--libraries=raw_udp --reliable=u` で別に走らせる。
 
 ## 既知の挙動・制限
 
@@ -90,7 +90,8 @@ python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase
 - oversized payload は実送信せず `valid=0, invalid_reason=unsupported_payload` として扱う。共通 Phase 1 matrix は全 adapter / reliable mode で有効な `size=64,1000` に固定し、より大きい payload は adapter ごとの `max_payload` を確認して個別に走らせる。
 - canonical result の `valid=0` は、unsupported axis、process timeout/crash、client tick failure、accepted message なしを意味する。低い `delivery_ratio` 自体は有効な性能結果として扱う。
 - `LatencyHist::samples_` と `DeliveryTracker::received_keys_` は計測中に成長し続けるため、高 throughput × 長時間ランで RSS 計測が harness 自身のオーバーヘッドに引っ張られる。Phase 2 実装前にリザーバサンプリング等の対策を入れる予定。
-- `enet` adapter は `poll()` 末尾で 1 回だけ `enet_host_flush` を呼ぶ(ENet 標準の使い方)。`raw_udp` / `mini_rudp` は `send()` 内で kernel に即時 flush するため、高 conns 時に ENet は batching 有利・per-msg latency でやや不利の方向にバイアスする。比較時は留意のこと。
+- `flush_policy` は ranking metric ではなく解釈用メタデータ。`immediate` は `send()` 内で socket に渡す実装、`poll_flush` は `poll()` 末尾で明示 flush、`poll_update` / `poll_send_packets` は protocol tick でまとめて送る実装、`library_internal` / `async_internal` はライブラリ内部スケジューラに委ねる実装を表す。`no_nagle` は batching 遅延を抑える送信フラグを使う実装、`blocking_stream` は stream 送信完了まで書き込む実装。
+- `enet` adapter は `poll()` 末尾で 1 回だけ `enet_host_flush` を呼ぶ(ENet 標準の使い方)。`raw_udp` / `mini_rudp` は `send()` 内で kernel に即時 flush するため、高 conns 時に ENet は batching 有利・per-msg latency でやや不利の方向にバイアスする。比較時は `scenarios.csv` の `flush_policy` も見ること。
 - `kcp` adapter の reliable 遅延は KCP の内部タイマ粒度(デフォルト 100ms、nodelay=1 で 10ms)に依存する。loopback ではタイマ粒度が RTT の支配項になるため、ENet / raw_udp より reliable RTT が高くなる傾向がある。`ikcp_update` 呼び出し頻度を上げることで改善できるが、CPU コストと要トレードオフ(Phase 2 バックログ)。
 - `kcp` adapter の unreliable は KCP を完全バイパスし raw sendto で実装するため、同モードの RTT は raw_udp と同程度になる。信頼性は持たない。
 - `udt4` は unreliable モードを持たないため、`--reliable=u` シナリオは `na` 行として記録される(計測なし)。adapter の `supports(false)` が false を返すことで harness が自動的に na を出力する。UDT4 は SOCK_STREAM over UDP でありメッセージ境界を持たないため、adapter 内部で 4 バイト LE 長プレフィックスによるフレーミングを行っている。ソースは system apt パッケージ `libudt-dev 4.11+dfsg1` を使用(GitHub fork は環境から到達不可のため)。

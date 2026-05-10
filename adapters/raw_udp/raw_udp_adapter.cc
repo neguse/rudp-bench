@@ -114,6 +114,9 @@ class RawUdpAdapter : public rudp_bench::Adapter {
   const char* name() const override { return "raw_udp"; }
   bool supports(bool reliable) const override { return !reliable; }
   size_t max_payload_bytes(bool /*reliable*/) const override { return 65507; }
+  const char* flush_policy(bool reliable) const override {
+    return reliable ? "unsupported" : "immediate";
+  }
   bool encryption_on() const override { return false; }
 
  private:

@@ -27,8 +27,9 @@ struct CsvRow {
   uint64_t rss_mb = 0;
   uint64_t connect_ms = 0;
   uint32_t duration_s = 0;
-  std::string mode = "echo";       // "echo" / "broadcast"
-  std::string idle_policy = "spin"; // "spin" / "adaptive"
+  std::string mode = "echo";        // "echo" / "broadcast"
+  std::string idle_policy = "spin";  // "spin" / "adaptive"
+  std::string flush_policy = "immediate";
   uint64_t client_tick_gap_p99_us = 0;
   uint64_t client_tick_gap_max_us = 0;
   uint64_t client_pacing_lag_p99_us = 0;

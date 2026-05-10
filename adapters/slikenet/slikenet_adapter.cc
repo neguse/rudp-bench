@@ -159,6 +159,7 @@ class SLikeNetAdapter : public rudp_bench::Adapter {
   bool supports(bool /*reliable*/) const override { return true; }
   size_t max_payload_bytes(bool /*reliable*/) const override { return 65536; }
   uint32_t max_connections() const override { return 1; }
+  const char* flush_policy(bool /*reliable*/) const override { return "library_internal"; }
   bool encryption_on() const override { return false; }
 
  private:

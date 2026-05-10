@@ -9,7 +9,8 @@ void write_header(std::ostream& os) {
   os << "library,encryption,phase,reliable,size,conns,rate,loss,"
      << "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,"
      << "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
-     << "mode,idle_policy,client_tick_gap_p99_us,client_tick_gap_max_us,"
+     << "mode,idle_policy,flush_policy,client_tick_gap_p99_us,"
+     << "client_tick_gap_max_us,"
      << "client_pacing_lag_p99_us,client_pacing_lag_max_us,"
      << "client_missed_pacing,client_attempted,client_accepted,"
      << "client_attempted_ratio,client_accepted_ratio,"
@@ -28,7 +29,7 @@ void write_row(std::ostream& os, const CsvRow& r) {
      << std::setprecision(4) << r.delivery_ratio << ','
      << std::setprecision(2) << r.cpu_pct << ','
      << r.rss_mb << ',' << r.connect_ms << ',' << r.duration_s << ','
-     << r.mode << ',' << r.idle_policy << ','
+     << r.mode << ',' << r.idle_policy << ',' << r.flush_policy << ','
      << r.client_tick_gap_p99_us << ',' << r.client_tick_gap_max_us << ','
      << r.client_pacing_lag_p99_us << ',' << r.client_pacing_lag_max_us << ','
      << r.client_missed_pacing << ',' << r.client_attempted << ','

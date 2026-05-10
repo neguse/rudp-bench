@@ -13,7 +13,8 @@ RAW_HEADER = (
     "library,encryption,phase,reliable,size,conns,rate,loss,"
     "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,"
     "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
-    "mode,idle_policy,client_tick_gap_p99_us,client_tick_gap_max_us,"
+    "mode,idle_policy,flush_policy,client_tick_gap_p99_us,"
+    "client_tick_gap_max_us,"
     "client_pacing_lag_p99_us,client_pacing_lag_max_us,"
     "client_missed_pacing,client_attempted,client_accepted,"
     "client_attempted_ratio,client_accepted_ratio,"
@@ -45,6 +46,7 @@ BASE_RAW_ROW = {
     "duration_s": "2",
     "mode": "echo",
     "idle_policy": "spin",
+    "flush_policy": "immediate",
     "client_tick_gap_p99_us": "4",
     "client_tick_gap_max_us": "10",
     "client_pacing_lag_p99_us": "3",
@@ -383,6 +385,8 @@ def main() -> int:
         assert canonical["low_delivery_is_valid"]["invalid_reason"] == "ok"
         assert canonical["ratio_recomputed"]["delivery_ratio"] == "0.5000"
         assert scenario_rows["ok"]["idle_policy"] == "spin"
+        assert scenario_rows["ok"]["flush_policy"] == "immediate"
+        assert scenario_rows["unsupported_payload"]["flush_policy"] == "poll_send_packets"
 
         diag = read_rows(diagnostics)
         assert len(diag) == 30

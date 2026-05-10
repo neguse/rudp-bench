@@ -23,6 +23,7 @@ SUMMARY_FIELDS = [
     "loss",
     "mode",
     "idle_policy",
+    "flush_policy",
     "valid",
     "invalid_reason",
     "delivery_ratio",
@@ -153,6 +154,7 @@ def run_phase1(args: argparse.Namespace, lib: str, rate: str, run_dir: Path) -> 
     completed = subprocess.run(cmd, check=False)
     result = read_first_row(results_path)
     diagnostics = read_client_diagnostics(diagnostics_path)
+    scenario = read_first_row(scenarios_path)
 
     if completed.returncode != 0:
         stop_reason = f"runner_exit_{completed.returncode}"
@@ -175,6 +177,7 @@ def run_phase1(args: argparse.Namespace, lib: str, rate: str, run_dir: Path) -> 
         "loss": args.loss,
         "mode": args.mode,
         "idle_policy": args.idle,
+        "flush_policy": scenario.get("flush_policy", "") if scenario else "",
         "valid": result.get("valid", "") if result else "0",
         "invalid_reason": result.get("invalid_reason", "") if result else stop_reason,
         "delivery_ratio": result.get("delivery_ratio", "") if result else "",

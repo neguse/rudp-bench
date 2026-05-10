@@ -328,7 +328,7 @@ stderr_path
   - The per-message stream policy was removed rather than kept as an alternate mode.
   - Added smoke coverage for two reliable messages over one connection.
 
-- [ ] **PERF-010: Normalize or expose flush/batching policy**
+- [x] **PERF-010: Normalize or expose flush/batching policy**
 
   Problem:
   - ENet flushes at `poll()` tail while raw_udp / mini_rudp send immediately. Other adapters have their own batching behavior.
@@ -340,6 +340,12 @@ stderr_path
 
   Acceptance:
   - Diagnostic/scenario metadata makes batching policy visible, and docs state how to interpret it.
+
+  Done:
+  - Chose expose-over-normalize: adapter-native flushing remains unchanged.
+  - Added `Adapter::flush_policy(reliable)` and raw role CSV `flush_policy`.
+  - Added `flush_policy` to `scenarios.csv` and saturation summary output.
+  - Documented how to interpret immediate, poll-driven, and library-internal policies.
 
 ## P1: Harness Overhead
 

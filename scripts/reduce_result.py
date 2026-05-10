@@ -37,6 +37,20 @@ MAX_CONNS = {
     "yojimbo": 64,
 }
 
+# Flush/batching metadata is diagnostic scenario context, not a ranking metric.
+FLUSH_POLICY = {
+    "raw_udp": {"r": "unsupported", "u": "immediate"},
+    "mini_rudp": {"r": "immediate_retransmit_poll", "u": "immediate"},
+    "enet": {"r": "poll_flush", "u": "poll_flush"},
+    "kcp": {"r": "poll_update", "u": "immediate"},
+    "slikenet": {"r": "library_internal", "u": "library_internal"},
+    "udt4": {"r": "blocking_stream", "u": "unsupported"},
+    "yojimbo": {"r": "poll_send_packets", "u": "poll_send_packets"},
+    "gns": {"r": "no_nagle", "u": "no_nagle"},
+    "msquic": {"r": "async_internal", "u": "async_internal"},
+    "litenetlib": {"r": "library_internal", "u": "library_internal"},
+}
+
 RESULT_FIELDS = [
     "run_id",
     "scenario_id",
@@ -82,6 +96,7 @@ SCENARIO_FIELDS = [
     "duration_s",
     "warmup_s",
     "idle_policy",
+    "flush_policy",
 ]
 
 
@@ -204,6 +219,16 @@ def canonical_delivery_ratio(client: Optional[Dict[str, str]]) -> str:
     return f"{delivered / accepted:.4f}"
 
 
+def scenario_flush_policy(args: argparse.Namespace,
+                          server: Optional[Dict[str, str]],
+                          client: Optional[Dict[str, str]]) -> str:
+    for raw in (client, server):
+        if raw is not None and raw.get("flush_policy"):
+            return raw["flush_policy"]
+    by_reliability = FLUSH_POLICY.get(args.library, {})
+    return by_reliability.get(args.reliable, "unknown")
+
+
 def invalid_reason(server: Optional[Dict[str, str]],
                    client: Optional[Dict[str, str]],
                    args: argparse.Namespace) -> str:
@@ -290,6 +315,7 @@ def append(args: argparse.Namespace) -> int:
         "duration_s": args.duration,
         "warmup_s": args.warmup,
         "idle_policy": args.idle,
+        "flush_policy": scenario_flush_policy(args, server, client),
     })
 
     append_row(args.diagnostics, DIAGNOSTIC_FIELDS,
