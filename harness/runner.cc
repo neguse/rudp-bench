@@ -330,6 +330,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.client_recv_drained_p99 = tick.recv_drained.percentile_per_mille(990);
   row.client_recv_drained_max = tick.recv_drained.max();
   row.client_outstanding_max = tick.outstanding_max;
+  row.delivery_dedup_policy = DeliveryTracker::dedup_policy();
   bool tick_ok = tick.tick_gap_us.count() > 0 &&
                  row.client_tick_gap_p99_us <= 250 &&
                  row.client_accepted_ratio >= 0.99;

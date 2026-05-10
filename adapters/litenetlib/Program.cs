@@ -426,7 +426,7 @@ static string CsvHeader() =>
     "client_missed_pacing,client_attempted,client_accepted," +
     "client_attempted_ratio,client_accepted_ratio," +
     "client_recv_drained_p99,client_recv_drained_max," +
-    "client_outstanding_max,client_tick_ok";
+    "client_outstanding_max,client_tick_ok,delivery_dedup_policy";
 
 static string FormatRow(CsvRow r) =>
     $"{r.Library},{r.Encryption},{r.Phase},{r.Reliable}," +
@@ -445,7 +445,7 @@ static string FormatRow(CsvRow r) =>
     $"{r.ClientAttemptedRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.ClientAcceptedRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.ClientRecvDrainedP99},{r.ClientRecvDrainedMax}," +
-    $"{r.ClientOutstandingMax},{r.ClientTickOk}";
+    $"{r.ClientOutstandingMax},{r.ClientTickOk},{r.DeliveryDedupPolicy}";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -514,6 +514,7 @@ class CsvRow
     public ulong ClientRecvDrainedMax;
     public ulong ClientOutstandingMax;
     public uint ClientTickOk;
+    public string DeliveryDedupPolicy = DeliveryTracker.DedupPolicy;
 }
 
 static class TickUtil
@@ -694,18 +695,38 @@ class ThroughputCounter
 
 class DeliveryTracker
 {
+    public const string DedupPolicy = "sliding_window_65536_per_conn";
+    private const int DedupWindowPerConn = 65_536;
+    private const ulong SeqMask = 0x0000FFFFFFFFFFFFul;
+
+    private sealed class ConnDedupWindow
+    {
+        public readonly Queue<ulong> Order = new();
+        public readonly HashSet<ulong> Keys = new();
+    }
+
     private ulong acceptedCount_;
     private ulong receivedCount_;
-    private readonly HashSet<ulong> receivedKeys_ = new();
+    private readonly Dictionary<uint, ConnDedupWindow> receivedByConn_ = new();
 
-    // pack(seq, connId) は harness/metrics.cc と同じビット割り当て
-    private static ulong Pack(ulong seq, uint connId) =>
-        ((ulong)connId << 48) | (seq & 0x0000FFFFFFFFFFFFul);
-
-    public void MarkAccepted(ulong seq, uint connId) { acceptedCount_++; _ = Pack(seq, connId); }
+    public void MarkAccepted(ulong seq, uint connId)
+    {
+        acceptedCount_++;
+        _ = seq;
+        _ = connId;
+    }
     public bool MarkReceived(ulong seq, uint connId)
     {
-        if (!receivedKeys_.Add(Pack(seq, connId))) return false;
+        if (!receivedByConn_.TryGetValue(connId, out var window))
+        {
+            window = new ConnDedupWindow();
+            receivedByConn_[connId] = window;
+        }
+        ulong key = seq & SeqMask;
+        if (!window.Keys.Add(key)) return false;
+        window.Order.Enqueue(key);
+        if (window.Order.Count > DedupWindowPerConn)
+            window.Keys.Remove(window.Order.Dequeue());
         receivedCount_++;
         return true;
     }

@@ -38,6 +38,8 @@ TEST(CsvWriter, WritesHeaderAndRow) {
   std::string out = os.str();
   EXPECT_NE(out.find("library,encryption,phase,reliable"), std::string::npos);
   EXPECT_NE(out.find("client_tick_gap_p99_us"), std::string::npos);
+  EXPECT_NE(out.find("delivery_dedup_policy"), std::string::npos);
   EXPECT_NE(out.find("mode,idle_policy,flush_policy"), std::string::npos);
   EXPECT_NE(out.find("raw_udp,off,1,u,64,1,100,0.000"), std::string::npos);
+  EXPECT_NE(out.find("sliding_window_65536_per_conn"), std::string::npos);
 }

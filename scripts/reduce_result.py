@@ -81,6 +81,7 @@ DIAGNOSTIC_FIELDS = [
     "client_tick_gap_p99_us",
     "client_pacing_lag_p99_us",
     "raw_result_path",
+    "delivery_dedup_policy",
 ]
 
 SCENARIO_FIELDS = [
@@ -293,6 +294,7 @@ def diagnostic_row(run_id: str, scenario_id: str, role: str,
         "client_tick_gap_p99_us": raw.get("client_tick_gap_p99_us", "") if is_client else "",
         "client_pacing_lag_p99_us": raw.get("client_pacing_lag_p99_us", "") if is_client else "",
         "raw_result_path": raw_path,
+        "delivery_dedup_policy": raw.get("delivery_dedup_policy", "") if is_client else "",
     }
 
 

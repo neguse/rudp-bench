@@ -40,9 +40,29 @@ TEST(DeliveryTracker, CountsAcceptedAndReceived) {
   d.mark_accepted(3, 0);
   d.mark_received(1, 0);
   d.mark_received(3, 0);
+  d.mark_received(3, 0);
   EXPECT_EQ(d.accepted(), 3u);
   EXPECT_EQ(d.received(), 2u);
+  EXPECT_EQ(d.dedup_entries(), 2u);
   EXPECT_DOUBLE_EQ(d.delivery_ratio(), 2.0 / 3.0);
+}
+
+TEST(DeliveryTracker, DedupWindowIsBoundedPerConnection) {
+  DeliveryTracker d;
+  for (size_t i = 0; i < DeliveryTracker::dedup_window_per_conn() + 10; ++i) {
+    EXPECT_TRUE(d.mark_received(i, 0));
+  }
+  EXPECT_EQ(d.dedup_entries(), DeliveryTracker::dedup_window_per_conn());
+  EXPECT_TRUE(d.mark_received(0, 0));
+}
+
+TEST(DeliveryTracker, DedupWindowIsPerConnection) {
+  DeliveryTracker d;
+  EXPECT_TRUE(d.mark_received(7, 0));
+  EXPECT_TRUE(d.mark_received(7, 1));
+  EXPECT_FALSE(d.mark_received(7, 0));
+  EXPECT_EQ(d.received(), 2u);
+  EXPECT_STREQ(d.dedup_policy(), "sliding_window_65536_per_conn");
 }
 
 TEST(ThroughputCounter, BytesAndMessages) {

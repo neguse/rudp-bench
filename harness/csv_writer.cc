@@ -15,7 +15,7 @@ void write_header(std::ostream& os) {
      << "client_missed_pacing,client_attempted,client_accepted,"
      << "client_attempted_ratio,client_accepted_ratio,"
      << "client_recv_drained_p99,client_recv_drained_max,"
-     << "client_outstanding_max,client_tick_ok\n";
+     << "client_outstanding_max,client_tick_ok,delivery_dedup_policy\n";
 }
 
 void write_row(std::ostream& os, const CsvRow& r) {
@@ -37,7 +37,8 @@ void write_row(std::ostream& os, const CsvRow& r) {
      << std::setprecision(4) << r.client_attempted_ratio << ','
      << r.client_accepted_ratio << ','
      << r.client_recv_drained_p99 << ',' << r.client_recv_drained_max << ','
-     << r.client_outstanding_max << ',' << r.client_tick_ok << '\n';
+     << r.client_outstanding_max << ',' << r.client_tick_ok << ','
+     << r.delivery_dedup_policy << '\n';
 }
 
 }  // namespace rudp_bench

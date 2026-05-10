@@ -4,6 +4,7 @@
 
 #include "harness/adapter_registry.h"
 #include "harness/csv_writer.h"
+#include "harness/metrics.h"
 #include "harness/runner.h"
 #include "harness/scenario.h"
 
@@ -58,6 +59,7 @@ int main(int argc, const char* argv[]) {
     const bool want_reliable = cfg.reliable == rudp_bench::Reliability::Reliable;
     row.idle_policy = rudp_bench::idle_policy_name(cfg.idle_policy);
     row.flush_policy = adapter->flush_policy(want_reliable);
+    row.delivery_dedup_policy = rudp_bench::DeliveryTracker::dedup_policy();
     return row;
   };
 

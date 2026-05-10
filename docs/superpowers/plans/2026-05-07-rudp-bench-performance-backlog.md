@@ -83,6 +83,7 @@ client_pacing_lag_p99_us
 raw_result_path
 stdout_path
 stderr_path
+delivery_dedup_policy
 ```
 
 `client_tick_ok=false` などの diagnostic failure は reducer が canonical の `valid=false` / `invalid_reason=client_tick` に畳む。
@@ -368,7 +369,7 @@ stderr_path
   - Exact 1us bins are used through 10ms, 100us bins through 1s, and 1ms bins through 60s; larger values are tracked as overflow and return the observed max when selected by percentile.
   - Added tests for exact percentiles, bounded storage, and coarse-bin percentile behavior.
 
-- [ ] **PERF-012: Bound delivery dedup memory**
+- [x] **PERF-012: Bound delivery dedup memory**
 
   Problem:
   - `DeliveryTracker::received_keys_` grows with every unique received message.
@@ -381,6 +382,12 @@ stderr_path
 
   Acceptance:
   - Delivery tracking memory no longer grows unbounded for long high-throughput runs.
+
+  Done:
+  - Replaced permanent exact dedup sets with exact sliding windows per received connection in C++ and LiteNetLib.
+  - The dedup window is 65,536 sequence keys per connection, so memory is bounded by connection count rather than message count.
+  - Added `delivery_dedup_policy` to raw role CSV and diagnostics.
+  - Added tests for duplicate suppression, per-connection dedup, and window eviction.
 
 - [ ] **PERF-013: Sample RSS during the run**
 

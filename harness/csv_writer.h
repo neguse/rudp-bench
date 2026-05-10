@@ -43,6 +43,7 @@ struct CsvRow {
   uint64_t client_recv_drained_max = 0;
   uint64_t client_outstanding_max = 0;
   uint32_t client_tick_ok = 0;
+  std::string delivery_dedup_policy = "sliding_window_65536_per_conn";
 };
 
 void write_header(std::ostream& os);

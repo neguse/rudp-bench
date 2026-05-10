@@ -51,20 +51,33 @@ uint64_t LatencyHist::percentile_us(double p) {
   return max_;
 }
 
-static uint64_t pack(uint64_t seq, uint32_t conn_id) {
-  return (static_cast<uint64_t>(conn_id) << 48) | (seq & 0x0000FFFFFFFFFFFFULL);
-}
-
 void DeliveryTracker::mark_accepted(uint64_t seq, uint32_t conn_id) {
   ++accepted_count_;
-  (void)pack(seq, conn_id);  // 受理側は count のみ管理
+  (void)seq;
+  (void)conn_id;
 }
 
 bool DeliveryTracker::mark_received(uint64_t seq, uint32_t conn_id) {
-  uint64_t k = pack(seq, conn_id);
-  if (!received_keys_.insert(k).second) return false;
+  uint64_t k = seq & kSeqMask;
+  auto& window = received_by_conn_[conn_id];
+  if (!window.keys.insert(k).second) return false;
+  window.order.push_back(k);
+  if (window.order.size() > kDedupWindowPerConn) {
+    uint64_t old = window.order.front();
+    window.order.pop_front();
+    window.keys.erase(old);
+  }
   ++received_count_;
   return true;
+}
+
+size_t DeliveryTracker::dedup_entries() const {
+  size_t entries = 0;
+  for (const auto& [conn_id, window] : received_by_conn_) {
+    (void)conn_id;
+    entries += window.keys.size();
+  }
+  return entries;
 }
 
 }  // namespace rudp_bench

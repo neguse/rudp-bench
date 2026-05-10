@@ -4,6 +4,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace rudp_bench {
@@ -52,14 +54,25 @@ class DeliveryTracker {
   bool mark_received(uint64_t seq, uint32_t conn_id);
   uint64_t accepted() const { return accepted_count_; }
   uint64_t received() const { return received_count_; }
+  size_t dedup_entries() const;
+  static constexpr size_t dedup_window_per_conn() { return kDedupWindowPerConn; }
+  static constexpr const char* dedup_policy() {
+    return "sliding_window_65536_per_conn";
+  }
   double delivery_ratio() const {
     return accepted_count_ ? double(received_count_) / double(accepted_count_) : 0.0;
   }
  private:
+  static constexpr size_t kDedupWindowPerConn = 65'536;
+  static constexpr uint64_t kSeqMask = 0x0000FFFFFFFFFFFFULL;
+  struct ConnDedupWindow {
+    std::deque<uint64_t> order;
+    std::unordered_set<uint64_t> keys;
+  };
+
   uint64_t accepted_count_ = 0;
   uint64_t received_count_ = 0;
-  // 重複受信は数えない
-  std::unordered_set<uint64_t> received_keys_;
+  std::unordered_map<uint32_t, ConnDedupWindow> received_by_conn_;
 };
 
 }  // namespace rudp_bench

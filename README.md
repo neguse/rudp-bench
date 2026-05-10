@@ -89,7 +89,7 @@ python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase
 - `raw_udp` は reliable モードを持たないため、`--reliable=r` シナリオは `na` 行として記録される(計測なし)。
 - oversized payload は実送信せず `valid=0, invalid_reason=unsupported_payload` として扱う。共通 Phase 1 matrix は全 adapter / reliable mode で有効な `size=64,1000` に固定し、より大きい payload は adapter ごとの `max_payload` を確認して個別に走らせる。
 - canonical result の `valid=0` は、unsupported axis、process timeout/crash、client tick failure、accepted message なしを意味する。低い `delivery_ratio` 自体は有効な性能結果として扱う。
-- RTT percentile は固定ビンの bounded histogram で計算するため、latency tracking memory はメッセージ数に比例しない。`DeliveryTracker::received_keys_` は計測中に成長し続けるため、高 throughput × 長時間ランではまだ harness 自身の RSS に影響する。
+- RTT percentile は固定ビンの bounded histogram で計算するため、latency tracking memory はメッセージ数に比例しない。delivery dedup は受信 conn ごとの sliding window で行い、`delivery_dedup_policy=sliding_window_65536_per_conn` として diagnostics に記録される。window より古い重複は新規受信として数えられる。
 - `flush_policy` は ranking metric ではなく解釈用メタデータ。`immediate` は `send()` 内で socket に渡す実装、`poll_flush` は `poll()` 末尾で明示 flush、`poll_update` / `poll_send_packets` は protocol tick でまとめて送る実装、`library_internal` / `async_internal` はライブラリ内部スケジューラに委ねる実装を表す。`no_nagle` は batching 遅延を抑える送信フラグを使う実装、`blocking_stream` は stream 送信完了まで書き込む実装。
 - `enet` adapter は `poll()` 末尾で 1 回だけ `enet_host_flush` を呼ぶ(ENet 標準の使い方)。`raw_udp` / `mini_rudp` は `send()` 内で kernel に即時 flush するため、高 conns 時に ENet は batching 有利・per-msg latency でやや不利の方向にバイアスする。比較時は `scenarios.csv` の `flush_policy` も見ること。
 - `kcp` adapter の reliable 遅延は KCP の内部タイマ粒度(デフォルト 100ms、nodelay=1 で 10ms)に依存する。loopback ではタイマ粒度が RTT の支配項になるため、ENet / raw_udp より reliable RTT が高くなる傾向がある。`ikcp_update` 呼び出し頻度を上げることで改善できるが、CPU コストと要トレードオフ(Phase 2 バックログ)。

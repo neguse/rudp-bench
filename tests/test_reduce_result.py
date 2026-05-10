@@ -19,7 +19,7 @@ RAW_HEADER = (
     "client_missed_pacing,client_attempted,client_accepted,"
     "client_attempted_ratio,client_accepted_ratio,"
     "client_recv_drained_p99,client_recv_drained_max,"
-    "client_outstanding_max,client_tick_ok\n"
+    "client_outstanding_max,client_tick_ok,delivery_dedup_policy\n"
 )
 RAW_FIELDS = RAW_HEADER.strip().split(",")
 
@@ -60,6 +60,7 @@ BASE_RAW_ROW = {
     "client_recv_drained_max": "1",
     "client_outstanding_max": "1",
     "client_tick_ok": "1",
+    "delivery_dedup_policy": "sliding_window_65536_per_conn",
 }
 
 
@@ -397,6 +398,7 @@ def main() -> int:
         assert client_diag["delivery_ratio"] == "1.0000"
         assert client_diag["exit_status"] == "0"
         assert client_diag["client_tick_ok"] == "1"
+        assert client_diag["delivery_dedup_policy"] == "sliding_window_65536_per_conn"
 
         ratio_diag = [
             r for r in diag if r["scenario_id"] == "ratio_recomputed" and r["role"] == "client"
