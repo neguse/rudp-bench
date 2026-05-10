@@ -15,6 +15,8 @@
 
 namespace {
 
+constexpr int GNS_RECV_BATCH = 64;
+
 // Forward declaration — defined after GnsAdapter.
 static void gns_status_callback(SteamNetConnectionStatusChangedCallback_t* info);
 
@@ -130,24 +132,17 @@ class GnsAdapter : public rudp_bench::Adapter {
     // コールバックを同期的に発火させる (接続状態変化 / 到着通知)
     iface_->RunCallbacks();
 
-    // 全接続からメッセージを受信する
-    std::vector<std::pair<uint32_t, HSteamNetConnection>> conns;
+    // 全接続からメッセージを受信する。scratch を再利用して tick ごとの
+    // vector allocation を避ける。
     {
       std::lock_guard<std::mutex> lock(mtx_);
-      conns.reserve(id_to_conn_.size());
-      for (auto& [id, hConn] : id_to_conn_) conns.emplace_back(id, hConn);
+      poll_conns_.clear();
+      poll_conns_.reserve(id_to_conn_.size());
+      for (auto& [id, hConn] : id_to_conn_) poll_conns_.emplace_back(id, hConn);
     }
 
-    for (auto& [id, hConn] : conns) {
-      SteamNetworkingMessage_t* msgs[64];
-      int n = iface_->ReceiveMessagesOnConnection(hConn, msgs, 64);
-      if (n <= 0) continue;
-      std::lock_guard<std::mutex> lock(mtx_);
-      for (int i = 0; i < n; ++i) {
-        const auto* p = static_cast<const uint8_t*>(msgs[i]->m_pData);
-        inbox_.enqueue(id, p, msgs[i]->m_cbSize);
-        msgs[i]->Release();
-      }
+    for (auto& [id, hConn] : poll_conns_) {
+      drain_connection(id, hConn);
     }
   }
 
@@ -243,6 +238,23 @@ class GnsAdapter : public rudp_bench::Adapter {
   }
 
  private:
+  void drain_connection(uint32_t id, HSteamNetConnection hConn) {
+    for (;;) {
+      SteamNetworkingMessage_t* msgs[GNS_RECV_BATCH];
+      int n = iface_->ReceiveMessagesOnConnection(hConn, msgs, GNS_RECV_BATCH);
+      if (n <= 0) return;
+      {
+        std::lock_guard<std::mutex> lock(mtx_);
+        for (int i = 0; i < n; ++i) {
+          const auto* p = static_cast<const uint8_t*>(msgs[i]->m_pData);
+          inbox_.enqueue(id, p, msgs[i]->m_cbSize);
+        }
+      }
+      for (int i = 0; i < n; ++i) msgs[i]->Release();
+      if (n < GNS_RECV_BATCH) return;
+    }
+  }
+
   ISteamNetworkingSockets* iface_ = nullptr;
   HSteamListenSocket listen_sock_ = k_HSteamListenSocket_Invalid;
 
@@ -250,6 +262,7 @@ class GnsAdapter : public rudp_bench::Adapter {
   std::unordered_map<uint32_t, HSteamNetConnection> id_to_conn_;
   std::unordered_map<HSteamNetConnection, uint32_t> conn_to_id_;
   std::unordered_set<uint32_t> connected_ids_;
+  std::vector<std::pair<uint32_t, HSteamNetConnection>> poll_conns_;
   uint32_t next_id_ = 1;
 
   rudp_bench::ReusableInboundQueue inbox_;

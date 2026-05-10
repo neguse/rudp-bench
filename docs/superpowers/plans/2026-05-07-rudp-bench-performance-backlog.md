@@ -465,7 +465,7 @@ delivery_dedup_policy
   - mini_rudp client `recv()` now pops queued payloads instead of scanning every connection fd.
   - Added a 128-connection reliable echo smoke test that verifies client-side conn-id identity.
 
-- [ ] **PERF-017: Optimize GNS polling**
+- [x] **PERF-017: Optimize GNS polling**
 
   Problem:
   - GNS creates a connection vector every `poll()` and drains at most 64 messages per connection per poll.
@@ -477,6 +477,11 @@ delivery_dedup_policy
 
   Acceptance:
   - GNS adapter no longer allocates a connection vector on every tick in the hot path.
+
+  Done:
+  - Reused a member scratch connection vector in `poll()` so GNS no longer allocates a fresh connection list every tick.
+  - Drained `ReceiveMessagesOnConnection` until the connection queue is empty instead of stopping at one 64-message batch.
+  - Added a GNS smoke test that queues 96 reliable messages and verifies one poll can drain more than one receive batch.
 
 ## P2: Result Interpretation And Tooling
 

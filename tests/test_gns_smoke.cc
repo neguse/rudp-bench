@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <thread>
+#include <vector>
 
 namespace rudp_bench { void register_gns_adapter(); }
 
@@ -82,6 +83,69 @@ TEST(GnsSmoke, ReliableEcho) {
   EXPECT_TRUE(got);
 
   server_thread.join();
+  client->close();
+  server->close();
+}
+
+TEST(GnsSmoke, DrainsMoreThanOneReceiveBatchPerPoll) {
+  constexpr uint16_t kPort = 0xC108;
+  constexpr uint32_t kMessages = 96;
+
+  auto server = create_adapter("gns");
+  auto client = create_adapter("gns");
+  ASSERT_NE(server, nullptr);
+  ASSERT_NE(client, nullptr);
+
+  server->server_listen(kPort);
+  uint32_t cid = client->client_connect("127.0.0.1", kPort);
+
+  auto connect_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < connect_deadline && !client->is_connected(cid)) {
+    server->poll();
+    client->poll();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(client->is_connected(cid));
+
+  for (uint32_t i = 0; i < kMessages; ++i) {
+    ASSERT_EQ(client->send(cid, &i, sizeof(i), true), 0);
+  }
+
+  for (int i = 0; i < 20; ++i) {
+    client->poll();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  std::vector<bool> got(kMessages, false);
+  size_t received = 0;
+  size_t max_drained = 0;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (received < kMessages && std::chrono::steady_clock::now() < deadline) {
+    server->poll();
+
+    size_t drained = 0;
+    for (;;) {
+      uint32_t seq = 0;
+      size_t len = 0;
+      uint32_t in_cid = 0;
+      int r = server->recv(&seq, sizeof(seq), &len, &in_cid);
+      if (r == 0) break;
+      ASSERT_EQ(r, 1);
+      ASSERT_EQ(len, sizeof(seq));
+      ASSERT_LT(seq, kMessages);
+      if (!got[seq]) {
+        got[seq] = true;
+        ++received;
+      }
+      ++drained;
+    }
+    if (drained > max_drained) max_drained = drained;
+    if (received < kMessages) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  EXPECT_EQ(received, kMessages);
+  EXPECT_GT(max_drained, 64u);
+
   client->close();
   server->close();
 }
