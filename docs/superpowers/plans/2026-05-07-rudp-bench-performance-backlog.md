@@ -139,7 +139,7 @@ delivery_dedup_policy
   Done:
   - Added `scripts/reduce_result.py`.
   - Updated phase runners to produce canonical `results.csv`, `diagnostics.csv`, and `scenarios.csv`.
-  - Raw role CSVs are kept under `*_raw/<run_id>/` and linked from diagnostics.
+  - Raw role CSVs and per-role stdout/stderr logs are kept under `*_raw/<run_id>/` and linked from diagnostics.
   - Reduced server grace from +5s to +2s so server rows normally complete before reducer merge.
 
 - [x] **PERF-002: Add reducer validation rules for canonical `valid`**

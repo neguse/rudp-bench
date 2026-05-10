@@ -42,6 +42,8 @@ DIAGNOSTIC_FIELDS = [
     "client_tick_gap_p99_us",
     "client_pacing_lag_p99_us",
     "raw_result_path",
+    "stdout_path",
+    "stderr_path",
     "delivery_dedup_policy",
 ]
 
@@ -236,6 +238,7 @@ def invalid_reason(server: Optional[Dict[str, str]],
 
 def diagnostic_row(run_id: str, scenario_id: str, role: str,
                    raw: Optional[Dict[str, str]], raw_path: str,
+                   stdout_path: str, stderr_path: str,
                    status: str, scenario_reason: str) -> Dict[str, object]:
     exit_reason = role_exit_reason(role, raw, status)
     if scenario_reason in (
@@ -252,6 +255,8 @@ def diagnostic_row(run_id: str, scenario_id: str, role: str,
             "exit_reason": exit_reason,
             "exit_status": status,
             "raw_result_path": raw_path,
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
         }
     is_client = role == "client"
     return {
@@ -271,6 +276,8 @@ def diagnostic_row(run_id: str, scenario_id: str, role: str,
         "client_tick_gap_p99_us": raw.get("client_tick_gap_p99_us", "") if is_client else "",
         "client_pacing_lag_p99_us": raw.get("client_pacing_lag_p99_us", "") if is_client else "",
         "raw_result_path": raw_path,
+        "stdout_path": stdout_path,
+        "stderr_path": stderr_path,
         "delivery_dedup_policy": raw.get("delivery_dedup_policy", "") if is_client else "",
     }
 
@@ -304,10 +311,12 @@ def append(args: argparse.Namespace) -> int:
 
     append_row(args.diagnostics, DIAGNOSTIC_FIELDS,
                diagnostic_row(args.run_id, args.scenario_id, "server", server,
-                              args.server, args.server_status, reason))
+                              args.server, args.server_stdout, args.server_stderr,
+                              args.server_status, reason))
     append_row(args.diagnostics, DIAGNOSTIC_FIELDS,
                diagnostic_row(args.run_id, args.scenario_id, "client", client,
-                              args.client, args.client_status, reason))
+                              args.client, args.client_stdout, args.client_stderr,
+                              args.client_status, reason))
 
     append_row(args.results, RESULT_FIELDS, {
         "run_id": args.run_id,
@@ -353,6 +362,10 @@ def main() -> int:
     append_p.add_argument("--scenarios", required=True)
     append_p.add_argument("--server", required=True)
     append_p.add_argument("--client", required=True)
+    append_p.add_argument("--server-stdout", default="")
+    append_p.add_argument("--server-stderr", default="")
+    append_p.add_argument("--client-stdout", default="")
+    append_p.add_argument("--client-stderr", default="")
     append_p.add_argument("--server-status", default="")
     append_p.add_argument("--client-status", default="")
     append_p.add_argument("--run-id", required=True)

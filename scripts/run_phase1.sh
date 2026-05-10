@@ -119,6 +119,10 @@ for lib in ${LIBS//,/ }; do
               SCENARIO_ID="${lib}_${reliable}_${size}_${conns}_${rate}_${mode}_${loss}_${IDLE}"
               S_OUT="$RAW_DIR/s_${SCENARIO_ID}.csv"
               C_OUT="$RAW_DIR/c_${SCENARIO_ID}.csv"
+              S_STDOUT="$RAW_DIR/s_${SCENARIO_ID}.stdout.log"
+              S_STDERR="$RAW_DIR/s_${SCENARIO_ID}.stderr.log"
+              C_STDOUT="$RAW_DIR/c_${SCENARIO_ID}.stdout.log"
+              C_STDERR="$RAW_DIR/c_${SCENARIO_ID}.stderr.log"
               WARMUP_ARG="$WARMUP"
               S_STATUS=0
               C_STATUS=0
@@ -134,7 +138,7 @@ for lib in ${LIBS//,/ }; do
                 run_timeout "$SERVER_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
                   --reliable="$reliable" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" \
                   --size="$size" --conns="$conns" --rate="$rate" --mode="$mode" --idle="$IDLE" \
-                  --out="$S_OUT" &
+                  --out="$S_OUT" >"$S_STDOUT" 2>"$S_STDERR" &
                 SPID=$!
                 sleep 0.5
                 set +e
@@ -142,7 +146,7 @@ for lib in ${LIBS//,/ }; do
                   --host=127.0.0.1 --port="$PORT" \
                   --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
                   --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" --mode="$mode" --idle="$IDLE" \
-                  --out="$C_OUT"
+                  --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
                 C_STATUS=$?
                 wait "$SPID" 2>/dev/null
                 S_STATUS=$?
@@ -152,7 +156,7 @@ for lib in ${LIBS//,/ }; do
                 run_timeout "$SERVER_CPU" "$TIMEOUT_S" "$BIN" --library="$lib" --role=server --port="$PORT" \
                   --reliable="$reliable" --duration="$DURATION" --warmup="$WARMUP" --loss="$loss" \
                   --size="$size" --conns="$conns" --rate="$rate" --mode="$mode" --idle="$IDLE" \
-                  --out="$S_OUT" &
+                  --out="$S_OUT" >"$S_STDOUT" 2>"$S_STDERR" &
                 SPID=$!
                 sleep 0.2
                 set +e
@@ -160,7 +164,7 @@ for lib in ${LIBS//,/ }; do
                   --host=127.0.0.1 --port="$PORT" \
                   --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
                   --duration="$DURATION" --warmup="$WARMUP" --loss="$loss" --mode="$mode" --idle="$IDLE" \
-                  --out="$C_OUT"
+                  --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
                 C_STATUS=$?
                 wait "$SPID" 2>/dev/null
                 S_STATUS=$?
@@ -170,6 +174,8 @@ for lib in ${LIBS//,/ }; do
               python3 scripts/reduce_result.py append \
                 --results "$RESULTS" --diagnostics "$DIAGNOSTICS" --scenarios "$SCENARIOS" \
                 --server "$S_OUT" --client "$C_OUT" \
+                --server-stdout "$S_STDOUT" --server-stderr "$S_STDERR" \
+                --client-stdout "$C_STDOUT" --client-stderr "$C_STDERR" \
                 --server-status "$S_STATUS" --client-status "$C_STATUS" \
                 --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
                 --library "$lib" --reliable "$reliable" --size "$size" --conns "$conns" \

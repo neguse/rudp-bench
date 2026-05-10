@@ -104,6 +104,10 @@ def append_case(
 ):
     server = tmp / f"{scenario_id}_server.csv"
     client = tmp / f"{scenario_id}_client.csv"
+    server_stdout = tmp / f"{scenario_id}_server.stdout.log"
+    server_stderr = tmp / f"{scenario_id}_server.stderr.log"
+    client_stdout = tmp / f"{scenario_id}_client.stdout.log"
+    client_stderr = tmp / f"{scenario_id}_client.stderr.log"
     common = {
         "library": library,
         "reliable": reliable,
@@ -153,6 +157,14 @@ def append_case(
             str(server),
             "--client",
             str(client),
+            "--server-stdout",
+            str(server_stdout),
+            "--server-stderr",
+            str(server_stderr),
+            "--client-stdout",
+            str(client_stdout),
+            "--client-stderr",
+            str(client_stderr),
             "--server-status",
             server_status,
             "--client-status",
@@ -443,6 +455,8 @@ def main() -> int:
         assert client_diag["exit_status"] == "0"
         assert client_diag["client_tick_ok"] == "1"
         assert client_diag["delivery_dedup_policy"] == "sliding_window_65536_per_conn"
+        assert client_diag["stdout_path"].endswith("ok_client.stdout.log")
+        assert client_diag["stderr_path"].endswith("ok_client.stderr.log")
 
         ratio_diag = [
             r for r in diag if r["scenario_id"] == "ratio_recomputed" and r["role"] == "client"
@@ -463,6 +477,10 @@ def main() -> int:
             if r["scenario_id"] == "unsupported_payload" and r["role"] == "client"
         ][0]
         assert unsupported_payload_diag["exit_reason"] == "unsupported_payload"
+        assert unsupported_payload_diag["raw_result_path"].endswith("unsupported_payload_client.csv")
+        assert unsupported_payload_diag["stderr_path"].endswith(
+            "unsupported_payload_client.stderr.log"
+        )
 
     return 0
 
