@@ -5,6 +5,7 @@
 #include <msquic.h>
 
 #include <arpa/inet.h>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -47,6 +48,7 @@ struct StreamCtx {
   HQUIC conn;
   bool outbound;
   std::vector<uint8_t> recv_buf;
+  size_t recv_offset = 0;
   uint32_t frame_len = 0;
   bool have_len = false;
 
@@ -418,19 +420,27 @@ class MsquicAdapter : public rudp_bench::Adapter {
 
   void drain_frames(StreamCtx* sctx) {
     auto& rb = sctx->recv_buf;
+    auto available = [&]() -> size_t { return rb.size() - sctx->recv_offset; };
     while (true) {
       if (!sctx->have_len) {
-        if (rb.size() < 4) return;
+        if (available() < 4) break;
         uint32_t nlen;
-        std::memcpy(&nlen, rb.data(), 4);
+        std::memcpy(&nlen, rb.data() + sctx->recv_offset, 4);
+        sctx->recv_offset += 4;
         sctx->frame_len = ntohl(nlen);
         sctx->have_len = true;
-        rb.erase(rb.begin(), rb.begin() + 4);
       }
-      if (rb.size() < sctx->frame_len) return;
-      enqueue_msg(sctx->conn_id, rb.data(), sctx->frame_len);
-      rb.erase(rb.begin(), rb.begin() + sctx->frame_len);
+      if (available() < sctx->frame_len) break;
+      enqueue_msg(sctx->conn_id, rb.data() + sctx->recv_offset, sctx->frame_len);
+      sctx->recv_offset += sctx->frame_len;
       sctx->have_len = false;
+    }
+    if (sctx->recv_offset == rb.size()) {
+      rb.clear();
+      sctx->recv_offset = 0;
+    } else if (sctx->recv_offset > 4096 && sctx->recv_offset * 2 >= rb.size()) {
+      rb.erase(rb.begin(), rb.begin() + static_cast<std::ptrdiff_t>(sctx->recv_offset));
+      sctx->recv_offset = 0;
     }
   }
 

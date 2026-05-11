@@ -598,6 +598,22 @@ delivery_dedup_policy
   Done:
   - Added `QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED` handling and delete the datagram `SendCtx` on final states.
 
+- [x] **PERF-028: Avoid msquic stream receive memmove per frame**
+
+  Problem:
+  - msquic reliable stream framing removed consumed bytes with `vector.erase(begin, ...)`. Multiple frames in the receive buffer caused repeated front erases and memmove work on the hot receive path.
+
+  Tasks:
+  - Parse stream frames with a read offset.
+  - Compact the buffer only when fully consumed or when the consumed prefix is large enough.
+
+  Acceptance:
+  - Reliable stream receive parsing avoids per-frame front erases.
+
+  Done:
+  - Added a receive offset to `StreamCtx`.
+  - Replaced per-frame front erases with offset advancement and occasional compaction.
+
 ## P2: Result Interpretation And Tooling
 
 - [x] **PERF-018: Make reports use canonical results and hide diagnostics by default**
