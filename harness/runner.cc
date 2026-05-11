@@ -97,6 +97,7 @@ uint64_t pacing_budget_us(uint32_t rate_per_conn) {
 
 constexpr std::chrono::microseconds kAdaptiveIdleCap{20};
 constexpr std::chrono::milliseconds kRssSampleInterval{100};
+constexpr size_t kServerRecvDrainLimit = 1024;
 
 void adaptive_idle_for(std::chrono::microseconds d) {
   if (d.count() > 0) std::this_thread::sleep_for(d);
@@ -126,10 +127,13 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   while (std::chrono::steady_clock::now() < deadline) {
     sample_rss_if_due(ps, std::chrono::steady_clock::now(), next_rss_sample);
     a.poll();
-    size_t n; uint32_t cid;
-    int r = a.recv(buf.data(), buf.size(), &n, &cid);
-    bool did_work = r != 0;
-    if (r == 1) {
+    bool did_work = false;
+    for (size_t drained = 0; drained < kServerRecvDrainLimit; ++drained) {
+      size_t n;
+      uint32_t cid;
+      int r = a.recv(buf.data(), buf.size(), &n, &cid);
+      if (r != 1) break;
+      did_work = true;
       known_conns.insert(cid);
       if (cfg.mode == ServerMode::Echo) {
         a.send(cid, buf.data(), n, reliable);

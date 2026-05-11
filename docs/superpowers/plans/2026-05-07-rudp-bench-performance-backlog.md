@@ -533,6 +533,22 @@ delivery_dedup_policy
   Done:
   - Replaced the static KCP receive buffer with an instance-owned fixed-size array.
 
+- [x] **PERF-024: Drain multiple server receives per poll**
+
+  Problem:
+  - The harness server processed only one received message per loop iteration. Under bursty or high-rate input this forced an extra `poll()` and scheduler check per message, adding harness overhead to every adapter's server-side echo path.
+
+  Tasks:
+  - Drain more than one available server message after each adapter `poll()`.
+  - Keep a bounded drain limit so a large backlog cannot monopolize the loop indefinitely before the next poll/flush opportunity.
+
+  Acceptance:
+  - Server-side receive work is amortized across a bounded batch instead of one message per tick.
+
+  Done:
+  - Added a 1024-message server receive drain cap per loop iteration.
+  - Adaptive idle still sleeps only when no server work was drained.
+
 ## P2: Result Interpretation And Tooling
 
 - [x] **PERF-018: Make reports use canonical results and hide diagnostics by default**
