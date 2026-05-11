@@ -14,6 +14,7 @@ extern "C" {
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <deque>
 #include <unordered_map>
@@ -60,6 +61,10 @@ static uint64_t addr_key(const sockaddr_in& a) {
          static_cast<uint64_t>(a.sin_port);
 }
 
+static bool time_due(IUINT32 now, IUINT32 deadline) {
+  return static_cast<int32_t>(now - deadline) >= 0;
+}
+
 // KCP output callback コンテキスト (ikcp_create の user ポインタに渡す)
 struct KcpOutputCtx {
   int fd = -1;
@@ -90,8 +95,10 @@ struct KcpConn {
   ikcpcb*      kcp = nullptr;
   KcpOutputCtx out_ctx;
   IUINT32      conv = 0;
+  IUINT32      next_update = 0;
   uint32_t     conn_id = 0;
   bool         connected = false;
+  bool         update_due = true;
 
   KcpConn() = default;
   ~KcpConn() { if (kcp) { ikcp_release(kcp); kcp = nullptr; } }
@@ -192,8 +199,12 @@ class KcpAdapter : public rudp_bench::Adapter {
 
     if (reliable) {
       ensure_kcp(conn);
-      return ikcp_send(conn->kcp, static_cast<const char*>(data),
-                       static_cast<int>(len)) < 0 ? -1 : 0;
+      if (ikcp_send(conn->kcp, static_cast<const char*>(data),
+                    static_cast<int>(len)) < 0) {
+        return -1;
+      }
+      conn->update_due = true;
+      return 0;
     }
 
     // unreliable bypass: raw UDP with conv header
@@ -220,9 +231,13 @@ class KcpAdapter : public rudp_bench::Adapter {
     drain_socket();
     IUINT32 now = now_ms();
     for (auto& [id, conn] : conns_) {
-      if (conn->kcp) {
+      if (conn->kcp &&
+          (conn->update_due || conn->next_update == 0 ||
+           time_due(now, conn->next_update))) {
         ikcp_update(conn->kcp, now);
         drain_kcp(conn.get());
+        conn->next_update = ikcp_check(conn->kcp, now);
+        conn->update_due = false;
       }
     }
   }
@@ -263,6 +278,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     ikcp_nodelay(conn->kcp, 1, 10, 2, 1);
     ikcp_setmtu(conn->kcp, KCP_MTU);
     ikcp_wndsize(conn->kcp, KCP_SND_WND, KCP_RCV_WND);
+    conn->update_due = true;
   }
 
   // server 側: 新規 (addr, conv) の接続エントリを払い出す
@@ -304,6 +320,7 @@ class KcpAdapter : public rudp_bench::Adapter {
           ensure_kcp(conn.get());
           ikcp_input(conn->kcp, reinterpret_cast<char*>(raw + 1),
                      static_cast<long>(n - 1));
+          conn->update_due = true;
         } else if (prefix == PREFIX_RAW && n >= 5) {
           IUINT32 conv; std::memcpy(&conv, raw + 1, 4);
           AddrConvKey key{addr_key(src), conv};
@@ -326,6 +343,7 @@ class KcpAdapter : public rudp_bench::Adapter {
           if (it != conns_.end() && it->second->kcp) {
             ikcp_input(it->second->kcp, reinterpret_cast<char*>(raw + 1),
                        static_cast<long>(n - 1));
+            it->second->update_due = true;
           }
         } else if (prefix == PREFIX_RAW && n >= 5) {
           IUINT32 conv; std::memcpy(&conv, raw + 1, 4);

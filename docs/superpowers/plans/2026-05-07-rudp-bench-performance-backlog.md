@@ -549,6 +549,23 @@ delivery_dedup_policy
   - Added a 1024-message server receive drain cap per loop iteration.
   - Adaptive idle still sleeps only when no server work was drained.
 
+- [x] **PERF-025: Avoid unnecessary KCP updates**
+
+  Problem:
+  - The KCP adapter called `ikcp_update()` for every KCP connection on every adapter `poll()`. With many connections this adds adapter overhead even when no input, send, or retransmit timer is due.
+
+  Tasks:
+  - Use KCP's own `ikcp_check()` scheduling hint.
+  - Force an update after reliable send or KCP input.
+  - Keep retransmit timers active when their scheduled update time arrives.
+
+  Acceptance:
+  - Idle KCP connections skip `ikcp_update()` until input/send/timer due.
+
+  Done:
+  - Added per-connection `next_update` / `update_due` state and guarded `ikcp_update()` with it.
+  - Reliable sends and `ikcp_input()` mark the connection due for the next poll.
+
 ## P2: Result Interpretation And Tooling
 
 - [x] **PERF-018: Make reports use canonical results and hide diagnostics by default**
