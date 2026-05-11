@@ -68,11 +68,11 @@ class SLikeNetAdapter : public rudp_bench::Adapter {
 
     // SLikeNet は data[0] をメッセージ識別子として使う。
     // ユーザデータの前に ID_USER_PACKET_ENUM を 1 byte 付加してシステムメッセージと区別する。
-    std::vector<char> buf(len + 1);
-    buf[0] = static_cast<char>(ID_USER_PACKET_ENUM);
-    std::memcpy(buf.data() + 1, data, len);
+    send_scratch_.resize(len + 1);
+    send_scratch_[0] = static_cast<char>(ID_USER_PACKET_ENUM);
+    std::memcpy(send_scratch_.data() + 1, data, len);
 
-    peer_->Send(buf.data(), static_cast<int>(buf.size()),
+    peer_->Send(send_scratch_.data(), static_cast<int>(send_scratch_.size()),
                 HIGH_PRIORITY,
                 reliable ? RELIABLE_ORDERED : UNRELIABLE,
                 0,
@@ -175,6 +175,8 @@ class SLikeNetAdapter : public rudp_bench::Adapter {
 
   // client_connect() 発行済みで GUID 未確定の conn_id キュー
   std::deque<uint32_t> pending_ids_;
+
+  std::vector<char> send_scratch_;
 
   // 受信メッセージのキュー
   rudp_bench::ReusableInboundQueue inbox_;

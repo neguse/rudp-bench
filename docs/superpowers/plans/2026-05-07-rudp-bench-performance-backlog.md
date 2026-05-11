@@ -502,6 +502,22 @@ delivery_dedup_policy
   - Kept the 65,536-key per-connection window policy.
   - Added direct unit coverage for window eviction and recent duplicate suppression.
 
+- [x] **PERF-022: Reduce adapter send-path scratch allocations**
+
+  Problem:
+  - Some adapter send paths created a fresh temporary vector for every outbound message. At high msg/sec this adds allocator noise to latency and throughput comparisons.
+
+  Tasks:
+  - Replace per-send temporary buffers with adapter-owned scratch buffers where the underlying send call consumes/copies data synchronously.
+  - Keep persistent storage where the protocol needs it, such as mini_rudp reliable retransmit queues.
+
+  Acceptance:
+  - Hot unreliable send paths avoid avoidable heap allocation per message.
+
+  Done:
+  - Reused scratch send buffers for mini_rudp unreliable packets, KCP unreliable bypass packets, and SLikeNet's one-byte message-id prefix buffer.
+  - Left mini_rudp reliable packets owned by the retransmit queue.
+
 ## P2: Result Interpretation And Tooling
 
 - [x] **PERF-018: Make reports use canonical results and hide diagnostics by default**

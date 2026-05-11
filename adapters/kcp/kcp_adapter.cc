@@ -196,19 +196,19 @@ class KcpAdapter : public rudp_bench::Adapter {
     }
 
     // unreliable bypass: raw UDP with conv header
-    std::vector<uint8_t> buf(5 + len);
-    buf[0] = PREFIX_RAW;
-    std::memcpy(buf.data() + 1, &conn->conv, 4);
-    std::memcpy(buf.data() + 5, data, len);
+    raw_send_scratch_.resize(5 + len);
+    raw_send_scratch_[0] = PREFIX_RAW;
+    std::memcpy(raw_send_scratch_.data() + 1, &conn->conv, 4);
+    std::memcpy(raw_send_scratch_.data() + 5, data, len);
     ssize_t n;
     if (is_server_) {
-      n = ::sendto(server_fd_, buf.data(), buf.size(), 0,
+      n = ::sendto(server_fd_, raw_send_scratch_.data(), raw_send_scratch_.size(), 0,
                    reinterpret_cast<const sockaddr*>(&conn->out_ctx.peer_addr),
                    sizeof(conn->out_ctx.peer_addr));
     } else {
-      n = ::send(client_fd_, buf.data(), buf.size(), 0);
+      n = ::send(client_fd_, raw_send_scratch_.data(), raw_send_scratch_.size(), 0);
     }
-    return (n == static_cast<ssize_t>(buf.size())) ? 0 : -1;
+    return (n == static_cast<ssize_t>(raw_send_scratch_.size())) ? 0 : -1;
   }
 
   int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
@@ -250,6 +250,7 @@ class KcpAdapter : public rudp_bench::Adapter {
   std::unordered_map<uint32_t, std::unique_ptr<KcpConn>> conns_;
   std::unordered_map<AddrConvKey, uint32_t, AddrConvKeyHash> id_by_addrconv_;
   uint32_t next_id_ = 1;
+  std::vector<uint8_t> raw_send_scratch_;
   rudp_bench::ReusableInboundQueue inbox_;
 
   // KCP インスタンスを持つか確認、なければ生成 (server 側の遅延生成)

@@ -91,14 +91,22 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     Header h;
     h.flags = reliable ? FLAG_REL : 0;
     h.seq = c->next_seq++;
-    std::vector<uint8_t> pkt(sizeof(h) + len);
-    std::memcpy(pkt.data(), &h, sizeof(h));
-    std::memcpy(pkt.data() + sizeof(h), data, len);
     int sent_fd = (server_fd_ >= 0) ? server_fd_ : c->fd;
     sockaddr_in& peer = c->peer;
-    ssize_t n = ::sendto(sent_fd, pkt.data(), pkt.size(), 0,
+
+    std::vector<uint8_t> pkt;
+    std::vector<uint8_t>* out = &send_scratch_;
+    if (reliable) {
+      pkt.resize(sizeof(h) + len);
+      out = &pkt;
+    } else {
+      send_scratch_.resize(sizeof(h) + len);
+    }
+    std::memcpy(out->data(), &h, sizeof(h));
+    std::memcpy(out->data() + sizeof(h), data, len);
+    ssize_t n = ::sendto(sent_fd, out->data(), out->size(), 0,
                         reinterpret_cast<sockaddr*>(&peer), sizeof(peer));
-    if (n != static_cast<ssize_t>(pkt.size())) return -1;
+    if (n != static_cast<ssize_t>(out->size())) return -1;
     if (reliable) {
       c->pending[h.seq] = {std::move(pkt), std::chrono::steady_clock::now()};
     }
@@ -232,6 +240,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
   std::unordered_map<uint64_t, uint32_t> id_by_key_;
   std::vector<pollfd> pollfds_;
   std::vector<uint32_t> poll_conn_ids_;
+  std::vector<uint8_t> send_scratch_;
   rudp_bench::ReusableInboundQueue inbox_;
   uint32_t next_id_ = 1;
 };
