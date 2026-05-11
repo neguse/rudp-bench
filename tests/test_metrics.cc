@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "harness/metrics.h"
+#include "harness/sliding_dedup_window.h"
 
 using namespace rudp_bench;
 
@@ -63,6 +64,20 @@ TEST(DeliveryTracker, DedupWindowIsPerConnection) {
   EXPECT_FALSE(d.mark_received(7, 0));
   EXPECT_EQ(d.received(), 2u);
   EXPECT_STREQ(d.dedup_policy(), "sliding_window_65536_per_conn");
+}
+
+TEST(SlidingDedupWindow, KeepsOnlyRecentKeys) {
+  SlidingDedupWindow w(3);
+  EXPECT_TRUE(w.insert(1));
+  EXPECT_TRUE(w.insert(2));
+  EXPECT_TRUE(w.insert(3));
+  EXPECT_FALSE(w.insert(2));
+  EXPECT_EQ(w.size(), 3u);
+
+  EXPECT_TRUE(w.insert(4));
+  EXPECT_EQ(w.size(), 3u);
+  EXPECT_TRUE(w.insert(1));
+  EXPECT_EQ(w.size(), 3u);
 }
 
 TEST(ThroughputCounter, BytesAndMessages) {

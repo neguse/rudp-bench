@@ -1,6 +1,7 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
 #include "harness/inbound_queue.h"
+#include "harness/sliding_dedup_window.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -11,9 +12,7 @@
 
 #include <chrono>
 #include <cstring>
-#include <deque>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -37,7 +36,7 @@ struct Conn {
   sockaddr_in peer{};
   uint32_t next_seq = 1;
   std::unordered_map<uint32_t, PendingSend> pending;     // 未 ACK
-  std::unordered_set<uint32_t> received_seq;             // 重複排除
+  rudp_bench::SlidingDedupWindow received_seq;           // bounded duplicate suppression
 };
 
 struct PayloadView {
@@ -221,7 +220,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
       int fd = (server_fd_ >= 0) ? server_fd_ : c.fd;
       ::sendto(fd, &ack, sizeof(ack), 0,
               reinterpret_cast<sockaddr*>(&c.peer), sizeof(c.peer));
-      if (!c.received_seq.insert(h.seq).second) return false;
+      if (!c.received_seq.insert(h.seq)) return false;
     }
     payload_out->data = pkt + sizeof(h);
     payload_out->len = payload;

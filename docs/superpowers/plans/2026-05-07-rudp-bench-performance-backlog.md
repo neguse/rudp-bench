@@ -484,6 +484,24 @@ delivery_dedup_policy
   - Drained `ReceiveMessagesOnConnection` until the connection queue is empty instead of stopping at one 64-message batch.
   - Added a GNS smoke test that queues 96 reliable messages and verifies one poll can drain more than one receive batch.
 
+- [x] **PERF-021: Bound mini_rudp reliable duplicate memory**
+
+  Problem:
+  - Harness-level delivery dedup is bounded, but `mini_rudp` kept every reliable sequence number ever received per connection. Long reliable runs could make adapter memory grow with message count and bias RSS / cache behavior.
+
+  Tasks:
+  - Reuse the same sliding-window duplicate suppression policy for adapter-internal reliable receive dedup.
+  - Keep duplicate suppression bounded by connection count rather than message count.
+  - Cover the sliding-window behavior with a unit test.
+
+  Acceptance:
+  - `mini_rudp` reliable duplicate suppression no longer stores an unbounded sequence set.
+
+  Done:
+  - Added shared `SlidingDedupWindow` and reused it from both `DeliveryTracker` and `mini_rudp`.
+  - Kept the 65,536-key per-connection window policy.
+  - Added direct unit coverage for window eviction and recent duplicate suppression.
+
 ## P2: Result Interpretation And Tooling
 
 - [x] **PERF-018: Make reports use canonical results and hide diagnostics by default**

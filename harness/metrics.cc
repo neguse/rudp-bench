@@ -60,13 +60,7 @@ void DeliveryTracker::mark_accepted(uint64_t seq, uint32_t conn_id) {
 bool DeliveryTracker::mark_received(uint64_t seq, uint32_t conn_id) {
   uint64_t k = seq & kSeqMask;
   auto& window = received_by_conn_[conn_id];
-  if (!window.keys.insert(k).second) return false;
-  window.order.push_back(k);
-  if (window.order.size() > kDedupWindowPerConn) {
-    uint64_t old = window.order.front();
-    window.order.pop_front();
-    window.keys.erase(old);
-  }
+  if (!window.insert(k)) return false;
   ++received_count_;
   return true;
 }
@@ -75,7 +69,7 @@ size_t DeliveryTracker::dedup_entries() const {
   size_t entries = 0;
   for (const auto& [conn_id, window] : received_by_conn_) {
     (void)conn_id;
-    entries += window.keys.size();
+    entries += window.size();
   }
   return entries;
 }

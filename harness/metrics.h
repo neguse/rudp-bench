@@ -4,9 +4,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <unordered_map>
-#include <unordered_set>
+
+#include "harness/sliding_dedup_window.h"
 
 namespace rudp_bench {
 
@@ -63,16 +63,13 @@ class DeliveryTracker {
     return accepted_count_ ? double(received_count_) / double(accepted_count_) : 0.0;
   }
  private:
-  static constexpr size_t kDedupWindowPerConn = 65'536;
+  static constexpr size_t kDedupWindowPerConn =
+      SlidingDedupWindow::kDefaultLimit;
   static constexpr uint64_t kSeqMask = 0x0000FFFFFFFFFFFFULL;
-  struct ConnDedupWindow {
-    std::deque<uint64_t> order;
-    std::unordered_set<uint64_t> keys;
-  };
 
   uint64_t accepted_count_ = 0;
   uint64_t received_count_ = 0;
-  std::unordered_map<uint32_t, ConnDedupWindow> received_by_conn_;
+  std::unordered_map<uint32_t, SlidingDedupWindow> received_by_conn_;
 };
 
 }  // namespace rudp_bench
