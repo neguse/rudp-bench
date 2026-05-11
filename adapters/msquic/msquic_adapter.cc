@@ -273,6 +273,17 @@ class MsquicAdapter : public rudp_bench::Adapter {
         break;
       }
 
+      case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED: {
+        if (QUIC_DATAGRAM_SEND_STATE_IS_FINAL(
+                ev->DATAGRAM_SEND_STATE_CHANGED.State)) {
+          auto* ctx = static_cast<SendCtx*>(
+              ev->DATAGRAM_SEND_STATE_CHANGED.ClientContext);
+          delete ctx;
+          ev->DATAGRAM_SEND_STATE_CHANGED.ClientContext = nullptr;
+        }
+        break;
+      }
+
       case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
       case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
         break;

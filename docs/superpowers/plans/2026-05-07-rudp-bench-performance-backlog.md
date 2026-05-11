@@ -583,6 +583,21 @@ delivery_dedup_policy
   - Capped pending reliable packets at 65,536 per connection.
   - Added smoke coverage that sends reliably without ACKs until the adapter returns backpressure.
 
+- [x] **PERF-027: Free msquic datagram send buffers**
+
+  Problem:
+  - msquic unreliable sends allocate a `SendCtx` per datagram, but the adapter only freed stream send contexts. Datagram send contexts were not released on `DATAGRAM_SEND_STATE_CHANGED`, so unreliable runs leaked memory proportional to accepted datagrams.
+
+  Tasks:
+  - Handle datagram send completion/final states.
+  - Release the per-send context when msquic reports a final datagram send state.
+
+  Acceptance:
+  - msquic unreliable send buffers are not retained for the lifetime of the run.
+
+  Done:
+  - Added `QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED` handling and delete the datagram `SendCtx` on final states.
+
 ## P2: Result Interpretation And Tooling
 
 - [x] **PERF-018: Make reports use canonical results and hide diagnostics by default**
