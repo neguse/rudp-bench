@@ -28,6 +28,12 @@ if(PYTHON3_EXECUTABLE)
         NAME test_reduce_result
         COMMAND ${PYTHON3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_reduce_result.py"
     )
+    add_test(
+        NAME test_phase_runner
+        COMMAND ${PYTHON3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_phase_runner.py"
+                --build-dir "${CMAKE_BINARY_DIR}"
+    )
+    set_tests_properties(test_phase_runner PROPERTIES TIMEOUT 20)
 endif()
 
 add_executable(test_raw_udp_smoke test_raw_udp_smoke.cc)
