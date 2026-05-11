@@ -12,6 +12,7 @@ extern "C" {
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <deque>
@@ -251,6 +252,7 @@ class KcpAdapter : public rudp_bench::Adapter {
   std::unordered_map<AddrConvKey, uint32_t, AddrConvKeyHash> id_by_addrconv_;
   uint32_t next_id_ = 1;
   std::vector<uint8_t> raw_send_scratch_;
+  std::array<uint8_t, RECV_BUF_SIZE> recv_scratch_{};
   rudp_bench::ReusableInboundQueue inbox_;
 
   // KCP インスタンスを持つか確認、なければ生成 (server 側の遅延生成)
@@ -280,13 +282,14 @@ class KcpAdapter : public rudp_bench::Adapter {
 
   // socket から受信した生バイト列を KCP に投入 or unreliable inbox に積む
   void drain_socket() {
-    static uint8_t raw[RECV_BUF_SIZE];
+    uint8_t* raw = recv_scratch_.data();
+    const size_t raw_cap = recv_scratch_.size();
 
     if (is_server_) {
       sockaddr_in src{};
       socklen_t sl = sizeof(src);
       ssize_t n;
-      while ((n = ::recvfrom(server_fd_, raw, sizeof(raw), 0,
+      while ((n = ::recvfrom(server_fd_, raw, raw_cap, 0,
                              reinterpret_cast<sockaddr*>(&src), &sl)) > 0) {
         if (n < 1) continue;
         uint8_t prefix = raw[0];
@@ -314,7 +317,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     } else {
       // client: 共有ソケットから受信し conv で KCP インスタンスに振り分け
       ssize_t n;
-      while ((n = ::recv(client_fd_, raw, sizeof(raw), 0)) > 0) {
+      while ((n = ::recv(client_fd_, raw, raw_cap, 0)) > 0) {
         if (n < 1) continue;
         uint8_t prefix = raw[0];
         if (prefix == PREFIX_KCP && n > 5) {

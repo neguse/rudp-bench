@@ -518,6 +518,21 @@ delivery_dedup_policy
   - Reused scratch send buffers for mini_rudp unreliable packets, KCP unreliable bypass packets, and SLikeNet's one-byte message-id prefix buffer.
   - Left mini_rudp reliable packets owned by the retransmit queue.
 
+- [x] **PERF-023: Remove shared KCP receive scratch buffer**
+
+  Problem:
+  - KCP `drain_socket()` used a function-static receive buffer. Server and client adapters can be polled concurrently in tests and benchmark roles, so the static buffer created avoidable shared mutable state.
+
+  Tasks:
+  - Move KCP receive scratch storage to the adapter instance.
+  - Keep socket drain behavior unchanged.
+
+  Acceptance:
+  - KCP server/client adapter instances no longer share a receive scratch buffer.
+
+  Done:
+  - Replaced the static KCP receive buffer with an instance-owned fixed-size array.
+
 ## P2: Result Interpretation And Tooling
 
 - [x] **PERF-018: Make reports use canonical results and hide diagnostics by default**
