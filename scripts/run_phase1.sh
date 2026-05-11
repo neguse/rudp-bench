@@ -19,6 +19,7 @@ RAW_DIR=""
 IDLE="spin"
 SERVER_CPU=""
 CLIENT_CPU=""
+LITENETLIB_BIN="adapters/litenetlib/bin/Release/net10.0/litenetlib_adapter"
 RELIABILITIES="r,u"
 SIZES="64,1000"
 CONNS_SET="1,50"
@@ -41,6 +42,7 @@ for arg in "$@"; do
     --idle=*) IDLE="${arg#*=}" ;;
     --server-cpu=*) SERVER_CPU="${arg#*=}" ;;
     --client-cpu=*) CLIENT_CPU="${arg#*=}" ;;
+    --litenetlib-bin=*) LITENETLIB_BIN="${arg#*=}" ;;
     --reliabilities=*) RELIABILITIES="${arg#*=}" ;;
     --sizes=*) SIZES="${arg#*=}" ;;
     --conns=*) CONNS_SET="${arg#*=}" ;;
@@ -76,8 +78,6 @@ fi
 BIN="$BUILD_DIR/harness/rudp-bench"
 [ -x "$BIN" ] || { echo "binary not found: $BIN" >&2; exit 2; }
 
-# LiteNetLib は独立した .NET バイナリ。同じ CLI 仕様・CSV フォーマットを持つ。
-LITENETLIB_BIN="adapters/litenetlib/bin/Release/net10.0/litenetlib_adapter"
 # spec: JIT/GC ウォームアップのため default は 5 秒。--warmup 指定時は同じ値を使う。
 LITENETLIB_WARMUP="$WARMUP"
 if [ "$WARMUP" = "2" ]; then
@@ -129,28 +129,33 @@ for lib in ${LIBS//,/ }; do
 
               # LiteNetLib は独立 .NET バイナリに dispatch。
               if [ "$lib" = "litenetlib" ]; then
-                if [ ! -x "$LITENETLIB_BIN" ]; then
-                  echo "litenetlib binary not found: $LITENETLIB_BIN — skipping" >&2
-                  continue
-                fi
                 WARMUP_ARG="$LITENETLIB_WARMUP"
                 TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + 10))
-                run_timeout "$SERVER_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
-                  --reliable="$reliable" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" \
-                  --size="$size" --conns="$conns" --rate="$rate" --mode="$mode" --idle="$IDLE" \
-                  --out="$S_OUT" >"$S_STDOUT" 2>"$S_STDERR" &
-                SPID=$!
-                sleep 0.5
-                set +e
-                run_timeout "$CLIENT_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=client \
-                  --host=127.0.0.1 --port="$PORT" \
-                  --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
-                  --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" --mode="$mode" --idle="$IDLE" \
-                  --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
-                C_STATUS=$?
-                wait "$SPID" 2>/dev/null
-                S_STATUS=$?
-                set -e
+                if [ ! -x "$LITENETLIB_BIN" ]; then
+                  : >"$S_STDOUT"
+                  : >"$C_STDOUT"
+                  echo "litenetlib binary not found: $LITENETLIB_BIN" >"$S_STDERR"
+                  echo "litenetlib binary not found: $LITENETLIB_BIN" >"$C_STDERR"
+                  S_STATUS=127
+                  C_STATUS=127
+                else
+                  run_timeout "$SERVER_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
+                    --reliable="$reliable" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" \
+                    --size="$size" --conns="$conns" --rate="$rate" --mode="$mode" --idle="$IDLE" \
+                    --out="$S_OUT" >"$S_STDOUT" 2>"$S_STDERR" &
+                  SPID=$!
+                  sleep 0.5
+                  set +e
+                  run_timeout "$CLIENT_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=client \
+                    --host=127.0.0.1 --port="$PORT" \
+                    --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
+                    --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" --mode="$mode" --idle="$IDLE" \
+                    --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
+                  C_STATUS=$?
+                  wait "$SPID" 2>/dev/null
+                  S_STATUS=$?
+                  set -e
+                fi
               else
                 TIMEOUT_S=$((DURATION + WARMUP + 10))
                 run_timeout "$SERVER_CPU" "$TIMEOUT_S" "$BIN" --library="$lib" --role=server --port="$PORT" \

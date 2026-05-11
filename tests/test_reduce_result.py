@@ -358,6 +358,19 @@ def main() -> int:
             results,
             diagnostics,
             scenarios,
+            "missing_binary",
+            library="litenetlib",
+            reliable="r",
+            server_raw=False,
+            client_raw=False,
+            server_status="127",
+            client_status="127",
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
             "client_tick",
             client_overrides={"client_tick_ok": "0"},
         )
@@ -421,6 +434,7 @@ def main() -> int:
         assert canonical["enet_conns_4096_unsupported"]["invalid_reason"] == "unsupported_conns"
         assert canonical["server_timeout"]["invalid_reason"] == "server_timeout"
         assert canonical["client_crash"]["invalid_reason"] == "client_crash"
+        assert canonical["missing_binary"]["invalid_reason"] == "missing_binary"
         assert canonical["client_tick"]["invalid_reason"] == "client_tick"
         assert canonical["no_accepted_messages"]["invalid_reason"] == "no_accepted_messages"
         assert canonical["low_delivery_is_valid"]["valid"] == "1"
@@ -446,7 +460,7 @@ def main() -> int:
         assert scenario_rows["pinned"]["pinning_policy"] == "server=0;client=1"
 
         diag = read_rows(diagnostics)
-        assert len(diag) == 34
+        assert len(diag) == 36
         client_diag = [r for r in diag if r["scenario_id"] == "ok" and r["role"] == "client"][0]
         assert client_diag["attempted"] == "200"
         assert client_diag["accepted"] == "200"
@@ -470,6 +484,12 @@ def main() -> int:
         ][0]
         assert timeout_diag["exit_reason"] == "server_timeout"
         assert timeout_diag["exit_status"] == "124"
+
+        missing_binary_diag = [
+            r for r in diag if r["scenario_id"] == "missing_binary" and r["role"] == "client"
+        ][0]
+        assert missing_binary_diag["exit_reason"] == "missing_binary"
+        assert missing_binary_diag["exit_status"] == "127"
 
         unsupported_payload_diag = [
             r

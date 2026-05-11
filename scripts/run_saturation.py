@@ -150,6 +150,7 @@ def run_phase1(args: argparse.Namespace, lib: str, rate: str, run_dir: Path) -> 
         f"--idle={args.idle}",
         f"--server-cpu={args.server_cpu}",
         f"--client-cpu={args.client_cpu}",
+        f"--litenetlib-bin={args.litenetlib_bin}",
         f"--reliabilities={args.reliable}",
         f"--sizes={args.size}",
         f"--conns={args.conns}",
@@ -246,6 +247,10 @@ def main() -> int:
     p.add_argument("--idle", default="adaptive", choices=["spin", "adaptive"])
     p.add_argument("--server-cpu", default="")
     p.add_argument("--client-cpu", default="")
+    p.add_argument(
+        "--litenetlib-bin",
+        default="adapters/litenetlib/bin/Release/net10.0/litenetlib_adapter",
+    )
     p.add_argument("--min-delivery", type=float, default=0.95)
     p.add_argument("--min-accepted", type=float, default=0.95)
     p.add_argument("--max-server-cpu", type=float, default=95.0)

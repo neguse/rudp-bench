@@ -80,6 +80,51 @@ def main() -> int:
             assert Path(row["stdout_path"]).is_file()
             assert Path(row["stderr_path"]).is_file()
 
+        missing_results = tmp / "missing_results.csv"
+        missing_diagnostics = tmp / "missing_diagnostics.csv"
+        missing_scenarios = tmp / "missing_scenarios.csv"
+        missing_raw = tmp / "missing_raw"
+
+        subprocess.run(
+            [
+                str(ROOT / "scripts" / "run_phase1.sh"),
+                "--libraries=litenetlib",
+                f"--build-dir={args.build_dir}",
+                "--litenetlib-bin=/tmp/rudp-bench-missing-litenetlib",
+                "--reliabilities=r",
+                "--sizes=64",
+                "--conns=1",
+                "--rates=1",
+                "--losses=0",
+                "--modes=echo",
+                "--duration=1",
+                "--warmup=0",
+                "--idle=spin",
+                "--run-id=phase_missing_binary_test",
+                f"--results={missing_results}",
+                f"--diagnostics={missing_diagnostics}",
+                f"--scenarios={missing_scenarios}",
+                f"--raw-dir={missing_raw}",
+            ],
+            cwd=ROOT,
+            check=True,
+        )
+
+        missing_result = read_rows(missing_results)[0]
+        assert missing_result["library"] == "litenetlib"
+        assert missing_result["valid"] == "0"
+        assert missing_result["invalid_reason"] == "missing_binary"
+
+        missing_by_role = {row["role"]: row for row in read_rows(missing_diagnostics)}
+        assert set(missing_by_role) == {"server", "client"}
+        for row in missing_by_role.values():
+            assert row["exit_reason"] == "missing_binary"
+            assert row["exit_status"] == "127"
+            assert Path(row["stdout_path"]).is_file()
+            stderr_path = Path(row["stderr_path"])
+            assert stderr_path.is_file()
+            assert "litenetlib binary not found" in stderr_path.read_text()
+
     return 0
 
 

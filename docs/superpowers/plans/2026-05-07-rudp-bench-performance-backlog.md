@@ -152,6 +152,7 @@ delivery_dedup_policy
     - `unsupported_reliability`
     - `unsupported_payload`
     - `unsupported_conns`
+    - `missing_binary`
     - `server_timeout`
     - `client_timeout`
     - `server_crash`
@@ -170,7 +171,7 @@ delivery_dedup_policy
   - Diagnostics explain every non-`ok` invalid reason.
 
   Done:
-  - Reducer now applies ordered invalid reasons for unsupported reliability/payload/conns, timeout, crash, client tick failure, and zero accepted messages.
+  - Reducer now applies ordered invalid reasons for unsupported reliability/payload/conns, missing adapter binary, timeout, crash, client tick failure, and zero accepted messages.
   - Phase runners pass server/client process exit status into diagnostics.
   - Low `delivery_ratio` remains a valid performance result.
   - Added reducer tests for each invalid category.

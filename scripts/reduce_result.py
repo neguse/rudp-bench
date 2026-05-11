@@ -11,6 +11,7 @@ import capabilities
 
 
 TIMEOUT_STATUS = 124
+MISSING_BINARY_STATUS = 127
 
 RESULT_FIELDS = [
     "run_id",
@@ -139,6 +140,8 @@ def role_exit_reason(role: str, raw: Optional[Dict[str, str]], status: str) -> s
     status_code = int_or_none(status)
     if status_code == TIMEOUT_STATUS:
         return f"{role}_timeout"
+    if status_code == MISSING_BINARY_STATUS:
+        return f"{role}_missing_binary"
     if status_code is not None and status_code != 0:
         return f"{role}_crash"
     if raw is None:
@@ -225,6 +228,8 @@ def invalid_reason(server: Optional[Dict[str, str]],
         return "server_timeout"
     if client_exit == "client_timeout":
         return "client_timeout"
+    if server_exit == "server_missing_binary" or client_exit == "client_missing_binary":
+        return "missing_binary"
     if server_exit in ("server_crash", "missing_raw_result"):
         return "server_crash"
     if client_exit in ("client_crash", "missing_raw_result"):
@@ -245,6 +250,7 @@ def diagnostic_row(run_id: str, scenario_id: str, role: str,
         "unsupported_reliability",
         "unsupported_payload",
         "unsupported_conns",
+        "missing_binary",
     ):
         exit_reason = scenario_reason
     if raw is None:
