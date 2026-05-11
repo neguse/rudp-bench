@@ -614,6 +614,22 @@ delivery_dedup_policy
   - Added a receive offset to `StreamCtx`.
   - Replaced per-frame front erases with offset advancement and occasional compaction.
 
+- [x] **PERF-029: Avoid msquic client-side certificate generation**
+
+  Problem:
+  - The msquic adapter generated the benchmark self-signed certificate from the constructor, so both server and client roles invoked `openssl` and wrote the same `/tmp/msquic_*.pem` files. The client does not need these files, and concurrent role startup could race on them.
+
+  Tasks:
+  - Keep msquic API initialization cheap in the constructor.
+  - Generate the certificate only for server `server_listen()`.
+
+  Acceptance:
+  - msquic client startup no longer runs certificate generation.
+
+  Done:
+  - Split msquic API initialization from benchmark certificate generation.
+  - Moved certificate generation to the server listen path.
+
 ## P2: Result Interpretation And Tooling
 
 - [x] **PERF-018: Make reports use canonical results and hide diagnostics by default**

@@ -23,15 +23,19 @@ void ensure_msquic_init() {
   static std::once_flag flag;
   std::call_once(flag, []() {
     if (QUIC_FAILED(MsQuicOpen2(&MsQuic))) std::abort();
+    std::atexit([]() { MsQuicClose(MsQuic); });
+  });
+}
 
+void ensure_msquic_cert() {
+  static std::once_flag flag;
+  std::call_once(flag, []() {
     // Generate self-signed cert for benchmark use
     int rc = std::system(
         "openssl req -x509 -newkey rsa:2048 -nodes -days 365 "
         "-keyout /tmp/msquic_key.pem -out /tmp/msquic_cert.pem "
         "-subj '/CN=rudp-bench' 2>/dev/null");
     if (rc != 0) std::abort();
-
-    std::atexit([]() { MsQuicClose(MsQuic); });
   });
 }
 
@@ -63,6 +67,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
 
   void server_listen(uint16_t port) override {
     is_server_ = true;
+    ensure_msquic_cert();
 
     QUIC_REGISTRATION_CONFIG reg_cfg = {"rudp-bench-srv", QUIC_EXECUTION_PROFILE_LOW_LATENCY};
     QUIC_STATUS status;
