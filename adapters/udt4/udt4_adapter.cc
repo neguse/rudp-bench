@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include <cstddef>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -53,6 +54,7 @@ struct ConnState {
     UDTSOCKET sock = kInvalidSock;
     uint32_t id = 0;
     std::vector<uint8_t> partial;
+    size_t partial_offset = 0;
 };
 
 class Udt4Adapter : public rudp_bench::Adapter {
@@ -264,19 +266,30 @@ class Udt4Adapter : public rudp_bench::Adapter {
         }
 
         // Parse length-prefixed frames out of the accumulation buffer.
-        while (conn.partial.size() >= 4) {
+        while (conn.partial.size() - conn.partial_offset >= 4) {
+            const uint8_t* frame = conn.partial.data() + conn.partial_offset;
             uint32_t msg_len =
-                uint32_t(conn.partial[0]) |
-                (uint32_t(conn.partial[1]) << 8) |
-                (uint32_t(conn.partial[2]) << 16) |
-                (uint32_t(conn.partial[3]) << 24);
+                uint32_t(frame[0]) |
+                (uint32_t(frame[1]) << 8) |
+                (uint32_t(frame[2]) << 16) |
+                (uint32_t(frame[3]) << 24);
 
-            if (conn.partial.size() < 4 + msg_len) break;
+            if (conn.partial.size() - conn.partial_offset < 4 + msg_len) break;
 
-            inbox_.enqueue(id, conn.partial.data() + 4, msg_len);
+            inbox_.enqueue(id, frame + 4, msg_len);
 
-            conn.partial.erase(conn.partial.begin(),
-                               conn.partial.begin() + 4 + msg_len);
+            conn.partial_offset += 4 + msg_len;
+        }
+
+        if (conn.partial_offset == conn.partial.size()) {
+            conn.partial.clear();
+            conn.partial_offset = 0;
+        } else if (conn.partial_offset > 4096 &&
+                   conn.partial_offset * 2 >= conn.partial.size()) {
+            conn.partial.erase(
+                conn.partial.begin(),
+                conn.partial.begin() + static_cast<std::ptrdiff_t>(conn.partial_offset));
+            conn.partial_offset = 0;
         }
     }
 

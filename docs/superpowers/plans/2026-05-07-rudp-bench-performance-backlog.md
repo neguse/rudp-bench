@@ -630,6 +630,22 @@ delivery_dedup_policy
   - Split msquic API initialization from benchmark certificate generation.
   - Moved certificate generation to the server listen path.
 
+- [x] **PERF-030: Avoid UDT4 stream receive memmove per frame**
+
+  Problem:
+  - UDT4 stream framing accumulated bytes in a vector and removed consumed frames with front `erase()`. Multiple frames in the buffer caused repeated memmove work in the receive hot path.
+
+  Tasks:
+  - Parse UDT4 frames with a per-connection read offset.
+  - Compact only when the buffer is fully consumed or the consumed prefix is large.
+
+  Acceptance:
+  - UDT4 receive parsing avoids per-frame front erases.
+
+  Done:
+  - Added `partial_offset` to UDT4 connection state.
+  - Replaced per-frame front erase with offset advancement and occasional compaction.
+
 ## P2: Result Interpretation And Tooling
 
 - [x] **PERF-018: Make reports use canonical results and hide diagnostics by default**
