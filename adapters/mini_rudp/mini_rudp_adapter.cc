@@ -20,6 +20,7 @@ namespace {
 constexpr uint16_t FLAG_ACK = 1;
 constexpr uint16_t FLAG_REL = 2;
 constexpr size_t MAX_UDP_PAYLOAD = 65507;
+constexpr size_t MAX_PENDING_RELIABLE_PER_CONN = 65'536;
 
 struct Header {
   uint16_t flags;
@@ -88,6 +89,9 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     if (len > max_payload_bytes(reliable)) return -1;
     auto* c = find_conn(conn_id);
     if (!c) return -1;
+    if (reliable && c->pending.size() >= MAX_PENDING_RELIABLE_PER_CONN) {
+      return -1;
+    }
     Header h;
     h.flags = reliable ? FLAG_REL : 0;
     h.seq = c->next_seq++;

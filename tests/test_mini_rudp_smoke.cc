@@ -118,6 +118,21 @@ TEST(MiniRudpSmoke, Capability) {
   EXPECT_STREQ(a->name(), "mini_rudp");
 }
 
+TEST(MiniRudpSmoke, ReliableSendBackpressuresWhenPendingQueueIsFull) {
+  auto client = create_adapter("mini_rudp");
+  ASSERT_NE(client, nullptr);
+  uint32_t cid = client->client_connect("127.0.0.1", 0xC1FE);
+
+  const char msg[] = "x";
+  size_t accepted = 0;
+  while (client->send(cid, msg, sizeof(msg), true) == 0) {
+    ++accepted;
+  }
+
+  EXPECT_EQ(accepted, 65536u);
+  client->close();
+}
+
 TEST(MiniRudpSmoke, ReliableEchoManyConnectionsPreservesClientConnIds) {
   constexpr size_t kConns = 128;
   constexpr uint16_t kPort = 0xC103;

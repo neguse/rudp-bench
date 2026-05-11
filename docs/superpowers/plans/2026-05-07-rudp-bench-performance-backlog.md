@@ -566,6 +566,23 @@ delivery_dedup_policy
   - Added per-connection `next_update` / `update_due` state and guarded `ikcp_update()` with it.
   - Reliable sends and `ikcp_input()` mark the connection due for the next poll.
 
+- [x] **PERF-026: Bound mini_rudp reliable pending queue**
+
+  Problem:
+  - `mini_rudp` reliable sends were accepted into an unbounded retransmit map. Under loss or receiver failure this made adapter memory and retransmit scan cost grow with offered messages, while diagnostics still saw the sends as accepted.
+
+  Tasks:
+  - Add a per-connection pending reliable cap.
+  - Return send failure once the cap is reached so diagnostics show backpressure through accepted ratio.
+  - Cover the cap behavior.
+
+  Acceptance:
+  - `mini_rudp` reliable pending memory is bounded per connection.
+
+  Done:
+  - Capped pending reliable packets at 65,536 per connection.
+  - Added smoke coverage that sends reliably without ACKs until the adapter returns backpressure.
+
 ## P2: Result Interpretation And Tooling
 
 - [x] **PERF-018: Make reports use canonical results and hide diagnostics by default**
