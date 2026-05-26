@@ -10,7 +10,7 @@ REDUCE = ROOT / "scripts" / "reduce_result.py"
 
 
 RAW_HEADER = (
-    "library,encryption,phase,reliable,size,conns,rate,loss,"
+    "library,encryption,phase,rate_r,rate_u,size,conns,loss,"
     "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,"
     "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
     "mode,idle_policy,flush_policy,client_tick_gap_p99_us,"
@@ -27,10 +27,10 @@ BASE_RAW_ROW = {
     "library": "raw_udp",
     "encryption": "off",
     "phase": "1",
-    "reliable": "u",
+    "rate_r": "0",
+    "rate_u": "100",
     "size": "64",
     "conns": "1",
-    "rate": "100",
     "loss": "0.000",
     "throughput_mbps": "0.051",
     "msg_per_sec": "100",
@@ -102,6 +102,11 @@ def append_case(
     server_cpu_pin: str = "",
     client_cpu_pin: str = "",
 ):
+    # Legacy `reliable="r"|"u"` test-side shorthand maps to the new dual-rate
+    # CLI: r => rate_r=100/rate_u=0, u => rate_r=0/rate_u=100. Mixed-mode tests
+    # would pass rate_r/rate_u directly through overrides if added later.
+    rate_r = "100" if reliable == "r" else "0"
+    rate_u = "100" if reliable == "u" else "0"
     server = tmp / f"{scenario_id}_server.csv"
     client = tmp / f"{scenario_id}_client.csv"
     server_stdout = tmp / f"{scenario_id}_server.stdout.log"
@@ -110,7 +115,8 @@ def append_case(
     client_stderr = tmp / f"{scenario_id}_client.stderr.log"
     common = {
         "library": library,
-        "reliable": reliable,
+        "rate_r": rate_r,
+        "rate_u": rate_u,
         "size": size,
         "conns": conns,
     }
@@ -175,14 +181,14 @@ def append_case(
             scenario_id,
             "--library",
             library,
-            "--reliable",
-            reliable,
+            "--rate-r",
+            rate_r,
+            "--rate-u",
+            rate_u,
             "--size",
             size,
             "--conns",
             conns,
-            "--rate",
-            "100",
             "--loss",
             "0",
             "--mode",
@@ -239,11 +245,22 @@ def main() -> int:
             results,
             diagnostics,
             scenarios,
-            "unsupported_reliability",
+            "unsupported_reliable",
             library="raw_udp",
             reliable="r",
-            server_overrides={"reliable": "na"},
-            client_overrides={"reliable": "na"},
+            server_raw=False,
+            client_raw=False,
+        )
+        append_case(
+            tmp,
+            results,
+            diagnostics,
+            scenarios,
+            "unsupported_unreliable",
+            library="udt4",
+            reliable="u",
+            server_raw=False,
+            client_raw=False,
         )
         append_case(
             tmp,
@@ -422,7 +439,8 @@ def main() -> int:
         assert canonical["ok"]["server_cpu_pct"] == "7.50"
         assert canonical["pinned"]["valid"] == "1"
 
-        assert canonical["unsupported_reliability"]["invalid_reason"] == "unsupported_reliability"
+        assert canonical["unsupported_reliable"]["invalid_reason"] == "unsupported_reliable"
+        assert canonical["unsupported_unreliable"]["invalid_reason"] == "unsupported_unreliable"
         assert canonical["unsupported_payload"]["invalid_reason"] == "unsupported_payload"
         assert canonical["mini_payload_3000_valid"]["valid"] == "1"
         assert canonical["mini_payload_3000_valid"]["invalid_reason"] == "ok"
@@ -447,9 +465,10 @@ def main() -> int:
         assert scenario_rows["ok"]["max_payload_bytes"] == "65507"
         assert scenario_rows["ok"]["max_connections"] == "unbounded"
         assert scenario_rows["ok"]["transport_mode"] == "udp_datagram"
-        assert scenario_rows["unsupported_reliability"]["supports_reliability"] == "0"
-        assert scenario_rows["unsupported_reliability"]["flush_policy"] == "unsupported"
-        assert scenario_rows["unsupported_reliability"]["transport_mode"] == "unsupported"
+        assert scenario_rows["unsupported_reliable"]["supports_reliability"] == "0"
+        assert scenario_rows["unsupported_reliable"]["flush_policy"] == "unsupported"
+        assert scenario_rows["unsupported_reliable"]["transport_mode"] == "unsupported"
+        assert scenario_rows["unsupported_unreliable"]["supports_reliability"] == "0"
         assert scenario_rows["unsupported_payload"]["flush_policy"] == "poll_send_packets"
         assert scenario_rows["unsupported_payload"]["max_payload_bytes"] == "4096"
         assert scenario_rows["unsupported_payload"]["max_connections"] == "64"
@@ -460,7 +479,8 @@ def main() -> int:
         assert scenario_rows["pinned"]["pinning_policy"] == "server=0;client=1"
 
         diag = read_rows(diagnostics)
-        assert len(diag) == 36
+        # 19 scenarios * 2 roles (server, client) = 38
+        assert len(diag) == 38
         client_diag = [r for r in diag if r["scenario_id"] == "ok" and r["role"] == "client"][0]
         assert client_diag["attempted"] == "200"
         assert client_diag["accepted"] == "200"

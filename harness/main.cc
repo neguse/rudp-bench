@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cstddef>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -34,6 +36,7 @@ int main(int argc, const char* argv[]) {
   auto cfg_opt = rudp_bench::parse_scenario(argc, argv);
   if (!cfg_opt) {
     std::cerr << "usage: rudp-bench --library=<name> --role=server|client "
+                 "--rate-r=<hz> --rate-u=<hz> "
                  "[--idle=spin|adaptive] ...\n";
     return 2;
   }
@@ -45,20 +48,23 @@ int main(int argc, const char* argv[]) {
     return 2;
   }
 
-  auto make_skipped_row = [&](const std::string& reliable) {
+  // For flush_policy emission we prefer the reliable side when present,
+  // otherwise the unreliable side.
+  const bool reliable_active = cfg.rate_r > 0;
+
+  auto make_skipped_row = [&]() {
     rudp_bench::CsvRow row;
     row.library = cfg.library;
     row.encryption = adapter->encryption_on() ? "on" : "off";
-    row.reliable = reliable;
+    row.rate_r = cfg.rate_r;
+    row.rate_u = cfg.rate_u;
     row.size = cfg.size_bytes;
     row.conns = cfg.conns;
-    row.rate = cfg.rate_per_conn;
     row.loss = cfg.loss_pct;
     row.duration_s = cfg.duration_s;
     row.mode = (cfg.mode == rudp_bench::ServerMode::Broadcast) ? "broadcast" : "echo";
-    const bool want_reliable = cfg.reliable == rudp_bench::Reliability::Reliable;
     row.idle_policy = rudp_bench::idle_policy_name(cfg.idle_policy);
-    row.flush_policy = adapter->flush_policy(want_reliable);
+    row.flush_policy = adapter->flush_policy(reliable_active);
     row.delivery_dedup_policy = rudp_bench::DeliveryTracker::dedup_policy();
     return row;
   };
@@ -74,30 +80,42 @@ int main(int argc, const char* argv[]) {
     }
   };
 
-  // capability check: emit na row if the requested mode is unsupported
+  // Capability check: each requested channel must be supported by the adapter.
+  // Reducer interprets a skipped row by re-applying capability rules from
+  // capabilities.py, so the harness only needs to short-circuit (no `na` flag
+  // in the row schema anymore).
   {
-    bool want_reliable = (cfg.reliable == rudp_bench::Reliability::Reliable);
-    if (!adapter->supports(want_reliable)) {
+    if (cfg.rate_r > 0 && !adapter->supports(true)) {
       std::cerr << "library " << cfg.library
-                << (want_reliable ? " does not support reliable"
-                                  : " does not support unreliable")
-                << "; emit na row\n";
-      write_output(make_skipped_row("na"));
+                << " does not support reliable; emit skipped row\n";
+      write_output(make_skipped_row());
       return 0;
     }
-    const size_t min_payload = 16;
-    const size_t max_payload = adapter->max_payload_bytes(want_reliable);
+    if (cfg.rate_u > 0 && !adapter->supports(false)) {
+      std::cerr << "library " << cfg.library
+                << " does not support unreliable; emit skipped row\n";
+      write_output(make_skipped_row());
+      return 0;
+    }
+    const size_t min_payload = 17;  // 8B seq + 8B ts + 1B reliable flag
+    size_t max_payload = std::numeric_limits<size_t>::max();
+    if (cfg.rate_r > 0) {
+      max_payload = std::min(max_payload, adapter->max_payload_bytes(true));
+    }
+    if (cfg.rate_u > 0) {
+      max_payload = std::min(max_payload, adapter->max_payload_bytes(false));
+    }
     if (cfg.size_bytes < min_payload || cfg.size_bytes > max_payload) {
       std::cerr << "library " << cfg.library << " supports payload size "
                 << min_payload << ".." << max_payload << " bytes; emit skipped row\n";
-      write_output(make_skipped_row(want_reliable ? "r" : "u"));
+      write_output(make_skipped_row());
       return 0;
     }
     const uint32_t max_conns = adapter->max_connections();
     if (cfg.conns > max_conns) {
       std::cerr << "library " << cfg.library << " supports up to "
                 << max_conns << " connections; emit skipped row\n";
-      write_output(make_skipped_row(want_reliable ? "r" : "u"));
+      write_output(make_skipped_row());
       return 0;
     }
   }

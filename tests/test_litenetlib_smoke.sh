@@ -19,7 +19,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # Start server in background
 "$ADAPTER" --library=litenetlib --role=server --port="$PORT" \
-    --reliable=r --duration=6 --warmup=2 --loss=0 \
+    --rate-r=100 --rate-u=0 --duration=6 --warmup=2 --loss=0 \
     --out="$TMP/server.csv" &
 SPID=$!
 
@@ -28,7 +28,7 @@ sleep 0.5
 # Run client
 "$ADAPTER" --library=litenetlib --role=client \
     --host=127.0.0.1 --port="$PORT" \
-    --reliable=r --size=64 --conns=1 --rate=100 --duration=6 --warmup=2 --loss=0 \
+    --rate-r=100 --rate-u=0 --size=64 --conns=1 --duration=6 --warmup=2 --loss=0 \
     --out="$TMP/client.csv" || {
     kill "$SPID" 2>/dev/null || true
     echo "FAIL: client exited with error" >&2
@@ -47,7 +47,7 @@ echo "=== client.csv ==="
 cat "$TMP/client.csv"
 
 # delivery_ratio は CSV 16 列目 (1-indexed)
-# header: library,encryption,phase,reliable,size,conns,rate,loss,throughput_mbps,
+# header: library,encryption,phase,rate_r,rate_u,size,conns,loss,throughput_mbps,
 #         msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,delivered,accepted,delivery_ratio,...
 DELIVERY_RATIO=$(tail -n1 "$TMP/client.csv" | cut -d',' -f16)
 echo "delivery_ratio = $DELIVERY_RATIO"

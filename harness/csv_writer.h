@@ -10,10 +10,10 @@ struct CsvRow {
   std::string library;
   std::string encryption;       // "on"/"off"
   int phase = 1;
-  std::string reliable;          // "r"/"u"/"na"
+  uint32_t rate_r = 0;          // reliable msg/s/conn requested
+  uint32_t rate_u = 0;          // unreliable msg/s/conn requested
   uint32_t size = 0;
   uint32_t conns = 0;
-  uint32_t rate = 0;
   double loss = 0.0;
   double throughput_mbps = 0.0;
   uint64_t msg_per_sec = 0;

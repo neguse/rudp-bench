@@ -6,7 +6,7 @@
 namespace rudp_bench {
 
 void write_header(std::ostream& os) {
-  os << "library,encryption,phase,reliable,size,conns,rate,loss,"
+  os << "library,encryption,phase,rate_r,rate_u,size,conns,loss,"
      << "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,"
      << "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
      << "mode,idle_policy,flush_policy,client_tick_gap_p99_us,"
@@ -19,8 +19,9 @@ void write_header(std::ostream& os) {
 }
 
 void write_row(std::ostream& os, const CsvRow& r) {
-  os << r.library << ',' << r.encryption << ',' << r.phase << ',' << r.reliable << ','
-     << r.size << ',' << r.conns << ',' << r.rate << ','
+  os << r.library << ',' << r.encryption << ',' << r.phase << ','
+     << r.rate_r << ',' << r.rate_u << ','
+     << r.size << ',' << r.conns << ','
      << std::fixed << std::setprecision(3) << r.loss << ','
      << std::setprecision(3) << r.throughput_mbps << ','
      << r.msg_per_sec << ','

@@ -2,10 +2,14 @@
 // C# / .NET 8 独立バイナリ — harness/csv_writer.h の CSV カラム順を完全に踏襲する
 //
 // CSV column order (mirrors harness/csv_writer.h write_row exactly):
-//   library,encryption,phase,reliable,size,conns,rate,loss,
+//   library,encryption,phase,rate_r,rate_u,size,conns,loss,
 //   throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,
 //   delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,
 //   mode,idle_policy,flush_policy,...
+//
+// Payload layout: bytes [0..8) seq, [8..16) ts_ns, [16] reliable flag (0/1),
+// [17..size) padding. Server reads the flag and echoes back on the same channel
+// so mixed reliable+unreliable runs exercise per-channel HoL behavior.
 
 using LiteNetLib;
 using System;
@@ -24,7 +28,7 @@ var cfg = ParseArgs(args);
 if (cfg == null)
 {
     Console.Error.WriteLine("usage: litenetlib_adapter --library=<name> --role=server|client " +
-        "--host= --port= --reliable=r|u --size= --conns= --rate= " +
+        "--host= --port= --rate-r= --rate-u= --size= --conns= " +
         "--duration= --warmup= --loss= --idle=spin|adaptive --out=");
     return 2;
 }
@@ -61,10 +65,10 @@ static CsvRow UnsupportedPayloadRow(Config cfg) => new()
     Library = cfg.Library,
     Encryption = "off",
     Phase = 1,
-    Reliable = cfg.ReliableMode,
+    RateR = cfg.RateR,
+    RateU = cfg.RateU,
     Size = cfg.SizeBytes,
     Conns = cfg.Conns,
-    Rate = cfg.Rate,
     Loss = cfg.Loss,
     DurationS = cfg.DurationS,
     Mode = cfg.Mode,
@@ -89,14 +93,10 @@ static Config? ParseArgs(string[] args)
         }
         else if (arg.StartsWith("--host=")) cfg.Host = arg["--host=".Length..];
         else if (arg.StartsWith("--port=")) cfg.Port = ushort.Parse(arg["--port=".Length..]);
-        else if (arg.StartsWith("--reliable="))
-        {
-            cfg.ReliableMode = arg["--reliable=".Length..];
-            if (cfg.ReliableMode != "r" && cfg.ReliableMode != "u" && cfg.ReliableMode != "na") return null;
-        }
+        else if (arg.StartsWith("--rate-r=")) cfg.RateR = uint.Parse(arg["--rate-r=".Length..]);
+        else if (arg.StartsWith("--rate-u=")) cfg.RateU = uint.Parse(arg["--rate-u=".Length..]);
         else if (arg.StartsWith("--size=")) cfg.SizeBytes = uint.Parse(arg["--size=".Length..]);
         else if (arg.StartsWith("--conns=")) cfg.Conns = uint.Parse(arg["--conns=".Length..]);
-        else if (arg.StartsWith("--rate=")) cfg.Rate = uint.Parse(arg["--rate=".Length..]);
         else if (arg.StartsWith("--duration=")) cfg.DurationS = uint.Parse(arg["--duration=".Length..]);
         else if (arg.StartsWith("--warmup=")) cfg.WarmupS = uint.Parse(arg["--warmup=".Length..]);
         else if (arg.StartsWith("--loss=")) cfg.Loss = double.Parse(arg["--loss=".Length..], CultureInfo.InvariantCulture);
@@ -114,6 +114,11 @@ static Config? ParseArgs(string[] args)
         else { Console.Error.WriteLine($"unknown flag: {arg}"); return null; }
     }
     if (string.IsNullOrEmpty(cfg.Library)) return null;
+    if (cfg.RateR == 0 && cfg.RateU == 0)
+    {
+        Console.Error.WriteLine("at least one of --rate-r / --rate-u must be > 0");
+        return null;
+    }
     return cfg;
 }
 
@@ -141,10 +146,6 @@ static CsvRow RunServer(Config cfg)
     ps.Begin();
     long nextRssSampleTicks = Stopwatch.GetTimestamp() + ProcSampler.RssSampleIntervalTicks;
 
-    var deliveryMethod = cfg.ReliableMode == "r"
-        ? DeliveryMethod.ReliableOrdered
-        : DeliveryMethod.Unreliable;
-
     // クライアントの warmup + duration + tail_drain を収容するため +2秒余裕
     long deadlineTicks = Stopwatch.GetTimestamp() +
         (long)((cfg.WarmupS + cfg.DurationS + 2) * Stopwatch.Frequency);
@@ -161,6 +162,12 @@ static CsvRow RunServer(Config cfg)
         foreach (var msg in inbox.Entries)
         {
             knownPeers.Add(msg.Conn);
+            if (msg.Length < Config.MinPayloadBytes) continue;
+            // Echo on the same channel the message arrived on; client tagged
+            // byte 16 with the reliable flag.
+            var deliveryMethod = msg.Buffer[16] != 0
+                ? DeliveryMethod.ReliableOrdered
+                : DeliveryMethod.Unreliable;
             if (broadcast)
             {
                 foreach (var target in knownPeers)
@@ -184,10 +191,10 @@ static CsvRow RunServer(Config cfg)
         Library = cfg.Library,
         Encryption = "off",
         Phase = 1,
-        Reliable = cfg.ReliableMode,
+        RateR = cfg.RateR,
+        RateU = cfg.RateU,
         Size = cfg.SizeBytes,
         Conns = cfg.Conns,
-        Rate = cfg.Rate,
         Loss = cfg.Loss,
         DurationS = cfg.DurationS,
         CpuPct = ps.CpuPct(),
@@ -264,26 +271,51 @@ static CsvRow RunClient(Config cfg)
     var delivery = new DeliveryTracker();
     var tick = new ClientTickStats();
 
-    // ペーシング: コネクションごとの次回送信時刻(ticks)
-    long intervalTicks = cfg.Rate > 0 ? Stopwatch.Frequency / (long)cfg.Rate : 0;
-    ulong missedBudgetUs = TickUtil.PacingBudgetUs(cfg.Rate);
+    // ペーシング: 2 系統(reliable/unreliable)の per-conn 次回送信時刻
+    var schedR = new ChannelSched(cfg.RateR, true, cfg.Conns, Stopwatch.GetTimestamp());
+    var schedU = new ChannelSched(cfg.RateU, false, cfg.Conns, Stopwatch.GetTimestamp());
+    ulong combinedRate = (ulong)cfg.RateR + cfg.RateU;
+    ulong missedBudgetUs = TickUtil.PacingBudgetUs(Math.Max(cfg.RateR, cfg.RateU));
     uint expectedPerSend = cfg.Mode == "broadcast" ? cfg.Conns : 1u;
-    ulong targetAttempted = cfg.Rate > 0
-        ? (ulong)cfg.Rate * cfg.Conns * cfg.DurationS * expectedPerSend
-        : 0;
+    ulong targetAttempted = combinedRate * cfg.Conns * cfg.DurationS * expectedPerSend;
     ulong outstanding = 0;
-    var nextSendTicks = new long[cfg.Conns];
-    long t0 = Stopwatch.GetTimestamp();
-    for (int i = 0; i < cfg.Conns; i++) nextSendTicks[i] = t0;
 
-    var payload = new byte[Math.Max(cfg.SizeBytes, 16)];
+    var payload = new byte[Math.Max(cfg.SizeBytes, Config.MinPayloadBytes)];
     Array.Fill(payload, (byte)0xAB);
     var seqCounters = new ulong[cfg.Conns];
     for (int i = 0; i < cfg.Conns; i++) seqCounters[i] = 1;
 
-    var deliveryMethod = cfg.ReliableMode == "r"
-        ? DeliveryMethod.ReliableOrdered
-        : DeliveryMethod.Unreliable;
+    void TrySendOn(ChannelSched sched, uint i, long now, ref bool didWork, bool inActive)
+    {
+        if (!sched.Active || now < sched.NextSend[i]) return;
+        didWork = true;
+        ulong lagUs = 0;
+        if (now > sched.NextSend[i])
+            lagUs = TickUtil.TicksToUs(now - sched.NextSend[i]);
+        if (inActive) tick.RecordSendDue(expectedPerSend, lagUs, missedBudgetUs);
+
+        ulong localSeq = seqCounters[i]++;
+        ulong globalSeq = ((ulong)i << 32) | localSeq;
+        ulong tsNs = (ulong)(Stopwatch.GetTimestamp() * 1_000_000_000L / Stopwatch.Frequency);
+        BitConverter.TryWriteBytes(payload.AsSpan(0, 8), globalSeq);
+        BitConverter.TryWriteBytes(payload.AsSpan(8, 8), tsNs);
+        payload[16] = sched.Reliable ? (byte)1 : (byte)0;
+
+        var method = sched.Reliable
+            ? DeliveryMethod.ReliableOrdered
+            : DeliveryMethod.Unreliable;
+        peers[i].Send(payload, method);
+        if (inActive)
+        {
+            tick.RecordAccepted(expectedPerSend);
+            for (uint k = 0; k < expectedPerSend; k++) delivery.MarkAccepted(globalSeq, i);
+            outstanding += expectedPerSend;
+            tick.RecordOutstanding(outstanding);
+        }
+
+        sched.NextSend[i] += sched.IntervalTicks;
+        if (sched.NextSend[i] < now) sched.NextSend[i] = now;
+    }
 
     while (true)
     {
@@ -300,37 +332,8 @@ static CsvRow RunClient(Config cfg)
         {
             for (uint i = 0; i < cfg.Conns; i++)
             {
-                if (nowTicks < nextSendTicks[i]) continue;
-                didWork = true;
-                ulong lagUs = 0;
-                if (cfg.Rate > 0 && nowTicks > nextSendTicks[i])
-                    lagUs = TickUtil.TicksToUs(nowTicks - nextSendTicks[i]);
-                if (inActiveSend) tick.RecordSendDue(expectedPerSend, lagUs, missedBudgetUs);
-
-                ulong localSeq = seqCounters[i]++;
-                // src_idx を上位 32bit に乗せて global seq に
-                // (broadcast 時の dedup key が src 違いで衝突しないように)
-                ulong globalSeq = ((ulong)i << 32) | localSeq;
-                // 単調クロックのナノ秒タイムスタンプ（C++ runner.cc と同形式）
-                ulong tsNs = (ulong)(Stopwatch.GetTimestamp() * 1_000_000_000L / Stopwatch.Frequency);
-                BitConverter.TryWriteBytes(payload.AsSpan(0, 8), globalSeq);
-                BitConverter.TryWriteBytes(payload.AsSpan(8, 8), tsNs);
-
-                // LiteNetLib 2.x: Send() は void を返す。送信失敗の検出は省略し常に accepted 扱い。
-                peers[i].Send(payload, deliveryMethod);
-                if (inActiveSend)
-                {
-                    tick.RecordAccepted(expectedPerSend);
-                    for (uint k = 0; k < expectedPerSend; k++) delivery.MarkAccepted(globalSeq, i);
-                    outstanding += expectedPerSend;
-                    tick.RecordOutstanding(outstanding);
-                }
-
-                if (intervalTicks > 0)
-                {
-                    nextSendTicks[i] += intervalTicks;
-                    if (nextSendTicks[i] < nowTicks) nextSendTicks[i] = nowTicks;
-                }
+                TrySendOn(schedR, i, nowTicks, ref didWork, inActiveSend);
+                TrySendOn(schedU, i, nowTicks, ref didWork, inActiveSend);
             }
         }
 
@@ -343,7 +346,7 @@ static CsvRow RunClient(Config cfg)
             nowTicks = Stopwatch.GetTimestamp();
             bool inMeasureNow = nowTicks >= warmupEndTicks;
 
-            if (msg.Length < 16) continue;
+            if (msg.Length < Config.MinPayloadBytes) continue;
 
             ulong seq = BitConverter.ToUInt64(msg.Buffer, 0);
             ulong tsNs = BitConverter.ToUInt64(msg.Buffer, 8);
@@ -375,7 +378,7 @@ static CsvRow RunClient(Config cfg)
     bool tickOk = tick.TickSamples > 0 &&
         tickGapP99Us <= 250 &&
         acceptedRatio >= 0.99;
-    if (cfg.Rate > 0)
+    if (combinedRate > 0)
     {
         tickOk = tickOk &&
             attemptedRatio >= 0.99 &&
@@ -387,10 +390,10 @@ static CsvRow RunClient(Config cfg)
         Library = cfg.Library,
         Encryption = "off",
         Phase = 1,
-        Reliable = cfg.ReliableMode,
+        RateR = cfg.RateR,
+        RateU = cfg.RateU,
         Size = cfg.SizeBytes,
         Conns = cfg.Conns,
-        Rate = cfg.Rate,
         Loss = cfg.Loss,
         ThroughputMbps = throughput.Bytes * 8.0 / (cfg.DurationS * 1_000_000.0),
         MsgPerSec = throughput.Messages / Math.Max(1u, cfg.DurationS),
@@ -430,7 +433,7 @@ static CsvRow RunClient(Config cfg)
 static string FlushPolicy(Config _) => "library_internal";
 
 static string CsvHeader() =>
-    "library,encryption,phase,reliable,size,conns,rate,loss," +
+    "library,encryption,phase,rate_r,rate_u,size,conns,loss," +
     "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us," +
     "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s," +
     "mode,idle_policy,flush_policy,client_tick_gap_p99_us," +
@@ -442,8 +445,9 @@ static string CsvHeader() =>
     "client_outstanding_max,client_tick_ok,delivery_dedup_policy";
 
 static string FormatRow(CsvRow r) =>
-    $"{r.Library},{r.Encryption},{r.Phase},{r.Reliable}," +
-    $"{r.Size},{r.Conns},{r.Rate}," +
+    $"{r.Library},{r.Encryption},{r.Phase}," +
+    $"{r.RateR},{r.RateU}," +
+    $"{r.Size},{r.Conns}," +
     $"{r.Loss.ToString("F3", CultureInfo.InvariantCulture)}," +
     $"{r.ThroughputMbps.ToString("F3", CultureInfo.InvariantCulture)}," +
     $"{r.MsgPerSec}," +
@@ -466,17 +470,17 @@ static string FormatRow(CsvRow r) =>
 
 class Config
 {
-    public const uint MinPayloadBytes = 16;
+    public const uint MinPayloadBytes = 17;  // 8B seq + 8B ts + 1B reliable flag
     public const uint MaxPayloadBytes = 1000;
 
     public string Library = "litenetlib";
     public string Role = "client";
     public string Host = "127.0.0.1";
     public ushort Port = 9000;
-    public string ReliableMode = "u"; // "r"/"u"/"na"
+    public uint RateR;       // reliable msg/s/conn (0 = no reliable traffic)
+    public uint RateU;       // unreliable msg/s/conn (0 = no unreliable traffic)
     public uint SizeBytes = 64;
     public uint Conns = 1;
-    public uint Rate = 0;    // 0 = unbounded
     public uint DurationS = 30;
     public uint WarmupS = 5; // spec: JIT/GC ウォームアップのため 5 秒デフォルト
     public double Loss = 0.0;
@@ -494,10 +498,10 @@ class CsvRow
     public string Library = "";
     public string Encryption = "off";
     public int Phase = 1;
-    public string Reliable = "u";
+    public uint RateR;
+    public uint RateU;
     public uint Size;
     public uint Conns;
-    public uint Rate;
     public double Loss;
     public double ThroughputMbps;
     public ulong MsgPerSec;
@@ -577,6 +581,25 @@ static class TickUtil
         if (ratePerConn == 0) return 0;
         ulong intervalUs = 1_000_000UL / ratePerConn;
         return Math.Max(20UL, Math.Min(100UL, intervalUs / 10UL));
+    }
+}
+
+sealed class ChannelSched
+{
+    public uint Rate { get; }
+    public bool Reliable { get; }
+    public long IntervalTicks { get; }
+    public long[] NextSend { get; }
+
+    public bool Active => Rate > 0;
+
+    public ChannelSched(uint rate, bool reliable, uint conns, long t0)
+    {
+        Rate = rate;
+        Reliable = reliable;
+        IntervalTicks = rate > 0 ? Stopwatch.Frequency / (long)rate : 0;
+        NextSend = new long[conns];
+        for (int i = 0; i < conns; i++) NextSend[i] = t0;
     }
 }
 

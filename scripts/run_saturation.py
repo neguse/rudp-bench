@@ -16,10 +16,11 @@ DEFAULT_RATES = "100,1000,10000,100000"
 SUMMARY_FIELDS = [
     "run_id",
     "library",
-    "reliable",
+    "channel",
+    "rate_r",
+    "rate_u",
     "size",
     "conns",
-    "rate",
     "loss",
     "mode",
     "idle_policy",
@@ -37,6 +38,12 @@ SUMMARY_FIELDS = [
     "diagnostics_path",
     "scenarios_path",
 ]
+
+
+def channel_rates(channel: str, rate: str) -> Dict[str, str]:
+    if channel == "r":
+        return {"rate_r": rate, "rate_u": "0"}
+    return {"rate_r": "0", "rate_u": rate}
 
 
 def split_csv(value: str) -> List[str]:
@@ -131,7 +138,11 @@ def require_single_axis(name: str, value: str) -> None:
 
 
 def run_phase1(args: argparse.Namespace, lib: str, rate: str, run_dir: Path) -> Dict[str, object]:
-    stem = f"{lib}_{args.reliable}_{args.size}_{args.conns}_{rate}_{args.mode}_{args.loss}_{args.idle}"
+    rates = channel_rates(args.channel, rate)
+    stem = (
+        f"{lib}_{args.channel}{rate}_{args.size}_{args.conns}_"
+        f"{args.mode}_{args.loss}_{args.idle}"
+    )
     results_path = run_dir / f"{stem}_results.csv"
     diagnostics_path = run_dir / f"{stem}_diagnostics.csv"
     scenarios_path = run_dir / f"{stem}_scenarios.csv"
@@ -151,10 +162,10 @@ def run_phase1(args: argparse.Namespace, lib: str, rate: str, run_dir: Path) -> 
         f"--server-cpu={args.server_cpu}",
         f"--client-cpu={args.client_cpu}",
         f"--litenetlib-bin={args.litenetlib_bin}",
-        f"--reliabilities={args.reliable}",
+        f"--rates-r={rates['rate_r']}",
+        f"--rates-u={rates['rate_u']}",
         f"--sizes={args.size}",
         f"--conns={args.conns}",
-        f"--rates={rate}",
         f"--losses={args.loss}",
         f"--modes={args.mode}",
         f"--duration={args.duration}",
@@ -182,10 +193,11 @@ def run_phase1(args: argparse.Namespace, lib: str, rate: str, run_dir: Path) -> 
     return {
         "run_id": args.run_id,
         "library": lib,
-        "reliable": args.reliable,
+        "channel": args.channel,
+        "rate_r": rates["rate_r"],
+        "rate_u": rates["rate_u"],
         "size": args.size,
         "conns": args.conns,
-        "rate": rate,
         "loss": args.loss,
         "mode": args.mode,
         "idle_policy": args.idle,
@@ -237,7 +249,8 @@ def main() -> int:
     p.add_argument("--out-dir", default="results/saturation")
     p.add_argument("--summary", default="results/saturation.csv")
     p.add_argument("--run-id", default=dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
-    p.add_argument("--reliable", default="r")
+    p.add_argument("--channel", default="r", choices=["r", "u"],
+                   help="which channel the swept rate applies to; the other channel stays at 0")
     p.add_argument("--size", default="64")
     p.add_argument("--conns", default="1")
     p.add_argument("--loss", default="0")
@@ -257,7 +270,7 @@ def main() -> int:
     p.add_argument("--loss-injection", action="store_true")
     args = p.parse_args()
 
-    for axis in ("reliable", "size", "conns", "loss", "mode"):
+    for axis in ("size", "conns", "loss", "mode"):
         require_single_axis(axis, getattr(args, axis))
 
     libs = split_csv(args.libraries)

@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Phase 1 quick smoke sweep — axis を 1 シナリオに固定して 10 lib 一巡(~5min)。
-# 軸: size=100, conns=10, mode=echo, reliable=r, rate=50, loss=0,
-#     duration=20, warmup=2 (litenetlib のみ 5)
+# 軸: size=100, conns=10, mode=echo, rate-r=50 rate-u=0 (reliable のみ既定),
+#     loss=0, duration=20, warmup=2 (litenetlib のみ 5)
+#
+# --rate-r=<hz>, --rate-u=<hz> で混合トラフィックも指定可能(両方>0でHoL検証用)。
+# 少なくとも一方は >0 必須。
 #
 # Usage:
-#   scripts/run_phase1_quick.sh [--libraries=raw_udp,...] [--build-dir=build] [--results=results/phase1_quick.csv]
+#   scripts/run_phase1_quick.sh [--libraries=raw_udp,...] [--rate-r=50] [--rate-u=0]
 
 set -euo pipefail
 
@@ -22,6 +25,8 @@ ISOLATE="taskset"
 LITENETLIB_BIN="adapters/litenetlib/bin/Release/net10.0/litenetlib_adapter"
 SIZE=100
 CONNS=10
+RATE_R=50
+RATE_U=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -39,9 +44,16 @@ for arg in "$@"; do
     --litenetlib-bin=*) LITENETLIB_BIN="${arg#*=}" ;;
     --conns=*) CONNS="${arg#*=}" ;;
     --size=*) SIZE="${arg#*=}" ;;
+    --rate-r=*) RATE_R="${arg#*=}" ;;
+    --rate-u=*) RATE_U="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
+
+if [ "$RATE_R" -le 0 ] && [ "$RATE_U" -le 0 ]; then
+  echo "at least one of --rate-r / --rate-u must be > 0" >&2
+  exit 2
+fi
 
 if [ "$IDLE" != "spin" ] && [ "$IDLE" != "adaptive" ]; then
   echo "invalid --idle: $IDLE" >&2
@@ -103,10 +115,8 @@ run_timeout() {
   fi
 }
 
-# 軸固定 (size, conns は --size, --conns で上書き可能)
-RELIABLE=r
+# 軸固定 (size, conns, rate-r, rate-u は CLI で上書き可能)
 MODE=echo
-RATE=50
 LOSS=0
 DURATION=20
 
@@ -116,7 +126,7 @@ PORT=$PORT_BASE
 for lib in ${LIBS//,/ }; do
   PORT=$((PORT + 1))
 
-  SCENARIO_ID="${lib}_${RELIABLE}_${SIZE}_${CONNS}_${RATE}_${MODE}_${LOSS}_${IDLE}"
+  SCENARIO_ID="${lib}_r${RATE_R}_u${RATE_U}_${SIZE}_${CONNS}_${MODE}_${LOSS}_${IDLE}"
   S_OUT="$RAW_DIR/s_${SCENARIO_ID}.csv"
   C_OUT="$RAW_DIR/c_${SCENARIO_ID}.csv"
   S_STDOUT="$RAW_DIR/s_${SCENARIO_ID}.stdout.log"
@@ -139,15 +149,15 @@ for lib in ${LIBS//,/ }; do
       C_STATUS=127
     else
       run_timeout "$SERVER_CPU" "$TIMEOUT_S" server "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
-        --reliable="$RELIABLE" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" \
-        --size="$SIZE" --conns="$CONNS" --rate="$RATE" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \
+        --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" \
+        --size="$SIZE" --conns="$CONNS" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \
         >"$S_STDOUT" 2>"$S_STDERR" &
       SPID=$!
       sleep 0.5
       set +e
       run_timeout "$CLIENT_CPU" "$TIMEOUT_S" client "$LITENETLIB_BIN" --library="$lib" --role=client \
         --host=127.0.0.1 --port="$PORT" \
-        --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
+        --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS" \
         --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
         --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
       C_STATUS=$?
@@ -157,15 +167,15 @@ for lib in ${LIBS//,/ }; do
     fi
   else
     run_timeout "$SERVER_CPU" 60 server "$BIN" --library="$lib" --role=server --port="$PORT" \
-      --reliable="$RELIABLE" --duration="$DURATION" --warmup=2 --loss="$LOSS" \
-      --size="$SIZE" --conns="$CONNS" --rate="$RATE" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \
+      --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup=2 --loss="$LOSS" \
+      --size="$SIZE" --conns="$CONNS" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \
       >"$S_STDOUT" 2>"$S_STDERR" &
     SPID=$!
     sleep 0.2
     set +e
     run_timeout "$CLIENT_CPU" 60 client "$BIN" --library="$lib" --role=client \
       --host=127.0.0.1 --port="$PORT" \
-      --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
+      --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS" \
       --duration="$DURATION" --warmup=2 --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
       --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
     C_STATUS=$?
@@ -181,8 +191,8 @@ for lib in ${LIBS//,/ }; do
     --client-stdout "$C_STDOUT" --client-stderr "$C_STDERR" \
     --server-status "$S_STATUS" --client-status "$C_STATUS" \
     --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
-    --library "$lib" --reliable "$RELIABLE" --size "$SIZE" --conns "$CONNS" \
-    --rate "$RATE" --loss "$LOSS" --mode "$MODE" \
+    --library "$lib" --rate-r "$RATE_R" --rate-u "$RATE_U" \
+    --size "$SIZE" --conns "$CONNS" --loss "$LOSS" --mode "$MODE" \
     --duration "$DURATION" --warmup "$WARMUP_ARG" --idle "$IDLE" \
     --server-cpu-pin "$SERVER_CPU" --client-cpu-pin "$CLIENT_CPU"
 done

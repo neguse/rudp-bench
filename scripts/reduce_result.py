@@ -52,10 +52,10 @@ SCENARIO_FIELDS = [
     "run_id",
     "scenario_id",
     "library",
-    "reliable",
+    "rate_r",
+    "rate_u",
     "size",
     "conns",
-    "rate",
     "loss",
     "mode",
     "duration_s",
@@ -71,6 +71,24 @@ SCENARIO_FIELDS = [
     "max_connections",
     "transport_mode",
 ]
+
+
+def int_or_zero(value: object) -> int:
+    try:
+        if value is None or value == "":
+            return 0
+        return int(str(value))
+    except ValueError:
+        return 0
+
+
+def primary_channel(args: argparse.Namespace) -> str:
+    """Which channel ("r"/"u") drives capability lookups for this scenario.
+    Reliable wins when both are active because its policy is usually the more
+    interesting one (HoL, retransmits)."""
+    if int_or_zero(args.rate_r) > 0:
+        return "r"
+    return "u"
 
 
 def read_raw_row(path: str) -> Optional[Dict[str, str]]:
@@ -108,14 +126,14 @@ def int_or_none(value: object) -> Optional[int]:
         return None
 
 
-def unsupported_reliability(args: argparse.Namespace,
-                            server: Optional[Dict[str, str]],
-                            client: Optional[Dict[str, str]]) -> bool:
-    if not capabilities.supports_reliability(args.library, args.reliable):
-        return True
-    return (server is not None and server.get("reliable") == "na") or (
-        client is not None and client.get("reliable") == "na"
-    )
+def unsupported_reliable(args: argparse.Namespace) -> bool:
+    return int_or_zero(args.rate_r) > 0 and not capabilities.supports_reliability(
+        args.library, "r")
+
+
+def unsupported_unreliable(args: argparse.Namespace) -> bool:
+    return int_or_zero(args.rate_u) > 0 and not capabilities.supports_reliability(
+        args.library, "u")
 
 
 def unsupported_payload(args: argparse.Namespace) -> bool:
@@ -124,8 +142,14 @@ def unsupported_payload(args: argparse.Namespace) -> bool:
         return True
     if size < capabilities.MIN_PAYLOAD_BYTES:
         return True
-    max_payload = capabilities.max_payload_bytes(args.library, args.reliable)
-    return max_payload is not None and size > max_payload
+    for channel in ("r", "u"):
+        rate = int_or_zero(getattr(args, f"rate_{channel}"))
+        if rate <= 0:
+            continue
+        max_payload = capabilities.max_payload_bytes(args.library, channel)
+        if max_payload is not None and size > max_payload:
+            return True
+    return False
 
 
 def unsupported_conns(args: argparse.Namespace) -> bool:
@@ -146,8 +170,6 @@ def role_exit_reason(role: str, raw: Optional[Dict[str, str]], status: str) -> s
         return f"{role}_crash"
     if raw is None:
         return "missing_raw_result"
-    if raw.get("reliable") == "na":
-        return "unsupported_reliability"
     return "ok"
 
 
@@ -196,12 +218,13 @@ def canonical_delivery_ratio(client: Optional[Dict[str, str]]) -> str:
 def scenario_flush_policy(args: argparse.Namespace,
                           server: Optional[Dict[str, str]],
                           client: Optional[Dict[str, str]]) -> str:
-    if not capabilities.supports_reliability(args.library, args.reliable):
-        return capabilities.flush_policy(args.library, args.reliable)
+    channel = primary_channel(args)
+    if not capabilities.supports_reliability(args.library, channel):
+        return capabilities.flush_policy(args.library, channel)
     for raw in (client, server):
         if raw is not None and raw.get("flush_policy"):
             return raw["flush_policy"]
-    return capabilities.flush_policy(args.library, args.reliable)
+    return capabilities.flush_policy(args.library, channel)
 
 
 def pinning_policy(args: argparse.Namespace) -> str:
@@ -218,8 +241,10 @@ def invalid_reason(server: Optional[Dict[str, str]],
     server_exit = role_exit_reason("server", server, args.server_status)
     client_exit = role_exit_reason("client", client, args.client_status)
 
-    if unsupported_reliability(args, server, client):
-        return "unsupported_reliability"
+    if unsupported_reliable(args):
+        return "unsupported_reliable"
+    if unsupported_unreliable(args):
+        return "unsupported_unreliable"
     if unsupported_payload(args):
         return "unsupported_payload"
     if unsupported_conns(args):
@@ -247,7 +272,8 @@ def diagnostic_row(run_id: str, scenario_id: str, role: str,
                    status: str, scenario_reason: str) -> Dict[str, object]:
     exit_reason = role_exit_reason(role, raw, status)
     if scenario_reason in (
-        "unsupported_reliability",
+        "unsupported_reliable",
+        "unsupported_unreliable",
         "unsupported_payload",
         "unsupported_conns",
         "missing_binary",
@@ -293,16 +319,17 @@ def append(args: argparse.Namespace) -> int:
     client = read_raw_row(args.client)
     reason = invalid_reason(server, client, args)
     valid = "1" if reason == "ok" else "0"
-    capability_metadata = capabilities.scenario_metadata(args.library, args.reliable)
+    capability_metadata = capabilities.scenario_metadata(args.library,
+                                                          primary_channel(args))
 
     append_row(args.scenarios, SCENARIO_FIELDS, {
         "run_id": args.run_id,
         "scenario_id": args.scenario_id,
         "library": args.library,
-        "reliable": args.reliable,
+        "rate_r": args.rate_r,
+        "rate_u": args.rate_u,
         "size": args.size,
         "conns": args.conns,
-        "rate": args.rate,
         "loss": args.loss,
         "mode": args.mode,
         "duration_s": args.duration,
@@ -377,10 +404,10 @@ def main() -> int:
     append_p.add_argument("--run-id", required=True)
     append_p.add_argument("--scenario-id", required=True)
     append_p.add_argument("--library", required=True)
-    append_p.add_argument("--reliable", required=True)
+    append_p.add_argument("--rate-r", dest="rate_r", required=True)
+    append_p.add_argument("--rate-u", dest="rate_u", required=True)
     append_p.add_argument("--size", required=True)
     append_p.add_argument("--conns", required=True)
-    append_p.add_argument("--rate", required=True)
     append_p.add_argument("--loss", required=True)
     append_p.add_argument("--mode", required=True)
     append_p.add_argument("--duration", required=True)

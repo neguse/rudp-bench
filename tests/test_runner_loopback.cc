@@ -20,7 +20,7 @@ TEST(RunnerLoopback, RawUdpShortSession) {
   sc.library = "raw_udp";
   sc.role = Role::Server;
   sc.port = 0xC110;
-  sc.reliable = Reliability::Unreliable;
+  sc.rate_u = 100;
   sc.duration_s = 2;
   sc.warmup_s = 0;
 
@@ -29,7 +29,6 @@ TEST(RunnerLoopback, RawUdpShortSession) {
   cc.host = "127.0.0.1";
   cc.size_bytes = 64;
   cc.conns = 1;
-  cc.rate_per_conn = 100;
 
   auto server = create_adapter("raw_udp");
   auto client = create_adapter("raw_udp");

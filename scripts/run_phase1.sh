@@ -2,7 +2,10 @@
 # Phase 1 sweep runner.
 # Usage:
 #   scripts/run_phase1.sh --libraries=raw_udp,mini_rudp [--build-dir=build] [--results=results/phase1.csv]
-#   scripts/run_phase1.sh --sizes=64,1000 --conns=1,50 --rates=50 --losses=0 --modes=echo,broadcast --reliabilities=r,u
+#   scripts/run_phase1.sh --sizes=64,1000 --conns=1,50 --rates-r=0,50 --rates-u=0,50 --losses=0 --modes=echo,broadcast
+#
+# --rates-r / --rates-u は per-conn 送信レート(Hz)。両方 0 の組合せはスキップ。
+# 両方 > 0 にすると HoL blocking 検証用の mixed トラフィックランになる。
 #
 # 注意: --loss > 0 の組合せは sudo で tc qdisc を操作するため、--loss-injection を与えたとき
 # のみ実際に netem を適用する。デフォルトはメタデータのみ書き込み(注入なし)。
@@ -20,10 +23,10 @@ IDLE="spin"
 SERVER_CPU=""
 CLIENT_CPU=""
 LITENETLIB_BIN="adapters/litenetlib/bin/Release/net10.0/litenetlib_adapter"
-RELIABILITIES="r,u"
+RATES_R="0,50"
+RATES_U="0,50"
 SIZES="64,1000"
 CONNS_SET="1,50"
-RATES="50"
 LOSSES="0"
 MODES="echo,broadcast"
 DURATION=20
@@ -43,10 +46,10 @@ for arg in "$@"; do
     --server-cpu=*) SERVER_CPU="${arg#*=}" ;;
     --client-cpu=*) CLIENT_CPU="${arg#*=}" ;;
     --litenetlib-bin=*) LITENETLIB_BIN="${arg#*=}" ;;
-    --reliabilities=*) RELIABILITIES="${arg#*=}" ;;
+    --rates-r=*) RATES_R="${arg#*=}" ;;
+    --rates-u=*) RATES_U="${arg#*=}" ;;
     --sizes=*) SIZES="${arg#*=}" ;;
     --conns=*) CONNS_SET="${arg#*=}" ;;
-    --rates=*) RATES="${arg#*=}" ;;
     --losses=*) LOSSES="${arg#*=}" ;;
     --modes=*) MODES="${arg#*=}" ;;
     --duration=*) DURATION="${arg#*=}" ;;
@@ -105,18 +108,19 @@ PORT_BASE=30000
 PORT=$PORT_BASE
 
 for lib in ${LIBS//,/ }; do
-  for reliable in ${RELIABILITIES//,/ }; do
-    for size in ${SIZES//,/ }; do
-      for conns in ${CONNS_SET//,/ }; do
-        for mode in ${MODES//,/ }; do
-          for rate in ${RATES//,/ }; do
+  for rate_r in ${RATES_R//,/ }; do
+    for rate_u in ${RATES_U//,/ }; do
+      if [ "$rate_r" -le 0 ] && [ "$rate_u" -le 0 ]; then continue; fi
+      for size in ${SIZES//,/ }; do
+        for conns in ${CONNS_SET//,/ }; do
+          for mode in ${MODES//,/ }; do
             for loss in ${LOSSES//,/ }; do
               PORT=$((PORT + 1))
               if [ "$LOSS_INJECT" = "1" ]; then
                 sudo scripts/set_loss.sh apply "$loss" >/dev/null
               fi
 
-              SCENARIO_ID="${lib}_${reliable}_${size}_${conns}_${rate}_${mode}_${loss}_${IDLE}"
+              SCENARIO_ID="${lib}_r${rate_r}_u${rate_u}_${size}_${conns}_${mode}_${loss}_${IDLE}"
               S_OUT="$RAW_DIR/s_${SCENARIO_ID}.csv"
               C_OUT="$RAW_DIR/c_${SCENARIO_ID}.csv"
               S_STDOUT="$RAW_DIR/s_${SCENARIO_ID}.stdout.log"
@@ -140,15 +144,15 @@ for lib in ${LIBS//,/ }; do
                   C_STATUS=127
                 else
                   run_timeout "$SERVER_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
-                    --reliable="$reliable" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" \
-                    --size="$size" --conns="$conns" --rate="$rate" --mode="$mode" --idle="$IDLE" \
+                    --rate-r="$rate_r" --rate-u="$rate_u" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" \
+                    --size="$size" --conns="$conns" --mode="$mode" --idle="$IDLE" \
                     --out="$S_OUT" >"$S_STDOUT" 2>"$S_STDERR" &
                   SPID=$!
                   sleep 0.5
                   set +e
                   run_timeout "$CLIENT_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=client \
                     --host=127.0.0.1 --port="$PORT" \
-                    --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
+                    --rate-r="$rate_r" --rate-u="$rate_u" --size="$size" --conns="$conns" \
                     --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" --mode="$mode" --idle="$IDLE" \
                     --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
                   C_STATUS=$?
@@ -159,15 +163,15 @@ for lib in ${LIBS//,/ }; do
               else
                 TIMEOUT_S=$((DURATION + WARMUP + 10))
                 run_timeout "$SERVER_CPU" "$TIMEOUT_S" "$BIN" --library="$lib" --role=server --port="$PORT" \
-                  --reliable="$reliable" --duration="$DURATION" --warmup="$WARMUP" --loss="$loss" \
-                  --size="$size" --conns="$conns" --rate="$rate" --mode="$mode" --idle="$IDLE" \
+                  --rate-r="$rate_r" --rate-u="$rate_u" --duration="$DURATION" --warmup="$WARMUP" --loss="$loss" \
+                  --size="$size" --conns="$conns" --mode="$mode" --idle="$IDLE" \
                   --out="$S_OUT" >"$S_STDOUT" 2>"$S_STDERR" &
                 SPID=$!
                 sleep 0.2
                 set +e
                 run_timeout "$CLIENT_CPU" "$TIMEOUT_S" "$BIN" --library="$lib" --role=client \
                   --host=127.0.0.1 --port="$PORT" \
-                  --reliable="$reliable" --size="$size" --conns="$conns" --rate="$rate" \
+                  --rate-r="$rate_r" --rate-u="$rate_u" --size="$size" --conns="$conns" \
                   --duration="$DURATION" --warmup="$WARMUP" --loss="$loss" --mode="$mode" --idle="$IDLE" \
                   --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
                 C_STATUS=$?
@@ -183,8 +187,8 @@ for lib in ${LIBS//,/ }; do
                 --client-stdout "$C_STDOUT" --client-stderr "$C_STDERR" \
                 --server-status "$S_STATUS" --client-status "$C_STATUS" \
                 --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
-                --library "$lib" --reliable "$reliable" --size "$size" --conns "$conns" \
-                --rate "$rate" --loss "$loss" --mode "$mode" \
+                --library "$lib" --rate-r "$rate_r" --rate-u "$rate_u" \
+                --size "$size" --conns "$conns" --loss "$loss" --mode "$mode" \
                 --duration "$DURATION" --warmup "$WARMUP_ARG" --idle "$IDLE" \
                 --server-cpu-pin "$SERVER_CPU" --client-cpu-pin "$CLIENT_CPU"
 

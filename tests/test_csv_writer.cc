@@ -11,10 +11,10 @@ TEST(CsvWriter, WritesHeaderAndRow) {
   r.library = "raw_udp";
   r.encryption = "off";
   r.phase = 1;
-  r.reliable = "u";
+  r.rate_r = 0;
+  r.rate_u = 100;
   r.size = 64;
   r.conns = 1;
-  r.rate = 100;
   r.loss = 0.0;
   r.throughput_mbps = 12.5;
   r.msg_per_sec = 24414;
@@ -36,10 +36,10 @@ TEST(CsvWriter, WritesHeaderAndRow) {
   write_row(os, r);
 
   std::string out = os.str();
-  EXPECT_NE(out.find("library,encryption,phase,reliable"), std::string::npos);
+  EXPECT_NE(out.find("library,encryption,phase,rate_r,rate_u"), std::string::npos);
   EXPECT_NE(out.find("client_tick_gap_p99_us"), std::string::npos);
   EXPECT_NE(out.find("delivery_dedup_policy"), std::string::npos);
   EXPECT_NE(out.find("mode,idle_policy,flush_policy"), std::string::npos);
-  EXPECT_NE(out.find("raw_udp,off,1,u,64,1,100,0.000"), std::string::npos);
+  EXPECT_NE(out.find("raw_udp,off,1,0,100,64,1,0.000"), std::string::npos);
   EXPECT_NE(out.find("sliding_window_65536_per_conn"), std::string::npos);
 }

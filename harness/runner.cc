@@ -98,6 +98,8 @@ uint64_t pacing_budget_us(uint32_t rate_per_conn) {
 constexpr std::chrono::microseconds kAdaptiveIdleCap{20};
 constexpr std::chrono::milliseconds kRssSampleInterval{100};
 constexpr size_t kServerRecvDrainLimit = 1024;
+constexpr size_t kReliableFlagOffset = 16;
+constexpr size_t kHeaderBytes = kReliableFlagOffset + 1;
 
 void adaptive_idle_for(std::chrono::microseconds d) {
   if (d.count() > 0) std::this_thread::sleep_for(d);
@@ -111,6 +113,24 @@ void sample_rss_if_due(ProcSampler& ps,
   next_sample = now + kRssSampleInterval;
 }
 
+struct ChannelSched {
+  uint32_t rate = 0;
+  bool reliable = false;
+  std::chrono::nanoseconds interval{0};
+  std::vector<std::chrono::steady_clock::time_point> next_send;
+
+  bool active() const { return rate > 0; }
+
+  void init(uint32_t r, bool rel, uint32_t conns,
+            std::chrono::steady_clock::time_point t0) {
+    rate = r;
+    reliable = rel;
+    interval = r ? std::chrono::nanoseconds(1'000'000'000ULL / r)
+                 : std::chrono::nanoseconds(0);
+    next_send.assign(conns, t0);
+  }
+};
+
 }  // namespace
 
 CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
@@ -120,7 +140,6 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
 
   std::vector<uint8_t> buf(65536);
   std::unordered_set<uint32_t> known_conns;  // broadcast 配信先
-  bool reliable = (cfg.reliable == Reliability::Reliable);
   auto deadline = std::chrono::steady_clock::now() +
                   std::chrono::seconds(cfg.duration_s + cfg.warmup_s + 2);
   auto next_rss_sample = std::chrono::steady_clock::now() + kRssSampleInterval;
@@ -135,10 +154,13 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
       if (r != 1) break;
       did_work = true;
       known_conns.insert(cid);
+      if (n < kHeaderBytes) continue;
+      // Echo back on the same channel the message arrived on (client tags
+      // each outbound payload with the reliable flag at kReliableFlagOffset).
+      bool reliable = buf[kReliableFlagOffset] != 0;
       if (cfg.mode == ServerMode::Echo) {
         a.send(cid, buf.data(), n, reliable);
       } else {
-        // Broadcast: 既知の全 conn に同 payload を送る(送信元を含む)
         for (uint32_t target : known_conns) {
           a.send(target, buf.data(), n, reliable);
         }
@@ -151,22 +173,25 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   ps.end();
   a.close();
 
+  // Server reports the flush_policy of the reliable channel if reliable
+  // traffic was active, else unreliable. Combined runs surface the reliable
+  // policy as the more interesting one.
+  bool reliable_active = cfg.rate_r > 0;
   CsvRow row;
   row.library = cfg.library;
   row.encryption = a.encryption_on() ? "on" : "off";
   row.phase = 1;
-  row.reliable = cfg.reliable == Reliability::Reliable ? "r" :
-                 cfg.reliable == Reliability::Unreliable ? "u" : "na";
+  row.rate_r = cfg.rate_r;
+  row.rate_u = cfg.rate_u;
   row.size = cfg.size_bytes;
   row.conns = cfg.conns;
-  row.rate = cfg.rate_per_conn;
   row.loss = cfg.loss_pct;
   row.cpu_pct = ps.cpu_pct();
   row.rss_mb = ps.rss_max_mb();
   row.duration_s = cfg.duration_s;
   row.mode = (cfg.mode == ServerMode::Broadcast) ? "broadcast" : "echo";
   row.idle_policy = idle_policy_name(cfg.idle_policy);
-  row.flush_policy = a.flush_policy(reliable);
+  row.flush_policy = a.flush_policy(reliable_active);
   return row;
 }
 
@@ -185,7 +210,6 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   for (uint32_t i = 0; i < cfg.conns; ++i) {
     ids.push_back(a.client_connect(cfg.host.c_str(), cfg.port));
   }
-  // 全コネクションが ready になるまで poll
   for (auto id : ids) {
     while (!a.is_connected(id)) {
       a.poll();
@@ -200,80 +224,100 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   auto warmup_end = clock::now() + std::chrono::seconds(cfg.warmup_s);
   auto run_end = warmup_end + std::chrono::seconds(cfg.duration_s);
 
-  // pacing: 各 conn で次回送信時刻を保持
-  std::vector<clock::time_point> next_send(cfg.conns, clock::now());
-  std::chrono::nanoseconds interval =
-      cfg.rate_per_conn ? std::chrono::nanoseconds(1'000'000'000ULL / cfg.rate_per_conn)
-                        : std::chrono::nanoseconds(0);
+  // Two independent per-conn pacing schedules: reliable and unreliable.
+  ChannelSched sched_r;
+  ChannelSched sched_u;
+  sched_r.init(cfg.rate_r, true, cfg.conns, clock::now());
+  sched_u.init(cfg.rate_u, false, cfg.conns, clock::now());
 
   std::vector<uint8_t> payload(cfg.size_bytes, 0xAB);
+  // Single seq counter per conn shared across channels — each msg gets a
+  // unique (conn_id, seq) so the dedup tracker stays correct.
   std::vector<uint64_t> seq_counter(cfg.conns, 1);
   std::vector<uint8_t> rxbuf(65536);
   uint64_t outstanding = 0;
   uint32_t expected_per_send = (cfg.mode == ServerMode::Broadcast) ? cfg.conns : 1;
+  uint64_t combined_rate = static_cast<uint64_t>(cfg.rate_r) + cfg.rate_u;
   uint64_t target_attempted =
-      static_cast<uint64_t>(cfg.rate_per_conn) * cfg.conns * cfg.duration_s *
-      expected_per_send;
-  uint64_t missed_budget = pacing_budget_us(cfg.rate_per_conn);
+      combined_rate * cfg.conns * cfg.duration_s * expected_per_send;
+  // Use the higher per-channel rate for missed-pacing budget (most aggressive
+  // schedule sets the bar for tick health).
+  uint64_t missed_budget = pacing_budget_us(std::max(cfg.rate_r, cfg.rate_u));
 
-  bool reliable = (cfg.reliable == Reliability::Reliable);
   auto in_measure = [&](clock::time_point t) { return t >= warmup_end; };
 
-  // tail drain: 送信終了後しばらく recv だけ
   auto tail_until = run_end + std::chrono::milliseconds(500);
   auto next_rss_sample = clock::now() + kRssSampleInterval;
+
+  auto try_send_on = [&](ChannelSched& sched, uint32_t i,
+                         clock::time_point now, bool& did_work) {
+    if (!sched.active()) return;
+    if (now < sched.next_send[i]) return;
+    did_work = true;
+    uint64_t lag_us = 0;
+    if (now > sched.next_send[i]) {
+      lag_us = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              now - sched.next_send[i])
+              .count());
+    }
+    bool in_active = now >= warmup_end && now < run_end;
+    if (in_active) tick.record_send_due(expected_per_send, lag_us, missed_budget);
+    uint64_t local_seq = seq_counter[i]++;
+    uint64_t global_seq = (static_cast<uint64_t>(i) << 32) | local_seq;
+    uint64_t ts = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      now.time_since_epoch()).count();
+    std::memcpy(payload.data(), &global_seq, 8);
+    std::memcpy(payload.data() + 8, &ts, 8);
+    payload[kReliableFlagOffset] = sched.reliable ? 1 : 0;
+    if (a.send(ids[i], payload.data(), payload.size(), sched.reliable) == 0) {
+      if (in_measure(now)) {
+        tick.record_accepted(expected_per_send);
+        for (uint32_t k = 0; k < expected_per_send; ++k) {
+          dt.mark_accepted(global_seq, ids[i]);
+        }
+        outstanding += expected_per_send;
+        tick.record_outstanding(outstanding);
+      }
+    }
+    sched.next_send[i] += sched.interval;
+    if (sched.next_send[i] < now) sched.next_send[i] = now;
+  };
+
+  auto soonest_due = [&]() -> clock::time_point {
+    clock::time_point best = clock::time_point::max();
+    auto pick = [&](const ChannelSched& sched) {
+      if (!sched.active()) return;
+      for (auto& t : sched.next_send) {
+        if (t < best) best = t;
+      }
+    };
+    pick(sched_r);
+    pick(sched_u);
+    return best;
+  };
 
   while (clock::now() < tail_until) {
     auto now = clock::now();
     sample_rss_if_due(ps, now, next_rss_sample);
-    bool in_active_send = now >= warmup_end && now < run_end;
     bool in_diag = now >= warmup_end;
     bool did_work = false;
     tick.record_tick(now, in_diag);
     if (now < run_end) {
       for (uint32_t i = 0; i < cfg.conns; ++i) {
-        if (now < next_send[i]) continue;
-        did_work = true;
-        uint64_t lag_us = 0;
-        if (cfg.rate_per_conn && now > next_send[i]) {
-          lag_us = static_cast<uint64_t>(
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  now - next_send[i])
-                  .count());
-        }
-        if (in_active_send) tick.record_send_due(expected_per_send, lag_us, missed_budget);
-        // ヘッダ書き込み: seq は (src_idx << 32 | local) でグローバルにユニーク化
-        // (broadcast 時の dedup key が src 違いで衝突しないため)
-        uint64_t local_seq = seq_counter[i]++;
-        uint64_t global_seq = (static_cast<uint64_t>(i) << 32) | local_seq;
-        uint64_t ts = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                          now.time_since_epoch()).count();
-        std::memcpy(payload.data(), &global_seq, 8);
-        std::memcpy(payload.data() + 8, &ts, 8);
-        if (a.send(ids[i], payload.data(), payload.size(), reliable) == 0) {
-          if (in_measure(now)) {
-            tick.record_accepted(expected_per_send);
-            for (uint32_t k = 0; k < expected_per_send; ++k) {
-              dt.mark_accepted(global_seq, ids[i]);
-            }
-            outstanding += expected_per_send;
-            tick.record_outstanding(outstanding);
-          }
-        }
-        if (cfg.rate_per_conn) {
-          next_send[i] += interval;
-          if (next_send[i] < now) next_send[i] = now;  // catch-up cap
-        }
+        try_send_on(sched_r, i, now, did_work);
+        try_send_on(sched_u, i, now, did_work);
       }
     }
     a.poll();
     uint64_t drained_this_tick = 0;
     while (true) {
-      size_t n; uint32_t cid;
+      size_t n;
+      uint32_t cid;
       int r = a.recv(rxbuf.data(), rxbuf.size(), &n, &cid);
       if (r != 1) break;
       ++drained_this_tick;
-      if (n < 16) continue;
+      if (n < kHeaderBytes) continue;
       uint64_t seq, ts;
       std::memcpy(&seq, rxbuf.data(), 8);
       std::memcpy(&ts, rxbuf.data() + 8, 8);
@@ -292,10 +336,9 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
     if (!did_work && outstanding == 0 &&
         cfg.idle_policy == IdlePolicy::Adaptive) {
       auto sleep_for = kAdaptiveIdleCap;
-      if (cfg.rate_per_conn && clock::now() < run_end) {
-        auto next_due = *std::min_element(next_send.begin(), next_send.end());
+      if (combined_rate && clock::now() < run_end) {
         auto until_due = std::chrono::duration_cast<std::chrono::microseconds>(
-            next_due - clock::now());
+            soonest_due() - clock::now());
         if (until_due < sleep_for) sleep_for = until_due;
       }
       adaptive_idle_for(sleep_for);
@@ -304,15 +347,15 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   ps.end();
   a.close();
 
+  bool reliable_active = cfg.rate_r > 0;
   CsvRow row;
   row.library = cfg.library;
   row.encryption = a.encryption_on() ? "on" : "off";
   row.phase = 1;
-  row.reliable = reliable ? "r"
-                          : (cfg.reliable == Reliability::Unreliable ? "u" : "na");
+  row.rate_r = cfg.rate_r;
+  row.rate_u = cfg.rate_u;
   row.size = cfg.size_bytes;
   row.conns = cfg.conns;
-  row.rate = cfg.rate_per_conn;
   row.loss = cfg.loss_pct;
   row.throughput_mbps = (th.bytes() * 8.0) / (cfg.duration_s * 1'000'000.0);
   row.msg_per_sec = th.messages() / std::max<uint32_t>(1, cfg.duration_s);
@@ -328,7 +371,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.duration_s = cfg.duration_s;
   row.mode = (cfg.mode == ServerMode::Broadcast) ? "broadcast" : "echo";
   row.idle_policy = idle_policy_name(cfg.idle_policy);
-  row.flush_policy = a.flush_policy(reliable);
+  row.flush_policy = a.flush_policy(reliable_active);
   row.client_tick_gap_p99_us = tick.tick_gap_us.percentile_per_mille(990);
   row.client_tick_gap_max_us = tick.tick_gap_us.max();
   row.client_pacing_lag_p99_us = tick.pacing_lag_us.percentile_per_mille(990);
@@ -351,7 +394,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   bool tick_ok = tick.tick_gap_us.count() > 0 &&
                  row.client_tick_gap_p99_us <= 250 &&
                  row.client_accepted_ratio >= 0.99;
-  if (cfg.rate_per_conn) {
+  if (combined_rate) {
     tick_ok = tick_ok && row.client_attempted_ratio >= 0.99 &&
               row.client_pacing_lag_p99_us <= missed_budget;
   }
