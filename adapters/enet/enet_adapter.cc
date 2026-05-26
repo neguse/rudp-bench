@@ -66,10 +66,21 @@ class EnetAdapter : public rudp_bench::Adapter {
     auto it = peer_by_id_.find(conn_id);
     if (it == peer_by_id_.end()) return -1;
     ENetPeer* peer = it->second;
-    uint32_t flags = reliable ? ENET_PACKET_FLAG_RELIABLE : 0;
+    // channel 0 = reliable ordered, channel 1 = unreliable unsequenced.
+    // UNSEQUENCED is required so unreliable packets do not block behind
+    // pending reliable retransmits on the channel-level sequence number.
+    uint8_t channel;
+    uint32_t flags;
+    if (reliable) {
+      channel = 0;
+      flags = ENET_PACKET_FLAG_RELIABLE;
+    } else {
+      channel = 1;
+      flags = ENET_PACKET_FLAG_UNSEQUENCED;
+    }
     ENetPacket* pkt = enet_packet_create(data, len, flags);
     if (!pkt) return -1;
-    if (enet_peer_send(peer, 0, pkt) != 0) {
+    if (enet_peer_send(peer, channel, pkt) != 0) {
       enet_packet_destroy(pkt);
       return -1;
     }
