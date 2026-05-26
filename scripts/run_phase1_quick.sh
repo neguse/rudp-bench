@@ -18,6 +18,7 @@ RAW_DIR=""
 IDLE="spin"
 SERVER_CPU=""
 CLIENT_CPU=""
+ISOLATE="taskset"
 LITENETLIB_BIN="adapters/litenetlib/bin/Release/net10.0/litenetlib_adapter"
 SIZE=100
 CONNS=10
@@ -34,6 +35,7 @@ for arg in "$@"; do
     --idle=*) IDLE="${arg#*=}" ;;
     --server-cpu=*) SERVER_CPU="${arg#*=}" ;;
     --client-cpu=*) CLIENT_CPU="${arg#*=}" ;;
+    --isolate=*) ISOLATE="${arg#*=}" ;;
     --litenetlib-bin=*) LITENETLIB_BIN="${arg#*=}" ;;
     --conns=*) CONNS="${arg#*=}" ;;
     --size=*) SIZE="${arg#*=}" ;;
@@ -45,8 +47,16 @@ if [ "$IDLE" != "spin" ] && [ "$IDLE" != "adaptive" ]; then
   echo "invalid --idle: $IDLE" >&2
   exit 2
 fi
-if { [ -n "$SERVER_CPU" ] || [ -n "$CLIENT_CPU" ]; } && ! command -v taskset >/dev/null; then
-  echo "--server-cpu/--client-cpu require taskset" >&2
+if [ "$ISOLATE" != "taskset" ] && [ "$ISOLATE" != "systemd" ]; then
+  echo "invalid --isolate: $ISOLATE (taskset|systemd)" >&2
+  exit 2
+fi
+if { [ -n "$SERVER_CPU" ] || [ -n "$CLIENT_CPU" ]; } && [ "$ISOLATE" = "taskset" ] && ! command -v taskset >/dev/null; then
+  echo "--server-cpu/--client-cpu with --isolate=taskset require taskset" >&2
+  exit 2
+fi
+if [ "$ISOLATE" = "systemd" ] && ! command -v systemd-run >/dev/null; then
+  echo "--isolate=systemd requires systemd-run" >&2
   exit 2
 fi
 
@@ -73,8 +83,20 @@ python3 scripts/reduce_result.py init \
 run_timeout() {
   local cpu="$1"
   local timeout_s="$2"
-  shift 2
-  if [ -n "$cpu" ]; then
+  local label="$3"  # server|client, used as slice suffix in systemd mode
+  shift 3
+  if [ "$ISOLATE" = "systemd" ] && [ -n "$cpu" ]; then
+    # Unit is killed by systemd after RuntimeMaxSec; also wrap with timeout
+    # as a belt-and-suspenders against systemd-run hanging.
+    # WorkingDirectory preserves CWD so relative --out paths resolve correctly.
+    timeout "$((timeout_s + 5))s" sudo systemd-run \
+      --slice="bench-${label}.slice" \
+      --working-directory="$PWD" \
+      -p AllowedCPUs="$cpu" -p CPUWeight=10000 \
+      -p RuntimeMaxSec="${timeout_s}s" \
+      --quiet --wait --pipe --collect \
+      "$@"
+  elif [ -n "$cpu" ]; then
     timeout "${timeout_s}s" taskset -c "$cpu" "$@"
   else
     timeout "${timeout_s}s" "$@"
@@ -116,14 +138,14 @@ for lib in ${LIBS//,/ }; do
       S_STATUS=127
       C_STATUS=127
     else
-      run_timeout "$SERVER_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
+      run_timeout "$SERVER_CPU" "$TIMEOUT_S" server "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
         --reliable="$RELIABLE" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" \
         --size="$SIZE" --conns="$CONNS" --rate="$RATE" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \
         >"$S_STDOUT" 2>"$S_STDERR" &
       SPID=$!
       sleep 0.5
       set +e
-      run_timeout "$CLIENT_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=client \
+      run_timeout "$CLIENT_CPU" "$TIMEOUT_S" client "$LITENETLIB_BIN" --library="$lib" --role=client \
         --host=127.0.0.1 --port="$PORT" \
         --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
         --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
@@ -134,14 +156,14 @@ for lib in ${LIBS//,/ }; do
       set -e
     fi
   else
-    run_timeout "$SERVER_CPU" 60 "$BIN" --library="$lib" --role=server --port="$PORT" \
+    run_timeout "$SERVER_CPU" 60 server "$BIN" --library="$lib" --role=server --port="$PORT" \
       --reliable="$RELIABLE" --duration="$DURATION" --warmup=2 --loss="$LOSS" \
       --size="$SIZE" --conns="$CONNS" --rate="$RATE" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \
       >"$S_STDOUT" 2>"$S_STDERR" &
     SPID=$!
     sleep 0.2
     set +e
-    run_timeout "$CLIENT_CPU" 60 "$BIN" --library="$lib" --role=client \
+    run_timeout "$CLIENT_CPU" 60 client "$BIN" --library="$lib" --role=client \
       --host=127.0.0.1 --port="$PORT" \
       --reliable="$RELIABLE" --size="$SIZE" --conns="$CONNS" --rate="$RATE" \
       --duration="$DURATION" --warmup=2 --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
