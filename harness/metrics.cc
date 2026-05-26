@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <ostream>
 
 namespace rudp_bench {
 
@@ -36,6 +37,25 @@ void LatencyHist::record_us(uint64_t us) {
     return;
   }
   ++bins_[index];
+}
+
+void LatencyHist::write_binary(std::ostream& os) const {
+  // dense u64 little-endian payload, header:
+  //   u32 magic = 'LHST' (0x5453484c)
+  //   u32 version = 1
+  //   u64 count, overflow, max_us, bin_count
+  //   u64 bins[bin_count]
+  const uint32_t magic = 0x5453484CU;
+  const uint32_t version = 1;
+  const uint64_t bin_count_field = kBinCount;
+  os.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+  os.write(reinterpret_cast<const char*>(&version), sizeof(version));
+  os.write(reinterpret_cast<const char*>(&count_), sizeof(count_));
+  os.write(reinterpret_cast<const char*>(&overflow_), sizeof(overflow_));
+  os.write(reinterpret_cast<const char*>(&max_), sizeof(max_));
+  os.write(reinterpret_cast<const char*>(&bin_count_field), sizeof(bin_count_field));
+  os.write(reinterpret_cast<const char*>(bins_.data()),
+           static_cast<std::streamsize>(sizeof(uint64_t) * kBinCount));
 }
 
 uint64_t LatencyHist::percentile_us(double p) {

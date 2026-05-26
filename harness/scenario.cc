@@ -54,6 +54,8 @@ std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]) {
       else return std::nullopt;
     }
     else if (starts_with(a, "--out=")) c.out_path = value(a, "--out=");
+    else if (starts_with(a, "--bins-r-out=")) c.bins_r_out_path = value(a, "--bins-r-out=");
+    else if (starts_with(a, "--bins-u-out=")) c.bins_u_out_path = value(a, "--bins-u-out=");
     else {
       std::cerr << "unknown flag: " << a << "\n";
       return std::nullopt;

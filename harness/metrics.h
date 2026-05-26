@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <unordered_map>
 
 #include "harness/sliding_dedup_window.h"
@@ -16,6 +17,9 @@ class LatencyHist {
   uint64_t percentile_us(double p);  // p in [0, 1]
   size_t samples() const { return static_cast<size_t>(count_); }
   size_t storage_bins() const { return bins_.size(); }
+  // Serialize dense bins for cross-process merge. Format documented in
+  // scripts/combine_clients.py (mirrored by the Python reader).
+  void write_binary(std::ostream& os) const;
  private:
   static constexpr uint64_t kExactMaxUs = 10'000;
   static constexpr uint64_t kFineMaxUs = 1'000'000;

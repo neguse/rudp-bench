@@ -25,6 +25,11 @@ struct ScenarioConfig {
   ServerMode mode = ServerMode::Echo;  // echo: 1:1 / broadcast: 1:N (全 conn)
   IdlePolicy idle_policy = IdlePolicy::Spin;
   std::string out_path;
+  // Optional sidecar files for cross-process histogram merge. When set, the
+  // client role writes the dense bin contents of rtt_r / rtt_u so a coordinator
+  // can sum N clients' bins and recompute percentiles correctly.
+  std::string bins_r_out_path;
+  std::string bins_u_out_path;
 };
 
 const char* idle_policy_name(IdlePolicy p);

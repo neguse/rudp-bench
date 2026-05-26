@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <fstream>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -372,6 +373,14 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.rtt_u_p50_us = rtt_u.percentile_us(0.50);
   row.rtt_u_p95_us = rtt_u.percentile_us(0.95);
   row.rtt_u_p99_us = rtt_u.percentile_us(0.99);
+  if (!cfg.bins_r_out_path.empty()) {
+    std::ofstream f(cfg.bins_r_out_path, std::ios::binary);
+    rtt_r.write_binary(f);
+  }
+  if (!cfg.bins_u_out_path.empty()) {
+    std::ofstream f(cfg.bins_u_out_path, std::ios::binary);
+    rtt_u.write_binary(f);
+  }
   row.delivered = dt.received();
   row.accepted = dt.accepted();
   row.delivery_ratio = dt.delivery_ratio();
