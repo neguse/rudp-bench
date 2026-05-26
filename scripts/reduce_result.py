@@ -20,9 +20,12 @@ RESULT_FIELDS = [
     "valid",
     "invalid_reason",
     "delivery_ratio",
-    "rtt_p50_us",
-    "rtt_p95_us",
-    "rtt_p99_us",
+    "rtt_r_p50_us",
+    "rtt_r_p95_us",
+    "rtt_r_p99_us",
+    "rtt_u_p50_us",
+    "rtt_u_p95_us",
+    "rtt_u_p99_us",
     "server_cpu_pct",
 ]
 
@@ -358,9 +361,12 @@ def append(args: argparse.Namespace) -> int:
         "valid": valid,
         "invalid_reason": reason,
         "delivery_ratio": canonical_delivery_ratio(client),
-        "rtt_p50_us": client.get("rtt_p50_us", "") if client else "",
-        "rtt_p95_us": client.get("rtt_p95_us", "") if client else "",
-        "rtt_p99_us": client.get("rtt_p99_us", "") if client else "",
+        "rtt_r_p50_us": client.get("rtt_r_p50_us", "") if client else "",
+        "rtt_r_p95_us": client.get("rtt_r_p95_us", "") if client else "",
+        "rtt_r_p99_us": client.get("rtt_r_p99_us", "") if client else "",
+        "rtt_u_p50_us": client.get("rtt_u_p50_us", "") if client else "",
+        "rtt_u_p95_us": client.get("rtt_u_p95_us", "") if client else "",
+        "rtt_u_p99_us": client.get("rtt_u_p99_us", "") if client else "",
         "server_cpu_pct": server.get("cpu_pct", "") if server else "",
     })
     return 0

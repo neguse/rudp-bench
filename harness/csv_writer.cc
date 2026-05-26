@@ -7,7 +7,9 @@ namespace rudp_bench {
 
 void write_header(std::ostream& os) {
   os << "library,encryption,phase,rate_r,rate_u,size,conns,loss,"
-     << "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,"
+     << "throughput_mbps,msg_per_sec,"
+     << "rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,"
+     << "rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,"
      << "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
      << "mode,idle_policy,flush_policy,client_tick_gap_p99_us,"
      << "client_tick_gap_max_us,"
@@ -25,7 +27,8 @@ void write_row(std::ostream& os, const CsvRow& r) {
      << std::fixed << std::setprecision(3) << r.loss << ','
      << std::setprecision(3) << r.throughput_mbps << ','
      << r.msg_per_sec << ','
-     << r.rtt_p50_us << ',' << r.rtt_p95_us << ',' << r.rtt_p99_us << ','
+     << r.rtt_r_p50_us << ',' << r.rtt_r_p95_us << ',' << r.rtt_r_p99_us << ','
+     << r.rtt_u_p50_us << ',' << r.rtt_u_p95_us << ',' << r.rtt_u_p99_us << ','
      << r.delivered << ',' << r.accepted << ','
      << std::setprecision(4) << r.delivery_ratio << ','
      << std::setprecision(2) << r.cpu_pct << ','

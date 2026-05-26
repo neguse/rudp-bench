@@ -198,7 +198,8 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
 CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   using clock = std::chrono::steady_clock;
   ProcSampler ps;
-  LatencyHist rtt;
+  LatencyHist rtt_r;
+  LatencyHist rtt_u;
   ThroughputCounter th;
   DeliveryTracker dt;
   ClientTickStats tick;
@@ -321,12 +322,13 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
       uint64_t seq, ts;
       std::memcpy(&seq, rxbuf.data(), 8);
       std::memcpy(&ts, rxbuf.data() + 8, 8);
+      bool reliable_msg = rxbuf[kReliableFlagOffset] != 0;
       auto t_recv = clock::now();
       uint64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                             t_recv.time_since_epoch()).count();
       uint64_t rtt_us = (now_ns - ts) / 1000;
       if (in_measure(t_recv)) {
-        rtt.record_us(rtt_us);
+        (reliable_msg ? rtt_r : rtt_u).record_us(rtt_us);
         th.record(n);
         if (dt.mark_received(seq, cid) && outstanding > 0) --outstanding;
       }
@@ -359,9 +361,12 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.loss = cfg.loss_pct;
   row.throughput_mbps = (th.bytes() * 8.0) / (cfg.duration_s * 1'000'000.0);
   row.msg_per_sec = th.messages() / std::max<uint32_t>(1, cfg.duration_s);
-  row.rtt_p50_us = rtt.percentile_us(0.50);
-  row.rtt_p95_us = rtt.percentile_us(0.95);
-  row.rtt_p99_us = rtt.percentile_us(0.99);
+  row.rtt_r_p50_us = rtt_r.percentile_us(0.50);
+  row.rtt_r_p95_us = rtt_r.percentile_us(0.95);
+  row.rtt_r_p99_us = rtt_r.percentile_us(0.99);
+  row.rtt_u_p50_us = rtt_u.percentile_us(0.50);
+  row.rtt_u_p95_us = rtt_u.percentile_us(0.95);
+  row.rtt_u_p99_us = rtt_u.percentile_us(0.99);
   row.delivered = dt.received();
   row.accepted = dt.accepted();
   row.delivery_ratio = dt.delivery_ratio();

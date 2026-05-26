@@ -17,9 +17,12 @@ struct CsvRow {
   double loss = 0.0;
   double throughput_mbps = 0.0;
   uint64_t msg_per_sec = 0;
-  uint64_t rtt_p50_us = 0;
-  uint64_t rtt_p95_us = 0;
-  uint64_t rtt_p99_us = 0;
+  uint64_t rtt_r_p50_us = 0;
+  uint64_t rtt_r_p95_us = 0;
+  uint64_t rtt_r_p99_us = 0;
+  uint64_t rtt_u_p50_us = 0;
+  uint64_t rtt_u_p95_us = 0;
+  uint64_t rtt_u_p99_us = 0;
   uint64_t delivered = 0;
   uint64_t accepted = 0;
   double delivery_ratio = 0.0;

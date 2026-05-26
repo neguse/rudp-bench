@@ -266,7 +266,8 @@ static CsvRow RunClient(Config cfg)
     long runEndTicks = warmupEndTicks + (long)(cfg.DurationS * Stopwatch.Frequency);
     long tailUntilTicks = runEndTicks + Stopwatch.Frequency / 2; // +500ms tail drain
 
-    var rtt = new LatencyHist();
+    var rttR = new LatencyHist();
+    var rttU = new LatencyHist();
     var throughput = new ThroughputCounter();
     var delivery = new DeliveryTracker();
     var tick = new ClientTickStats();
@@ -350,12 +351,13 @@ static CsvRow RunClient(Config cfg)
 
             ulong seq = BitConverter.ToUInt64(msg.Buffer, 0);
             ulong tsNs = BitConverter.ToUInt64(msg.Buffer, 8);
+            bool reliableMsg = msg.Buffer[16] != 0;
             ulong nowNs = (ulong)(nowTicks * 1_000_000_000L / Stopwatch.Frequency);
             ulong rttUs = (nowNs > tsNs) ? (nowNs - tsNs) / 1000 : 0;
 
             if (inMeasureNow)
             {
-                rtt.RecordUs(rttUs);
+                (reliableMsg ? rttR : rttU).RecordUs(rttUs);
                 throughput.Record((ulong)msg.Length);
                 if (delivery.MarkReceived(seq, msg.Conn) && outstanding > 0)
                     outstanding--;
@@ -397,9 +399,12 @@ static CsvRow RunClient(Config cfg)
         Loss = cfg.Loss,
         ThroughputMbps = throughput.Bytes * 8.0 / (cfg.DurationS * 1_000_000.0),
         MsgPerSec = throughput.Messages / Math.Max(1u, cfg.DurationS),
-        RttP50Us = rtt.PercentileUs(0.50),
-        RttP95Us = rtt.PercentileUs(0.95),
-        RttP99Us = rtt.PercentileUs(0.99),
+        RttRP50Us = rttR.PercentileUs(0.50),
+        RttRP95Us = rttR.PercentileUs(0.95),
+        RttRP99Us = rttR.PercentileUs(0.99),
+        RttUP50Us = rttU.PercentileUs(0.50),
+        RttUP95Us = rttU.PercentileUs(0.95),
+        RttUP99Us = rttU.PercentileUs(0.99),
         Delivered = delivery.Received,
         Accepted = delivery.Accepted,
         DeliveryRatio = delivery.DeliveryRatio,
@@ -434,7 +439,9 @@ static string FlushPolicy(Config _) => "library_internal";
 
 static string CsvHeader() =>
     "library,encryption,phase,rate_r,rate_u,size,conns,loss," +
-    "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us," +
+    "throughput_mbps,msg_per_sec," +
+    "rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us," +
+    "rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us," +
     "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s," +
     "mode,idle_policy,flush_policy,client_tick_gap_p99_us," +
     "client_tick_gap_max_us," +
@@ -451,7 +458,8 @@ static string FormatRow(CsvRow r) =>
     $"{r.Loss.ToString("F3", CultureInfo.InvariantCulture)}," +
     $"{r.ThroughputMbps.ToString("F3", CultureInfo.InvariantCulture)}," +
     $"{r.MsgPerSec}," +
-    $"{r.RttP50Us},{r.RttP95Us},{r.RttP99Us}," +
+    $"{r.RttRP50Us},{r.RttRP95Us},{r.RttRP99Us}," +
+    $"{r.RttUP50Us},{r.RttUP95Us},{r.RttUP99Us}," +
     $"{r.Delivered},{r.Accepted}," +
     $"{r.DeliveryRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.CpuPct.ToString("F2", CultureInfo.InvariantCulture)}," +
@@ -505,9 +513,12 @@ class CsvRow
     public double Loss;
     public double ThroughputMbps;
     public ulong MsgPerSec;
-    public ulong RttP50Us;
-    public ulong RttP95Us;
-    public ulong RttP99Us;
+    public ulong RttRP50Us;
+    public ulong RttRP95Us;
+    public ulong RttRP99Us;
+    public ulong RttUP50Us;
+    public ulong RttUP95Us;
+    public ulong RttUP99Us;
     public ulong Delivered;
     public ulong Accepted;
     public double DeliveryRatio;

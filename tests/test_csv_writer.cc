@@ -18,9 +18,12 @@ TEST(CsvWriter, WritesHeaderAndRow) {
   r.loss = 0.0;
   r.throughput_mbps = 12.5;
   r.msg_per_sec = 24414;
-  r.rtt_p50_us = 25;
-  r.rtt_p95_us = 80;
-  r.rtt_p99_us = 200;
+  r.rtt_r_p50_us = 25;
+  r.rtt_r_p95_us = 80;
+  r.rtt_r_p99_us = 200;
+  r.rtt_u_p50_us = 22;
+  r.rtt_u_p95_us = 70;
+  r.rtt_u_p99_us = 180;
   r.delivered = 1000;
   r.accepted = 1000;
   r.delivery_ratio = 1.0;

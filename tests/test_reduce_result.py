@@ -11,7 +11,9 @@ REDUCE = ROOT / "scripts" / "reduce_result.py"
 
 RAW_HEADER = (
     "library,encryption,phase,rate_r,rate_u,size,conns,loss,"
-    "throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,"
+    "throughput_mbps,msg_per_sec,"
+    "rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,"
+    "rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,"
     "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
     "mode,idle_policy,flush_policy,client_tick_gap_p99_us,"
     "client_tick_gap_max_us,"
@@ -34,9 +36,12 @@ BASE_RAW_ROW = {
     "loss": "0.000",
     "throughput_mbps": "0.051",
     "msg_per_sec": "100",
-    "rtt_p50_us": "10",
-    "rtt_p95_us": "20",
-    "rtt_p99_us": "30",
+    "rtt_r_p50_us": "0",
+    "rtt_r_p95_us": "0",
+    "rtt_r_p99_us": "0",
+    "rtt_u_p50_us": "10",
+    "rtt_u_p95_us": "20",
+    "rtt_u_p99_us": "30",
     "delivered": "200",
     "accepted": "200",
     "delivery_ratio": "1.0000",
@@ -126,9 +131,12 @@ def append_case(
             {
                 "throughput_mbps": "0.000",
                 "msg_per_sec": "0",
-                "rtt_p50_us": "0",
-                "rtt_p95_us": "0",
-                "rtt_p99_us": "0",
+                "rtt_r_p50_us": "0",
+                "rtt_r_p95_us": "0",
+                "rtt_r_p99_us": "0",
+                "rtt_u_p50_us": "0",
+                "rtt_u_p95_us": "0",
+                "rtt_u_p99_us": "0",
                 "delivered": "0",
                 "accepted": "0",
                 "delivery_ratio": "0.0000",
@@ -414,7 +422,7 @@ def main() -> int:
             client_overrides={
                 "delivered": "1",
                 "delivery_ratio": "0.0050",
-                "rtt_p95_us": "999",
+                "rtt_u_p95_us": "999",
             },
         )
         append_case(
@@ -435,7 +443,8 @@ def main() -> int:
         assert canonical["ok"]["valid"] == "1"
         assert canonical["ok"]["invalid_reason"] == "ok"
         assert canonical["ok"]["delivery_ratio"] == "1.0000"
-        assert canonical["ok"]["rtt_p95_us"] == "20"
+        assert canonical["ok"]["rtt_u_p95_us"] == "20"
+        assert canonical["ok"]["rtt_r_p95_us"] == "0"
         assert canonical["ok"]["server_cpu_pct"] == "7.50"
         assert canonical["pinned"]["valid"] == "1"
 
