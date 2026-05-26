@@ -101,10 +101,13 @@ run_timeout() {
     # Unit is killed by systemd after RuntimeMaxSec; also wrap with timeout
     # as a belt-and-suspenders against systemd-run hanging.
     # WorkingDirectory preserves CWD so relative --out paths resolve correctly.
+    # User=$USER drops privileges from sudo's root back to the invoking user
+    # so libraries that refuse to run as root (msquic) survive.
     timeout "$((timeout_s + 5))s" sudo systemd-run \
       --slice="bench-${label}.slice" \
       --working-directory="$PWD" \
       -p AllowedCPUs="$cpu" -p CPUWeight=10000 \
+      -p User="$USER" \
       -p RuntimeMaxSec="${timeout_s}s" \
       --quiet --wait --pipe --collect \
       "$@"

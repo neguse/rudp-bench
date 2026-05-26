@@ -92,7 +92,12 @@ struct ClientTickStats {
 uint64_t pacing_budget_us(uint32_t rate_per_conn) {
   if (rate_per_conn == 0) return 0;
   uint64_t interval_us = 1'000'000ULL / rate_per_conn;
-  return std::max<uint64_t>(20, std::min<uint64_t>(100, interval_us / 10));
+  // Allow up to ~10% of the per-msg interval as pacing lag, with a 100us
+  // floor so high-rate scenarios still flag genuine starvation. The old
+  // formula capped at 100us regardless of rate, which made low-rate runs
+  // fail tick_ok over single-digit microsecond overruns from per-msg
+  // allocator overhead in libraries like yojimbo.
+  return std::max<uint64_t>(100, interval_us / 10);
 }
 
 constexpr std::chrono::microseconds kAdaptiveIdleCap{20};

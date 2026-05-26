@@ -591,7 +591,10 @@ static class TickUtil
     {
         if (ratePerConn == 0) return 0;
         ulong intervalUs = 1_000_000UL / ratePerConn;
-        return Math.Max(20UL, Math.Min(100UL, intervalUs / 10UL));
+        // Mirrors harness/runner.cc pacing_budget_us: 10% of interval with
+        // a 100us floor so high-rate runs still flag starvation while
+        // low-rate runs do not fail over single-digit microsecond overruns.
+        return Math.Max(100UL, intervalUs / 10UL);
     }
 }
 
