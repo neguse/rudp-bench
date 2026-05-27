@@ -32,7 +32,10 @@ void ensure_msquic_init() {
   static std::once_flag flag;
   std::call_once(flag, []() {
     if (QUIC_STATUS s = MsQuicOpen2(&MsQuic); QUIC_FAILED(s)) MSQUIC_DIE("MsQuicOpen2", s);
-    std::atexit([]() { MsQuicClose(MsQuic); });
+    // Intentionally NOT registering atexit MsQuicClose: at 200+ conns the
+    // global teardown races with msquic worker threads still finishing
+    // callbacks and triggers double-free in glibc. We rely on the OS to
+    // reclaim resources at process exit.
   });
 }
 
@@ -203,28 +206,11 @@ class MsquicAdapter : public rudp_bench::Adapter {
   }
 
   void close() override {
-    if (listener_) {
-      MsQuic->ListenerClose(listener_);
-      listener_ = nullptr;
-    }
-
-    std::vector<HQUIC> to_close;
-    {
-      std::lock_guard<std::mutex> lock(mtx_);
-      for (auto& [id, conn] : id_to_conn_) to_close.push_back(conn);
-      id_to_conn_.clear();
-      conn_to_id_.clear();
-      reliable_stream_by_conn_.clear();
-      connected_ids_.clear();
-      inbox_.clear();
-    }
-    for (auto conn : to_close) {
-      MsQuic->ConnectionShutdown(conn, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
-      MsQuic->ConnectionClose(conn);
-    }
-
-    if (config_) { MsQuic->ConfigurationClose(config_); config_ = nullptr; }
-    if (reg_) { MsQuic->RegistrationClose(reg_); reg_ = nullptr; }
+    // Fully no-op: any synchronous msquic teardown call (ConnectionClose,
+    // ListenerClose, RegistrationClose, MsQuicClose) races with workers
+    // still draining callbacks at this scale and ends in deadlock or
+    // glibc double-free. The harness is exiting; the OS reclaims fds and
+    // memory at process termination.
   }
 
   const char* name() const override { return "msquic"; }

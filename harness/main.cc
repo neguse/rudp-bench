@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -126,5 +127,12 @@ int main(int argc, const char* argv[]) {
           : rudp_bench::run_client(*adapter, cfg);
 
   write_output(row);
+  // msquic workers can still hold callback contexts pointing into the
+  // adapter when main returns; the C++ destructor chain then UAFs into
+  // them and trips glibc's double-free check. Skip destructors entirely
+  // and let the OS reclaim memory at process exit.
+  if (cfg.library == "msquic") {
+    std::_Exit(0);
+  }
   return 0;
 }
