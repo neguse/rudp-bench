@@ -55,6 +55,12 @@ def load_rel(loss: int, conns: int) -> dict[str, dict]:
     return rows
 
 
+def load_mix(loss: int, conns: int) -> dict[str, dict]:
+    rows = load(DATA / f"mix_l{loss}_{conns}.csv")
+    rows.update(load(DATA / f"mix_n1_l{loss}_{conns}.csv"))
+    return rows
+
+
 def cell(row: dict, key: str, allow_invalid: bool = False) -> float | None:
     if row is None:
         return None
@@ -208,11 +214,46 @@ def plot_unrel_scale():
     plt.close(fig)
 
 
+def plot_hol():
+    """HoL leakage: mix の unreliable u99 を unrel-only u99 と比較."""
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True)
+    # mini_rudp, enet を共通 lib として、gns/msquic も追加
+    hol_libs = ["mini_rudp", "enet", "gns", "msquic"]
+    losses = [1, 5]
+    x_labels = ["unrel-only/1%", "mix/1%", "unrel-only/5%", "mix/5%"]
+    for ax, conns in zip(axes, (50, 200)):
+        rows_unrel = {ls: load_unrel(ls, conns) for ls in losses}
+        rows_mix = {ls: load_mix(ls, conns) for ls in losses}
+        values = {lib: [] for lib in hol_libs}
+        rows_by_x = []
+        for ls in losses:
+            for src in (rows_unrel[ls], rows_mix[ls]):
+                rows_by_x.append(src)
+                for lib in hol_libs:
+                    row = src.get(lib)
+                    v = cell(row, "rtt_u_p99_us", allow_invalid=True)
+                    values[lib].append(v / 1000.0 if v else 0.0)
+        colors = {lib: LIB_COLOR[lib] for lib in hol_libs}
+        grouped_bars(ax, x_labels, hol_libs, values, colors, bar_w=0.2)
+        ax.set_title(f"conns={conns}")
+        ax.set_yscale("log")
+        ax.set_ylim(50, 5000)
+        ax.grid(True, axis="y", alpha=0.3, which="both")
+        ax.axhline(67, color="black", lw=0.5, ls=":", label="baseline 67ms")
+    axes[0].set_ylabel("unreliable RTT p99 (ms, log)")
+    axes[0].legend(loc="upper left", framealpha=0.9, ncol=2, fontsize=8)
+    fig.suptitle("HoL leakage: unreliable RTT p99 with vs without reliable traffic")
+    fig.tight_layout()
+    fig.savefig(PLOTS / "hol_leakage.png", dpi=140)
+    plt.close(fig)
+
+
 def main() -> None:
     PLOTS.mkdir(exist_ok=True)
     plot_dr_grid()
     plot_p99_grid()
     plot_unrel_scale()
+    plot_hol()
     print("wrote:", sorted(p.name for p in PLOTS.glob("*.png")))
 
 
