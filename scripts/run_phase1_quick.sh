@@ -28,6 +28,7 @@ CONNS=10
 RATE_R=50
 RATE_U=0
 CLIENT_PROCS=1
+RAMP_UP_MS=10000
 
 for arg in "$@"; do
   case "$arg" in
@@ -48,6 +49,7 @@ for arg in "$@"; do
     --rate-r=*) RATE_R="${arg#*=}" ;;
     --rate-u=*) RATE_U="${arg#*=}" ;;
     --client-procs=*) CLIENT_PROCS="${arg#*=}" ;;
+    --ramp-up-ms=*) RAMP_UP_MS="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
@@ -118,6 +120,7 @@ run_timeout() {
       --working-directory="$PWD" \
       -p AllowedCPUs="$cpu" -p CPUWeight=10000 \
       -p User="$USER" \
+      -p LimitCORE=infinity \
       -p RuntimeMaxSec="${timeout_s}s" \
       --quiet --wait --pipe --collect \
       "$@"
@@ -167,7 +170,7 @@ for lib in ${LIBS//,/ }; do
       C_STATUS=127
     else
       run_timeout "$SERVER_CPU" "$TIMEOUT_S" server "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
-        --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" \
+        --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --loss="$LOSS" \
         --size="$SIZE" --conns="$CONNS" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \
         >"$S_STDOUT" 2>"$S_STDERR" &
       SPID=$!
@@ -185,7 +188,7 @@ for lib in ${LIBS//,/ }; do
     fi
   else
     run_timeout "$SERVER_CPU" 60 server "$BIN" --library="$lib" --role=server --port="$PORT" \
-      --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup=2 --loss="$LOSS" \
+      --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup=2 --ramp-up-ms="$RAMP_UP_MS" --loss="$LOSS" \
       --size="$SIZE" --conns="$CONNS" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \
       >"$S_STDOUT" 2>"$S_STDERR" &
     SPID=$!
@@ -217,7 +220,7 @@ for lib in ${LIBS//,/ }; do
         run_timeout "$CLIENT_CPU" 60 client "$BIN" --library="$lib" --role=client \
           --host=127.0.0.1 --port="$PORT" \
           --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS_I" \
-          --duration="$DURATION" --warmup=2 --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
+          --duration="$DURATION" --warmup=2 --ramp-up-ms="$RAMP_UP_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
           --out="$C_OUT_I" --bins-r-out="$BINS_R_I" --bins-u-out="$BINS_U_I" \
           >"$C_STDOUT_I" 2>"$C_STDERR_I" &
         CPIDS+=("$!")

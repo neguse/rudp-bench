@@ -21,6 +21,11 @@ struct ScenarioConfig {
   uint32_t conns = 1;
   uint32_t duration_s = 30;
   uint32_t warmup_s = 2;
+  // 接続確立を一気にせず一定時間に分散させる ramp-up 時間。conns 個の connect を
+  // 等間隔で発行するので、各 connect の間隔は ramp_up_ms / conns。lib によっては
+  // 全 conn 同時 handshake が listener / TLS スタックで詰まるため、200conn では
+  // ~10s 程度確保した方が安定する。
+  uint32_t ramp_up_ms = 0;
   double loss_pct = 0.0;          // メタデータ(tc は外側で設定済み前提)
   ServerMode mode = ServerMode::Echo;  // echo: 1:1 / broadcast: 1:N (全 conn)
   IdlePolicy idle_policy = IdlePolicy::Spin;

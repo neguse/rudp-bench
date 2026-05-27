@@ -40,6 +40,7 @@ std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]) {
     else if (starts_with(a, "--conns=")) c.conns = std::atoi(value(a, "--conns="));
     else if (starts_with(a, "--duration=")) c.duration_s = std::atoi(value(a, "--duration="));
     else if (starts_with(a, "--warmup=")) c.warmup_s = std::atoi(value(a, "--warmup="));
+    else if (starts_with(a, "--ramp-up-ms=")) c.ramp_up_ms = std::atoi(value(a, "--ramp-up-ms="));
     else if (starts_with(a, "--loss=")) c.loss_pct = std::atof(value(a, "--loss="));
     else if (starts_with(a, "--mode=")) {
       const char* v = value(a, "--mode=");

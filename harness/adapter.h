@@ -8,6 +8,13 @@
 
 namespace rudp_bench {
 
+// adapter が観測した接続イベントの累計。観測できない lib は default {0,0,0}。
+struct ConnectionStats {
+  uint32_t connected_peak = 0;        // 同時 connected の最大数(成功した最大数)
+  uint32_t shutdown_by_transport = 0; // bench 中に transport 層で切られた数
+  uint32_t shutdown_by_peer = 0;      // peer から close 通告された数
+};
+
 // 失敗時 -1。recv で out_conn_id にメッセージ送信元の conn_id が入る。
 struct Adapter {
   virtual ~Adapter() = default;
@@ -38,6 +45,8 @@ struct Adapter {
   }
   virtual const char* flush_policy(bool /*reliable*/) const { return "immediate"; }
   virtual bool encryption_on() const = 0;
+  // 観測可能な adapter は connection event を記録して返す。デフォルトは全 0。
+  virtual ConnectionStats connection_stats() const { return {}; }
 };
 
 }  // namespace rudp_bench

@@ -17,7 +17,9 @@ void write_header(std::ostream& os) {
      << "client_missed_pacing,client_attempted,client_accepted,"
      << "client_attempted_ratio,client_accepted_ratio,"
      << "client_recv_drained_p99,client_recv_drained_max,"
-     << "client_outstanding_max,client_tick_ok,delivery_dedup_policy\n";
+     << "client_outstanding_max,client_tick_ok,"
+     << "conn_peak,conn_disc_transport,conn_disc_peer,"
+     << "delivery_dedup_policy\n";
 }
 
 void write_row(std::ostream& os, const CsvRow& r) {
@@ -42,6 +44,8 @@ void write_row(std::ostream& os, const CsvRow& r) {
      << r.client_accepted_ratio << ','
      << r.client_recv_drained_p99 << ',' << r.client_recv_drained_max << ','
      << r.client_outstanding_max << ',' << r.client_tick_ok << ','
+     << r.conn_peak << ',' << r.conn_disc_transport << ','
+     << r.conn_disc_peer << ','
      << r.delivery_dedup_policy << '\n';
 }
 

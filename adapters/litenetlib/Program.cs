@@ -99,6 +99,7 @@ static Config? ParseArgs(string[] args)
         else if (arg.StartsWith("--conns=")) cfg.Conns = uint.Parse(arg["--conns=".Length..]);
         else if (arg.StartsWith("--duration=")) cfg.DurationS = uint.Parse(arg["--duration=".Length..]);
         else if (arg.StartsWith("--warmup=")) cfg.WarmupS = uint.Parse(arg["--warmup=".Length..]);
+        else if (arg.StartsWith("--ramp-up-ms=")) cfg.RampUpMs = uint.Parse(arg["--ramp-up-ms=".Length..]);
         else if (arg.StartsWith("--loss=")) cfg.Loss = double.Parse(arg["--loss=".Length..], CultureInfo.InvariantCulture);
         else if (arg.StartsWith("--mode="))
         {
@@ -240,11 +241,23 @@ static CsvRow RunClient(Config cfg)
         managers[i] = manager;
     }
 
-    // 全コネクション発行
+    // 全コネクション発行(必要なら ramp-up で等間隔分散)
     long tConnectBeginTicks = Stopwatch.GetTimestamp();
+    long rampIntervalTicks = (cfg.RampUpMs > 0 && cfg.Conns > 0)
+        ? (long)cfg.RampUpMs * Stopwatch.Frequency / 1000L / cfg.Conns
+        : 0L;
     for (uint i = 0; i < cfg.Conns; i++)
     {
         peers[i] = managers[i].Connect(cfg.Host, cfg.Port, "rudpbench");
+        if (rampIntervalTicks > 0 && i + 1 < cfg.Conns)
+        {
+            long dueTicks = tConnectBeginTicks + rampIntervalTicks * (i + 1);
+            while (Stopwatch.GetTimestamp() < dueTicks)
+            {
+                for (uint j = 0; j <= i; j++) managers[j].PollEvents();
+                Thread.Sleep(1);
+            }
+        }
     }
 
     // 全コネクションが ready になるまで poll
@@ -496,6 +509,7 @@ class Config
     public uint Conns = 1;
     public uint DurationS = 30;
     public uint WarmupS = 5; // spec: JIT/GC ウォームアップのため 5 秒デフォルト
+    public uint RampUpMs = 0; // connect を等間隔に分散する時間。0 で即時(従来挙動)
     public double Loss = 0.0;
     public string Mode = "echo";  // "echo" / "broadcast"
     public string IdlePolicy = "spin"; // "spin" / "adaptive"

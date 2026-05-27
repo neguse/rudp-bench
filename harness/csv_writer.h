@@ -46,6 +46,9 @@ struct CsvRow {
   uint64_t client_recv_drained_max = 0;
   uint64_t client_outstanding_max = 0;
   uint32_t client_tick_ok = 0;
+  uint32_t conn_peak = 0;            // adapter 観測のピーク同時 connected
+  uint32_t conn_disc_transport = 0;  // bench 中に transport で切れた数
+  uint32_t conn_disc_peer = 0;       // peer から close 通告された数
   std::string delivery_dedup_policy = "sliding_window_65536_per_conn";
 };
 

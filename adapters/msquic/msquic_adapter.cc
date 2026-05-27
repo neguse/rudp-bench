@@ -5,7 +5,9 @@
 #include <msquic.h>
 
 #include <arpa/inet.h>
+#include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -19,10 +21,17 @@ namespace {
 
 const QUIC_API_TABLE* MsQuic = nullptr;
 
+#define MSQUIC_DIE(msg, status) do { \
+  std::fprintf(stderr, "msquic_adapter: " msg " status=0x%x at %s:%d\n", \
+               (unsigned)(status), __FILE__, __LINE__); \
+  std::fflush(stderr); \
+  std::abort(); \
+} while (0)
+
 void ensure_msquic_init() {
   static std::once_flag flag;
   std::call_once(flag, []() {
-    if (QUIC_FAILED(MsQuicOpen2(&MsQuic))) std::abort();
+    if (QUIC_STATUS s = MsQuicOpen2(&MsQuic); QUIC_FAILED(s)) MSQUIC_DIE("MsQuicOpen2", s);
     std::atexit([]() { MsQuicClose(MsQuic); });
   });
 }
@@ -72,7 +81,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
     QUIC_REGISTRATION_CONFIG reg_cfg = {"rudp-bench-srv", QUIC_EXECUTION_PROFILE_LOW_LATENCY};
     QUIC_STATUS status;
     status = MsQuic->RegistrationOpen(&reg_cfg, &reg_);
-    if (QUIC_FAILED(status)) std::abort();
+    if (QUIC_FAILED(status)) MSQUIC_DIE("server RegistrationOpen", status);
 
     QUIC_SETTINGS settings{};
     settings.IdleTimeoutMs = 30000;
@@ -85,7 +94,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
     settings.IsSet.DatagramReceiveEnabled = TRUE;
 
     status = MsQuic->ConfigurationOpen(reg_, &Alpn, 1, &settings, sizeof(settings), nullptr, &config_);
-    if (QUIC_FAILED(status)) std::abort();
+    if (QUIC_FAILED(status)) MSQUIC_DIE("server ConfigurationOpen", status);
 
     QUIC_CERTIFICATE_FILE cert_file;
     cert_file.CertificateFile = "/tmp/msquic_cert.pem";
@@ -97,10 +106,10 @@ class MsquicAdapter : public rudp_bench::Adapter {
     cred_cfg.Flags = QUIC_CREDENTIAL_FLAG_NONE;
 
     status = MsQuic->ConfigurationLoadCredential(config_, &cred_cfg);
-    if (QUIC_FAILED(status)) std::abort();
+    if (QUIC_FAILED(status)) MSQUIC_DIE("server ConfigurationLoadCredential", status);
 
     status = MsQuic->ListenerOpen(reg_, listener_cb, this, &listener_);
-    if (QUIC_FAILED(status)) std::abort();
+    if (QUIC_FAILED(status)) MSQUIC_DIE("server ListenerOpen", status);
 
     QUIC_ADDR addr{};
     std::memset(&addr, 0, sizeof(addr));
@@ -108,13 +117,13 @@ class MsquicAdapter : public rudp_bench::Adapter {
     QuicAddrSetPort(&addr, port);
 
     status = MsQuic->ListenerStart(listener_, &Alpn, 1, &addr);
-    if (QUIC_FAILED(status)) std::abort();
+    if (QUIC_FAILED(status)) MSQUIC_DIE("server ListenerStart", status);
   }
 
   uint32_t client_connect(const char* host, uint16_t port) override {
     if (!reg_) {
       QUIC_REGISTRATION_CONFIG reg_cfg = {"rudp-bench-cli", QUIC_EXECUTION_PROFILE_LOW_LATENCY};
-      if (QUIC_FAILED(MsQuic->RegistrationOpen(&reg_cfg, &reg_))) std::abort();
+      if (QUIC_STATUS s = MsQuic->RegistrationOpen(&reg_cfg, &reg_); QUIC_FAILED(s)) MSQUIC_DIE("client RegistrationOpen", s);
 
       QUIC_SETTINGS settings{};
       settings.IdleTimeoutMs = 30000;
@@ -126,22 +135,25 @@ class MsquicAdapter : public rudp_bench::Adapter {
       settings.DatagramReceiveEnabled = TRUE;
       settings.IsSet.DatagramReceiveEnabled = TRUE;
 
-      if (QUIC_FAILED(MsQuic->ConfigurationOpen(
-              reg_, &Alpn, 1, &settings, sizeof(settings), nullptr, &config_)))
-        std::abort();
+      if (QUIC_STATUS s = MsQuic->ConfigurationOpen(
+              reg_, &Alpn, 1, &settings, sizeof(settings), nullptr, &config_);
+          QUIC_FAILED(s))
+        MSQUIC_DIE("client ConfigurationOpen", s);
 
       QUIC_CREDENTIAL_CONFIG cred_cfg{};
       cred_cfg.Type = QUIC_CREDENTIAL_TYPE_NONE;
       cred_cfg.Flags = QUIC_CREDENTIAL_FLAG_CLIENT |
                         QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
 
-      if (QUIC_FAILED(MsQuic->ConfigurationLoadCredential(config_, &cred_cfg)))
-        std::abort();
+      if (QUIC_STATUS s = MsQuic->ConfigurationLoadCredential(config_, &cred_cfg);
+          QUIC_FAILED(s))
+        MSQUIC_DIE("client ConfigurationLoadCredential", s);
     }
 
     HQUIC conn = nullptr;
-    if (QUIC_FAILED(MsQuic->ConnectionOpen(reg_, connection_cb, this, &conn)))
-      std::abort();
+    if (QUIC_STATUS s = MsQuic->ConnectionOpen(reg_, connection_cb, this, &conn);
+        QUIC_FAILED(s))
+      MSQUIC_DIE("client ConnectionOpen", s);
 
     uint32_t id;
     {
@@ -151,9 +163,11 @@ class MsquicAdapter : public rudp_bench::Adapter {
       conn_to_id_[conn] = id;
     }
 
-    if (QUIC_FAILED(MsQuic->ConnectionStart(
-            conn, config_, QUIC_ADDRESS_FAMILY_UNSPEC, host, port)))
-      std::abort();
+    if (QUIC_STATUS s = MsQuic->ConnectionStart(
+            conn, config_, QUIC_ADDRESS_FAMILY_UNSPEC, host, port);
+        QUIC_FAILED(s)) {
+      MSQUIC_DIE("client ConnectionStart", s);
+    }
 
     return id;
   }
@@ -246,6 +260,11 @@ class MsquicAdapter : public rudp_bench::Adapter {
   QUIC_STATUS on_connection_event(HQUIC conn, QUIC_CONNECTION_EVENT* ev) {
     switch (ev->Type) {
       case QUIC_CONNECTION_EVENT_CONNECTED: {
+        uint32_t now = connected_now_.fetch_add(1) + 1;
+        uint32_t peak = connected_peak_.load();
+        while (now > peak &&
+               !connected_peak_.compare_exchange_weak(peak, now)) {
+        }
         std::lock_guard<std::mutex> lock(mtx_);
         auto it = conn_to_id_.find(conn);
         if (it != conn_to_id_.end()) connected_ids_.insert(it->second);
@@ -292,7 +311,10 @@ class MsquicAdapter : public rudp_bench::Adapter {
       }
 
       case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+        shutdown_by_transport_.fetch_add(1);
+        break;
       case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+        shutdown_by_peer_.fetch_add(1);
         break;
 
       case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
@@ -300,7 +322,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
         auto it = conn_to_id_.find(conn);
         if (it != conn_to_id_.end()) {
           uint32_t id = it->second;
-          connected_ids_.erase(id);
+          if (connected_ids_.erase(id)) connected_now_.fetch_sub(1);
           id_to_conn_.erase(id);
           reliable_stream_by_conn_.erase(conn);
           conn_to_id_.erase(it);
@@ -478,7 +500,19 @@ class MsquicAdapter : public rudp_bench::Adapter {
   std::unordered_set<uint32_t> connected_ids_;
   uint32_t next_id_ = 1;
 
+  // 接続イベントの累計(connection_stats() で読み取る)
+  std::atomic<uint32_t> connected_peak_{0};
+  std::atomic<uint32_t> connected_now_{0};
+  std::atomic<uint32_t> shutdown_by_transport_{0};
+  std::atomic<uint32_t> shutdown_by_peer_{0};
+
   rudp_bench::ReusableInboundQueue inbox_;
+
+ public:
+  rudp_bench::ConnectionStats connection_stats() const override {
+    return {connected_peak_.load(), shutdown_by_transport_.load(),
+            shutdown_by_peer_.load()};
+  }
 };
 
 }  // namespace

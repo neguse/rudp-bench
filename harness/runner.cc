@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <thread>
@@ -210,12 +211,23 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   DeliveryTracker dt;
   ClientTickStats tick;
 
-  // connect all
+  // connect all (optionally rate-limited so listener / TLS stack can absorb).
   std::vector<uint32_t> ids;
   ids.reserve(cfg.conns);
   auto t_connect_begin = clock::now();
+  const std::chrono::microseconds ramp_interval =
+      (cfg.ramp_up_ms > 0 && cfg.conns > 0)
+          ? std::chrono::microseconds(static_cast<int64_t>(cfg.ramp_up_ms) * 1000 / cfg.conns)
+          : std::chrono::microseconds(0);
   for (uint32_t i = 0; i < cfg.conns; ++i) {
     ids.push_back(a.client_connect(cfg.host.c_str(), cfg.port));
+    if (ramp_interval.count() > 0 && i + 1 < cfg.conns) {
+      auto sleep_until = t_connect_begin + ramp_interval * (i + 1);
+      while (clock::now() < sleep_until) {
+        a.poll();
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      }
+    }
   }
   for (auto id : ids) {
     while (!a.is_connected(id)) {
@@ -353,6 +365,8 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
     }
   }
   ps.end();
+  // close() は自己 shutdown を発生させるので、観測値はその前に snapshot。
+  ConnectionStats cs = a.connection_stats();
   a.close();
 
   bool reliable_active = cfg.rate_r > 0;
@@ -409,6 +423,9 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.client_recv_drained_p99 = tick.recv_drained.percentile_per_mille(990);
   row.client_recv_drained_max = tick.recv_drained.max();
   row.client_outstanding_max = tick.outstanding_max;
+  row.conn_peak = cs.connected_peak;
+  row.conn_disc_transport = cs.shutdown_by_transport;
+  row.conn_disc_peer = cs.shutdown_by_peer;
   row.delivery_dedup_policy = DeliveryTracker::dedup_policy();
   // tick_ok means "this run produced trustworthy data", not "every send was
   // perfectly on time". Functional correctness is `attempted == target` and
