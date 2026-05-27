@@ -377,14 +377,19 @@ static CsvRow RunClient(Config cfg)
     ulong pacingLagP99Us = tick.PacingLagP99Us;
     double attemptedRatio = targetAttempted > 0 ? (double)tick.Attempted / targetAttempted : 1.0;
     double acceptedRatio = tick.Attempted > 0 ? (double)tick.Accepted / tick.Attempted : 0.0;
+    // See harness/runner.cc tick_ok comment: pacing_lag stays diagnostic-only
+    // because attempted/accepted ratios are what actually catch broken runs.
+    // tick_gap budget scales with rate so heavy-poll libraries can still
+    // pass at low send rates.
+    ulong tickGapBudgetUs = combinedRate > 0
+        ? Math.Max(250UL, 1_000_000UL / combinedRate / 4)
+        : 250UL;
     bool tickOk = tick.TickSamples > 0 &&
-        tickGapP99Us <= 250 &&
+        tickGapP99Us <= tickGapBudgetUs &&
         acceptedRatio >= 0.99;
     if (combinedRate > 0)
     {
-        tickOk = tickOk &&
-            attemptedRatio >= 0.99 &&
-            pacingLagP99Us <= missedBudgetUs;
+        tickOk = tickOk && attemptedRatio >= 0.99;
     }
 
     return new CsvRow

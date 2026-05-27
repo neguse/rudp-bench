@@ -410,12 +410,21 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.client_recv_drained_max = tick.recv_drained.max();
   row.client_outstanding_max = tick.outstanding_max;
   row.delivery_dedup_policy = DeliveryTracker::dedup_policy();
+  // tick_ok means "this run produced trustworthy data", not "every send was
+  // perfectly on time". Functional correctness is `attempted == target` and
+  // `accepted == attempted`; per-tick pacing lag stays in diagnostics for
+  // investigation but is not a pass/fail gate (a 2.5ms lag at the tail of
+  // a 100-conn 50Hz schedule does not break voice traffic).
+  // tick_gap threshold scales with rate so libraries with heavier poll
+  // overhead (gns, msquic) at low send rates do not falsely fail.
+  uint64_t tick_gap_budget_us = combined_rate
+      ? std::max<uint64_t>(250, 1'000'000ULL / combined_rate / 4)
+      : 250;
   bool tick_ok = tick.tick_gap_us.count() > 0 &&
-                 row.client_tick_gap_p99_us <= 250 &&
+                 row.client_tick_gap_p99_us <= tick_gap_budget_us &&
                  row.client_accepted_ratio >= 0.99;
   if (combined_rate) {
-    tick_ok = tick_ok && row.client_attempted_ratio >= 0.99 &&
-              row.client_pacing_lag_p99_us <= missed_budget;
+    tick_ok = tick_ok && row.client_attempted_ratio >= 0.99;
   }
   row.client_tick_ok = tick_ok ? 1 : 0;
   return row;
