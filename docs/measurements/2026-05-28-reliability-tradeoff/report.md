@@ -215,9 +215,29 @@ other lib は期待通り。msquic datagram は internal queue / pacing で cong
 - ramp は msquic 専用、他 lib に入れると逆効果(enet で実測)
 - combined RTT histogram の罠は per-channel hist で回避済み
 
+## 再現性(2nd run)
+
+2026-05-29 に同条件で 2 ラン目を実施(現 data/ の数値はこの 2nd run)。観察:
+
+| lib | 再現性 | 備考 |
+|---|---|---|
+| raw_udp / mini_rudp / enet | 高 | 各 cell の dr 差 < 0.005、r99 差 < 5% |
+| gns | 高 | 同上(200conn × unrel × 5% で 0.905 → 0.889 と微小化) |
+| msquic | **低** | run 間で dr が大きく揺れる(下記) |
+
+msquic の run 間ばらつき(1st → 2nd):
+- 50conn × unrel × 5%: 0.905 → **0.849**
+- 50conn × rel × 5%: 1.003 → **0.939**
+- 200conn × rel × 1%: 0.979 → **0.938**
+- 200conn × mix × 5%: 0.878 → **0.707**
+
+msquic の datagram/loss-recovery 経路は **run ごとに stochastic な drop** が起きる。
+他 lib は再現性ありなので、msquic 自身の特性(internal pacing / congestion control の
+非決定性)と判断。比較結論(HoL / 200conn 限界 / lib ranking)は再現する。
+
 ## 生データ
 
-`./data/` 配下に raw CSV を保存(2026-05-28 再ラン分で上書き済)。
+`./data/` 配下に raw CSV を保存(2nd run 分で上書き済、2026-05-29)。
 プロット再生成は `./make_plots.py` を直接実行(matplotlib + pandas 必要)。
 
 ## 関連

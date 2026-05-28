@@ -1,3 +1,3 @@
 run_id,scenario_id,library,valid,invalid_reason,delivery_ratio,rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,server_cpu_pct
-20260528T022522Z,gns_r50_u50_64_200_echo_0_spin,gns,0,client_tick,0.9536,64800,146700,205400,56100,67900,72600,138.89
-20260528T022522Z,msquic_r50_u50_64_200_echo_0_spin,msquic,1,ok,0.8779,62500,132200,177200,55600,70600,73800,182.79
+20260528T162719Z,gns_r50_u50_64_200_echo_0_spin,gns,0,client_tick,0.9536,64500,146700,205900,56000,67900,72500,138.47
+20260528T162719Z,msquic_r50_u50_64_200_echo_0_spin,msquic,1,ok,0.7071,61800,131800,175100,55600,70500,73500,168.11
