@@ -1,4 +1,4 @@
 run_id,scenario_id,library,valid,invalid_reason,delivery_ratio,rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,server_cpu_pct
-20260527T052253Z,raw_udp_r0_u50_100_10_echo_0_spin,raw_udp,1,ok,0.9024,0,0,0,50600,62200,66900,99.99
-20260527T052253Z,mini_rudp_r0_u50_100_10_echo_0_spin,mini_rudp,1,ok,0.9008,0,0,0,50600,62400,66700,100.00
-20260527T052253Z,enet_r0_u50_100_10_echo_0_spin,enet,1,ok,0.9008,0,0,0,50800,62900,67200,99.98
+20260528T021303Z,raw_udp_r0_u50_100_10_echo_0_spin,raw_udp,1,ok,0.9064,0,0,0,50700,62600,67100,100.00
+20260528T021303Z,mini_rudp_r0_u50_100_10_echo_0_spin,mini_rudp,1,ok,0.9076,0,0,0,50600,61900,66500,100.00
+20260528T021303Z,enet_r0_u50_100_10_echo_0_spin,enet,1,ok,0.9007,0,0,0,51000,63100,67100,100.00

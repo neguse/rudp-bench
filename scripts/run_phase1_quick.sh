@@ -28,7 +28,12 @@ CONNS=10
 RATE_R=50
 RATE_U=0
 CLIENT_PROCS=1
-RAMP_UP_MS=10000
+# Per-lib ramp: msquic alone needs spread-out connects (its workers race when
+# all 200 conns handshake at once). Other libs degrade when ramp_up_ms > 0
+# because they busy-poll the adapter for the ramp duration, which floods
+# internal queues (enet observed dropping 38%+ at ramp=10s, dr 0.62 vs 0.98).
+RAMP_UP_MS_DEFAULT=0
+RAMP_UP_MS_MSQUIC=10000
 
 for arg in "$@"; do
   case "$arg" in
@@ -49,7 +54,7 @@ for arg in "$@"; do
     --rate-r=*) RATE_R="${arg#*=}" ;;
     --rate-u=*) RATE_U="${arg#*=}" ;;
     --client-procs=*) CLIENT_PROCS="${arg#*=}" ;;
-    --ramp-up-ms=*) RAMP_UP_MS="${arg#*=}" ;;
+    --ramp-up-ms=*) RAMP_UP_MS_DEFAULT="${arg#*=}"; RAMP_UP_MS_MSQUIC="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
@@ -145,6 +150,12 @@ for lib in ${LIBS//,/ }; do
   if [ "$lib" = "litenetlib" ] && [ "$CLIENT_PROCS" -gt 1 ]; then
     echo "skipping litenetlib: --client-procs > 1 unsupported (no bin output)" >&2
     continue
+  fi
+
+  if [ "$lib" = "msquic" ]; then
+    RAMP_UP_MS="$RAMP_UP_MS_MSQUIC"
+  else
+    RAMP_UP_MS="$RAMP_UP_MS_DEFAULT"
   fi
 
   SCENARIO_ID="${lib}_r${RATE_R}_u${RATE_U}_${SIZE}_${CONNS}_${MODE}_${LOSS}_${IDLE}"
