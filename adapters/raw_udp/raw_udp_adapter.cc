@@ -9,6 +9,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -16,6 +19,8 @@
 namespace {
 
 constexpr size_t MAX_UDP_PAYLOAD = 65507;
+constexpr int UDP_SOCKET_BUFFER_BYTES = 256 * 1024;
+constexpr ssize_t RECV_WOULD_BLOCK = -2;
 
 struct Conn {
   int fd = -1;
@@ -26,32 +31,93 @@ uint64_t addr_key(const sockaddr_in& a) {
   return (static_cast<uint64_t>(a.sin_addr.s_addr) << 32) | static_cast<uint64_t>(a.sin_port);
 }
 
+[[noreturn]] void die_errno(const char* what) {
+  std::perror(what);
+  std::abort();
+}
+
+[[noreturn]] void die_msg(const char* what) {
+  std::fprintf(stderr, "%s\n", what);
+  std::abort();
+}
+
 void set_nonblock(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
-  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  if (flags < 0) die_errno("fcntl(F_GETFL)");
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) die_errno("fcntl(F_SETFL)");
+}
+
+void tune_socket_buffers(int fd) {
+  int bytes = UDP_SOCKET_BUFFER_BYTES;
+  ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
+  ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
+}
+
+int make_udp_socket() {
+  int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd < 0) die_errno("socket(AF_INET, SOCK_DGRAM)");
+  tune_socket_buffers(fd);
+  set_nonblock(fd);
+  return fd;
+}
+
+ssize_t recv_datagram(int fd, void* buf, size_t cap, sockaddr_in* src) {
+  for (;;) {
+    socklen_t sl = sizeof(*src);
+    ssize_t n = ::recvfrom(fd, buf, cap, MSG_TRUNC,
+                           reinterpret_cast<sockaddr*>(src), &sl);
+    if (n >= 0) return n;
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return RECV_WOULD_BLOCK;
+    return -1;
+  }
+}
+
+ssize_t recv_client_datagram(int fd, void* buf, size_t cap) {
+  for (;;) {
+    ssize_t n = ::recv(fd, buf, cap, 0);
+    if (n >= 0) return n;
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return -1;
+    return -1;
+  }
+}
+
+int send_datagram(int fd, const sockaddr_in& peer, const void* data, size_t len) {
+  for (;;) {
+    ssize_t n = ::sendto(fd, data, len, 0,
+                         reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
+    if (n == static_cast<ssize_t>(len)) return 0;
+    if (n < 0 && errno == EINTR) continue;
+    return -1;
+  }
 }
 
 class RawUdpAdapter : public rudp_bench::Adapter {
  public:
   void server_listen(uint16_t port) override {
-    server_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+    server_fd_ = make_udp_socket();
     int reuse = 1;
-    ::setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    if (::setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) != 0) {
+      die_errno("setsockopt(SO_REUSEADDR)");
+    }
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);
     a.sin_port = htons(port);
-    ::bind(server_fd_, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-    set_nonblock(server_fd_);
+    if (::bind(server_fd_, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) {
+      die_errno("bind(raw_udp)");
+    }
   }
 
   uint32_t client_connect(const char* host, uint16_t port) override {
     Conn c;
-    c.fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    set_nonblock(c.fd);
+    c.fd = make_udp_socket();
     c.peer.sin_family = AF_INET;
     c.peer.sin_port = htons(port);
-    inet_pton(AF_INET, host, &c.peer.sin_addr);
+    if (inet_pton(AF_INET, host, &c.peer.sin_addr) != 1) {
+      die_msg("inet_pton(raw_udp): invalid IPv4 address");
+    }
     uint32_t id = next_id_++;
     conns_[id] = c;
     pollfds_.push_back(pollfd{c.fd, POLLIN, 0});
@@ -62,28 +128,23 @@ class RawUdpAdapter : public rudp_bench::Adapter {
   bool is_connected(uint32_t) override { return true; }
 
   int send(uint32_t conn_id, const void* data, size_t len, bool /*reliable*/) override {
+    if (len > MAX_UDP_PAYLOAD) return -1;
     if (server_fd_ >= 0) {
       auto it = peer_by_id_.find(conn_id);
       if (it == peer_by_id_.end()) return -1;
-      ssize_t n = ::sendto(server_fd_, data, len, 0,
-                          reinterpret_cast<sockaddr*>(&it->second), sizeof(it->second));
-      return (n == static_cast<ssize_t>(len)) ? 0 : -1;
+      return send_datagram(server_fd_, it->second, data, len);
     }
     auto it = conns_.find(conn_id);
     if (it == conns_.end()) return -1;
-    ssize_t n = ::sendto(it->second.fd, data, len, 0,
-                        reinterpret_cast<sockaddr*>(&it->second.peer),
-                        sizeof(it->second.peer));
-    return (n == static_cast<ssize_t>(len)) ? 0 : -1;
+    return send_datagram(it->second.fd, it->second.peer, data, len);
   }
 
   int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
     if (server_fd_ >= 0) {
       sockaddr_in src{};
-      socklen_t sl = sizeof(src);
-      ssize_t n = ::recvfrom(server_fd_, buf, cap, 0,
-                            reinterpret_cast<sockaddr*>(&src), &sl);
-      if (n <= 0) return 0;
+      ssize_t n = recv_datagram(server_fd_, buf, cap, &src);
+      if (n == RECV_WOULD_BLOCK) return 0;
+      if (n < 0) return -1;
       uint64_t k = addr_key(src);
       auto it = id_by_key_.find(k);
       uint32_t id;
@@ -93,6 +154,11 @@ class RawUdpAdapter : public rudp_bench::Adapter {
         peer_by_id_[id] = src;
       } else {
         id = it->second;
+      }
+      if (static_cast<size_t>(n) > cap) {
+        *out_len = static_cast<size_t>(n);
+        *out_conn_id = id;
+        return -1;
       }
       *out_len = static_cast<size_t>(n);
       *out_conn_id = id;
@@ -111,8 +177,8 @@ class RawUdpAdapter : public rudp_bench::Adapter {
       if ((pollfds_[i].revents & POLLIN) == 0) continue;
       --ready;
       for (;;) {
-        ssize_t n = ::recv(pollfds_[i].fd, pkt, sizeof(pkt), 0);
-        if (n <= 0) break;
+        ssize_t n = recv_client_datagram(pollfds_[i].fd, pkt, sizeof(pkt));
+        if (n < 0) break;
         inbox_.enqueue(poll_conn_ids_[i], pkt, static_cast<size_t>(n));
       }
     }
@@ -122,9 +188,12 @@ class RawUdpAdapter : public rudp_bench::Adapter {
     if (server_fd_ >= 0) { ::close(server_fd_); server_fd_ = -1; }
     for (auto& [id, c] : conns_) ::close(c.fd);
     conns_.clear();
+    id_by_key_.clear();
+    peer_by_id_.clear();
     pollfds_.clear();
     poll_conn_ids_.clear();
     inbox_.clear();
+    next_id_ = 1;
   }
 
   const char* name() const override { return "raw_udp"; }

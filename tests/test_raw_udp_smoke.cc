@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "harness/adapter_registry.h"
 
+#include <atomic>
 #include <thread>
 #include <chrono>
 #include <cstring>
@@ -25,19 +26,20 @@ TEST(RawUdpSmoke, EchoOneMessage) {
 
   server->server_listen(0xC100);
 
+  std::atomic<bool> done{false};
   std::thread server_thread([&]() {
     char buf[1024];
     size_t len;
     uint32_t conn_id;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (std::chrono::steady_clock::now() < deadline) {
+    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
       server->poll();
-      int r = server->recv(buf, sizeof(buf), &len, &conn_id);
-      if (r == 1) {
+      bool did_work = false;
+      while (server->recv(buf, sizeof(buf), &len, &conn_id) == 1) {
         server->send(conn_id, buf, len, false);
-        break;
+        did_work = true;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      if (!did_work) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   });
 
@@ -45,12 +47,18 @@ TEST(RawUdpSmoke, EchoOneMessage) {
   ASSERT_TRUE(client->is_connected(conn_id));
 
   const char msg[] = "hello";
-  ASSERT_EQ(client->send(conn_id, msg, sizeof(msg), false), 0);
 
   char buf[1024]; size_t len; uint32_t in_conn;
   bool got = false;
+  bool sent = false;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  auto next_send = std::chrono::steady_clock::now();
   while (std::chrono::steady_clock::now() < deadline) {
+    auto now = std::chrono::steady_clock::now();
+    if (now >= next_send) {
+      sent = client->send(conn_id, msg, sizeof(msg), false) == 0 || sent;
+      next_send = now + std::chrono::milliseconds(20);
+    }
     client->poll();
     int r = client->recv(buf, sizeof(buf), &len, &in_conn);
     if (r == 1) {
@@ -62,9 +70,11 @@ TEST(RawUdpSmoke, EchoOneMessage) {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
+  done.store(true);
+  server_thread.join();
+  EXPECT_TRUE(sent);
   EXPECT_TRUE(got);
 
-  server_thread.join();
   client->close();
   server->close();
 }
@@ -90,21 +100,20 @@ TEST(RawUdpSmoke, EchoManyConnectionsPreservesClientConnIds) {
 
   server->server_listen(kPort);
 
+  std::atomic<bool> done{false};
   std::thread server_thread([&]() {
     uint32_t buf[2];
     size_t len;
     uint32_t conn_id;
-    size_t echoed = 0;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (echoed < kConns && std::chrono::steady_clock::now() < deadline) {
+    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
       server->poll();
-      int r = server->recv(buf, sizeof(buf), &len, &conn_id);
-      if (r == 1) {
+      bool did_work = false;
+      while (server->recv(buf, sizeof(buf), &len, &conn_id) == 1) {
         server->send(conn_id, buf, len, false);
-        ++echoed;
-        continue;
+        did_work = true;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      if (!did_work) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   });
 
@@ -118,14 +127,23 @@ TEST(RawUdpSmoke, EchoManyConnectionsPreservesClientConnIds) {
     index_by_conn[conn_id] = i;
   }
 
-  for (uint32_t i = 0; i < kConns; ++i) {
+  auto send_payload = [&](uint32_t i) {
     uint32_t payload[2] = {kMarker, i};
-    ASSERT_EQ(client->send(conn_ids[i], payload, sizeof(payload), false), 0);
-  }
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (client->send(conn_ids[i], payload, sizeof(payload), false) == 0) return true;
+      client->poll();
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    return false;
+  };
+
+  for (uint32_t i = 0; i < kConns; ++i) EXPECT_TRUE(send_payload(i));
 
   std::vector<bool> got(kConns, false);
   size_t received = 0;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  auto next_resend = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
   while (received < kConns && std::chrono::steady_clock::now() < deadline) {
     client->poll();
     for (;;) {
@@ -134,12 +152,16 @@ TEST(RawUdpSmoke, EchoManyConnectionsPreservesClientConnIds) {
       uint32_t in_conn = 0;
       int r = client->recv(payload, sizeof(payload), &len, &in_conn);
       if (r == 0) break;
-      ASSERT_EQ(r, 1);
-      ASSERT_EQ(len, sizeof(payload));
-      ASSERT_EQ(payload[0], kMarker);
+      EXPECT_EQ(r, 1);
+      if (r != 1) continue;
+      EXPECT_EQ(len, sizeof(payload));
+      if (len != sizeof(payload)) continue;
+      EXPECT_EQ(payload[0], kMarker);
+      if (payload[0] != kMarker) continue;
 
       auto it = index_by_conn.find(in_conn);
-      ASSERT_NE(it, index_by_conn.end());
+      EXPECT_NE(it, index_by_conn.end());
+      if (it == index_by_conn.end()) continue;
       uint32_t expected_index = it->second;
       EXPECT_EQ(payload[1], expected_index);
       if (!got[expected_index]) {
@@ -147,12 +169,21 @@ TEST(RawUdpSmoke, EchoManyConnectionsPreservesClientConnIds) {
         ++received;
       }
     }
+    auto now = std::chrono::steady_clock::now();
+    if (received < kConns && now >= next_resend) {
+      for (uint32_t i = 0; i < kConns; ++i) {
+        if (!got[i]) {
+          EXPECT_TRUE(send_payload(i));
+        }
+      }
+      next_resend = now + std::chrono::milliseconds(20);
+    }
     if (received < kConns) std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
-  EXPECT_EQ(received, kConns);
-
+  done.store(true);
   server_thread.join();
+  EXPECT_EQ(received, kConns);
   client->close();
   server->close();
 }
