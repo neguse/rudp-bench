@@ -3,12 +3,83 @@
 
 import argparse
 import csv
+import importlib.util
 import subprocess
 import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+COMBINE_PATH = ROOT / "scripts" / "combine_clients.py"
+
+
+def load_combine_module():
+    spec = importlib.util.spec_from_file_location("combine_clients", COMBINE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+COMBINE = load_combine_module()
+
+RAW_FIELDS = (
+    "library,encryption,phase,rate_r,rate_u,size,conns,loss,"
+    "throughput_mbps,msg_per_sec,"
+    "rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,"
+    "rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,"
+    "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
+    "mode,idle_policy,flush_policy,client_tick_gap_p99_us,"
+    "client_tick_gap_max_us,"
+    "client_pacing_lag_p99_us,client_pacing_lag_max_us,"
+    "client_missed_pacing,client_attempted,client_accepted,"
+    "client_attempted_ratio,client_accepted_ratio,"
+    "client_recv_drained_p99,client_recv_drained_max,"
+    "client_outstanding_max,client_tick_ok,delivery_dedup_policy"
+).split(",")
+
+BASE_ROW = {
+    "library": "mini_rudp",
+    "encryption": "off",
+    "phase": "1",
+    "rate_r": "50",
+    "rate_u": "0",
+    "size": "100",
+    "conns": "1",
+    "loss": "0.000",
+    "throughput_mbps": "0.008",
+    "msg_per_sec": "10",
+    "rtt_r_p50_us": "0",
+    "rtt_r_p95_us": "0",
+    "rtt_r_p99_us": "0",
+    "rtt_u_p50_us": "0",
+    "rtt_u_p95_us": "0",
+    "rtt_u_p99_us": "0",
+    "delivered": "0",
+    "accepted": "0",
+    "delivery_ratio": "0.0000",
+    "cpu_pct": "1.00",
+    "rss_mb": "10",
+    "connect_ms": "0",
+    "duration_s": "10",
+    "mode": "echo",
+    "idle_policy": "spin",
+    "flush_policy": "immediate_retransmit_poll",
+    "client_tick_gap_p99_us": "0",
+    "client_tick_gap_max_us": "0",
+    "client_pacing_lag_p99_us": "0",
+    "client_pacing_lag_max_us": "0",
+    "client_missed_pacing": "0",
+    "client_attempted": "0",
+    "client_accepted": "0",
+    "client_attempted_ratio": "0.0000",
+    "client_accepted_ratio": "0.0000",
+    "client_recv_drained_p99": "0",
+    "client_recv_drained_max": "0",
+    "client_outstanding_max": "0",
+    "client_tick_ok": "1",
+    "delivery_dedup_policy": "sliding_window_65536_per_conn",
+}
 
 
 def csv_value(path: Path, column: str) -> str:
@@ -16,6 +87,92 @@ def csv_value(path: Path, column: str) -> str:
         for row in csv.DictReader(f):
             return row[column]
     raise SystemExit(f"{path}: empty CSV")
+
+
+def csv_row(path: Path):
+    with path.open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    return rows[0]
+
+
+def write_raw(path: Path, **overrides) -> None:
+    row = BASE_ROW.copy()
+    row.update({k: str(v) for k, v in overrides.items()})
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=RAW_FIELDS)
+        writer.writeheader()
+        writer.writerow(row)
+
+
+def write_empty_bins(path: Path) -> None:
+    header = COMBINE.HEADER_STRUCT.pack(
+        COMBINE.MAGIC, COMBINE.VERSION, 0, 0, 0, COMBINE.BIN_COUNT
+    )
+    path.write_bytes(header + b"\0" * (8 * COMBINE.BIN_COUNT))
+
+
+def run_synthetic_combine(tmp: Path) -> None:
+    client_csvs = []
+    bins_r = []
+    bins_u = []
+    for i in range(2):
+        client_csv = tmp / f"synthetic_{i}.csv"
+        bin_r = tmp / f"synthetic_{i}_r.bin"
+        bin_u = tmp / f"synthetic_{i}_u.bin"
+        client_csvs.append(client_csv)
+        bins_r.append(bin_r)
+        bins_u.append(bin_u)
+        write_empty_bins(bin_r)
+        write_empty_bins(bin_u)
+
+    write_raw(
+        client_csvs[0],
+        rate_r="10",
+        conns="1",
+        delivered="35",
+        accepted="70",
+        client_attempted="80",
+        client_accepted="70",
+        client_attempted_ratio="0.8000",
+        client_accepted_ratio="0.8750",
+    )
+    write_raw(
+        client_csvs[1],
+        rate_r="8",
+        conns="1",
+        delivered="10",
+        accepted="20",
+        client_attempted="40",
+        client_accepted="20",
+        client_attempted_ratio="0.5000",
+        client_accepted_ratio="0.5000",
+    )
+
+    combined_csv = tmp / "synthetic_combined.csv"
+    subprocess.run(
+        [
+            "python3",
+            str(COMBINE_PATH),
+            f"--client-csv={client_csvs[0]}",
+            f"--client-csv={client_csvs[1]}",
+            f"--bins-r={bins_r[0]}",
+            f"--bins-r={bins_r[1]}",
+            f"--bins-u={bins_u[0]}",
+            f"--bins-u={bins_u[1]}",
+            f"--out={combined_csv}",
+            "--conns-total=2",
+        ],
+        check=True,
+    )
+
+    combined = csv_row(combined_csv)
+    assert combined["client_attempted"] == "120"
+    assert combined["client_accepted"] == "90"
+    assert combined["delivered"] == "45"
+    assert combined["client_attempted_ratio"] == "0.6667"
+    assert combined["client_accepted_ratio"] == "0.7500"
+    assert combined["delivery_ratio"] == "0.5000"
 
 
 def run_smoke(args: argparse.Namespace, tmp: Path) -> None:
@@ -106,7 +263,9 @@ def main() -> int:
     p.add_argument("--build-dir", default="build")
     args = p.parse_args()
     with tempfile.TemporaryDirectory() as td:
-        run_smoke(args, Path(td))
+        tmp = Path(td)
+        run_synthetic_combine(tmp)
+        run_smoke(args, tmp)
     return 0
 
 

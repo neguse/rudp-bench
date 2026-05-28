@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 
-MIN_PAYLOAD_BYTES = 16
+MIN_PAYLOAD_BYTES = 17
 
 # Values are application payload bytes, not wire bytes. max_conns=None means the
 # harness has no adapter-level cap beyond OS/library resource limits.

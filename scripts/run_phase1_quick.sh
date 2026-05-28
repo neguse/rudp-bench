@@ -239,13 +239,16 @@ for lib in ${LIBS//,/ }; do
       done
       C_STATUS=0
       for pid in "${CPIDS[@]}"; do
-        if ! wait "$pid"; then
-          C_STATUS=$?
+        wait "$pid"
+        STATUS=$?
+        if [ "$STATUS" -ne 0 ] && [ "$C_STATUS" -eq 0 ]; then
+          C_STATUS="$STATUS"
         fi
       done
       if [ "$C_STATUS" -eq 0 ]; then
         python3 scripts/combine_clients.py "${COMBINE_ARGS[@]}" \
           --out="$C_OUT" --conns-total="$CONNS"
+        C_STATUS=$?
       fi
       # Concatenate per-proc client stdout/stderr so the diagnostic
       # links still point to one log per role.

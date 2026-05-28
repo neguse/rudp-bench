@@ -166,6 +166,21 @@ def to_float(s: str) -> float:
         return 0.0
 
 
+def attempted_target(row: Dict[str, str]) -> float:
+    combined_rate = to_int(row.get("rate_r", "")) + to_int(row.get("rate_u", ""))
+    conns = to_int(row.get("conns", ""))
+    duration_s = to_int(row.get("duration_s", ""))
+    if combined_rate > 0 and conns > 0 and duration_s > 0:
+        expected_per_send = conns if row.get("mode") == "broadcast" else 1
+        return float(combined_rate * conns * duration_s * expected_per_send)
+
+    attempted = to_int(row.get("client_attempted", ""))
+    attempted_ratio = to_float(row.get("client_attempted_ratio", ""))
+    if attempted_ratio > 0.0:
+        return attempted / attempted_ratio
+    return float(attempted)
+
+
 def read_csv(path: Path) -> Dict[str, str]:
     with path.open(newline="") as f:
         rows = list(csv.DictReader(f))
@@ -238,8 +253,9 @@ def combine(
     attempted = to_int(combined["client_attempted"])
     accepted = to_int(combined["client_accepted"])
     delivered = to_int(combined["delivered"])
+    target_attempted = sum(attempted_target(r) for r in rows)
     combined["client_attempted_ratio"] = (
-        f"{accepted / attempted:.4f}" if attempted else "0.0000"
+        f"{attempted / target_attempted:.4f}" if target_attempted else "0.0000"
     )
     combined["client_accepted_ratio"] = (
         f"{accepted / attempted:.4f}" if attempted else "0.0000"

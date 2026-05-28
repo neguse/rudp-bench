@@ -64,6 +64,7 @@ def main() -> int:
         assert scenario["idle_policy"] == "spin"
         assert scenario["pinning_policy"] == "none"
         assert scenario["supports_reliability"] == "1"
+        assert scenario["min_payload_bytes"] == "17"
         assert scenario["max_payload_bytes"] == "65507"
         assert scenario["transport_mode"] == "udp_datagram"
 
