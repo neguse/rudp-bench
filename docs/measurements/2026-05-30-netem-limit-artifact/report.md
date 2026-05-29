@@ -116,7 +116,24 @@ server を物理コア7に固定し、client の論理コアだけ 2→4→6 と
 - `scripts/netem.sh`: 既定 `limit=100000`（5th 引数で上書き可）に修正＋理由コメント。
 - `scripts/set_loss.sh`: 同上（3rd 引数）。
 - lo の生 netem は `limit 100000 delay 25ms 5ms loss 1%` で張ったまま（1000 に戻さない）。
+- **`harness/runner.cc`: validity ゲートから `tick_gap_p99 <= budget` を除去**。functional correctness
+  （attempted_ratio≥0.99 ∧ accepted_ratio≥0.99）だけで判定し、tick_gap は診断専用に。コメントが元々
+  「tick_gap は pass/fail ゲートにすべきでない」と書いていたのにコードが反していた不整合の修正。
+  これがないと、負荷を出し切り全受理された高 conns gns/msquic 実行がループジッタだけで valid=0 にされ測定不能だった。
+- **`scripts/bench_isolate.sh`: client を 1物理コア(6,14)→2物理コア(5,6,13,14)**。load generator が律速に
+  ならないよう過剰供給する。1物理コアでは gns@1000 が attempted_ratio=0.68（負荷生成律速）で valid=0 になり
+  測定不能だった。server は phys 7（1コア）のまま=測定変数。
 - **`results/scale_mix_*` および `docs/measurements/2026-05-29-scale-sweep` の結論は limit 1000 汚染。再取得が必要。**
+
+### 対処後の検証（実験F: gns@1000, client 2物理コア, limit=100000, idle=adaptive, N=2）
+
+| run | valid | delivery | attempted_ratio | tick_gap_p99 |
+|---|---|---|---|---|
+| gns_fix_c1000_r1 | **1 (ok)** | 0.570 | 1.0000 | 32ms |
+| gns_fix_c1000_r2 | **1 (ok)** | 0.551 | 1.0000 | 28ms |
+
+修正前は同条件が全て valid=0（client_tick）で測定不能。修正後は client が負荷を出し切り（attempted_ratio=1.0）、
+tick_gap が大きくても無効化されず、server 律速の数値 delivery≈0.55 が valid=1 として取得できる。
 
 ## 生データ
 

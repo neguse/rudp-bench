@@ -427,18 +427,16 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.conn_disc_peer = cs.shutdown_by_peer;
   row.delivery_dedup_policy = DeliveryTracker::dedup_policy();
   // tick_ok means "this run produced trustworthy data", not "every send was
-  // perfectly on time". Functional correctness is `attempted == target` and
-  // `accepted == attempted`; per-tick pacing lag stays in diagnostics for
-  // investigation but is not a pass/fail gate (a 2.5ms lag at the tail of
-  // a 100-conn 50Hz schedule does not break voice traffic).
-  // tick_gap threshold scales with rate so libraries with heavier poll
-  // overhead (gns, msquic) at low send rates do not falsely fail.
-  uint64_t tick_gap_budget_us = combined_rate
-      ? std::max<uint64_t>(250, 1'000'000ULL / combined_rate / 4)
-      : 250;
-  bool tick_ok = tick.tick_gap_us.count() > 0 &&
-                 row.client_tick_gap_p99_us <= tick_gap_budget_us &&
-                 row.client_accepted_ratio >= 0.99;
+  // perfectly on time". Functional correctness is `attempted == target`
+  // (client applied the intended offered load) and `accepted == attempted`
+  // (the adapter accepted it). Per-tick pacing lag (client_tick_gap_p99_us)
+  // is a smoothness DIAGNOSTIC, not a pass/fail gate: a single-loop load
+  // generator legitimately bursts at high conns (e.g. ~26ms tick gap at 1000
+  // conns) while still emitting 100% of scheduled sends (attempted_ratio==1).
+  // Gating on tick_gap there falsely invalidated otherwise-trustworthy
+  // throughput/delivery measurements (notably gns/msquic at high conns). The
+  // gap is recorded in diagnostics for latency-quality investigation instead.
+  bool tick_ok = row.client_accepted_ratio >= 0.99;
   if (combined_rate) {
     tick_ok = tick_ok && row.client_attempted_ratio >= 0.99;
   }

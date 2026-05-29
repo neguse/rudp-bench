@@ -2,9 +2,17 @@
 # Reserve isolated CPU cores for rudp-bench runs without reboot.
 #
 # Layout (Ryzen 7 PRO 5750GE, 8 physical / 16 logical):
-#   server  : phys core 7  -> CPU 7,15
-#   client  : phys core 6  -> CPU 6,14
-#   OS/games: phys core 0-5 -> CPU 0-5,8-13
+#   server  : phys core 7    -> CPU 7,15
+#   client  : phys cores 5,6 -> CPU 5,6,13,14   (2 phys: load generator must
+#             NOT be the bottleneck -- a single phys core could not emit the
+#             full offered load for heavy libs at high conns. e.g. gns @1000
+#             conns on 1 phys core hit attempted_ratio=0.68 -> invalid run;
+#             2 phys cores -> attempted_ratio=1.0. See docs/measurements/
+#             2026-05-30-netem-limit-artifact. The harness already invalidates
+#             runs with attempted_ratio<0.99, so an under-provisioned client
+#             yields no data rather than wrong data -- provision it generously
+#             and verify attempted_ratio==1.0 for the heaviest lib / max conns.)
+#   OS/games: phys cores 0-4 -> CPU 0-4,8-12
 #
 # Uses cgroup v2 via systemd slice properties (AllowedCPUs). The bench
 # cores are drained by confining system/user/init slices to OS cores;
@@ -16,11 +24,11 @@
 
 set -euo pipefail
 
-OS_CPUS="0-5,8-13"
+OS_CPUS="0-4,8-12"
 SERVER_CPUS="7,15"
-CLIENT_CPUS="6,14"
-BENCH_CORES_LIST="6 7 14 15"
-BENCH_CORES_CSV="6,7,14,15"
+CLIENT_CPUS="5,6,13,14"
+BENCH_CORES_LIST="5 6 7 13 14 15"
+BENCH_CORES_CSV="5,6,7,13,14,15"
 
 setup() {
     sudo systemctl set-property -- system.slice AllowedCPUs="$OS_CPUS"

@@ -23,3 +23,5 @@ E,gns,1000,100000,adaptive,6,0.558,184.10,595.56,1.0000,server_limited_invariant
 E,enet,1000,100000,adaptive,2,0.5922,97.60,196.70,1.0000,server_saturated_burst_effect
 E,enet,1000,100000,adaptive,4,0.3683,97.59,385.94,1.0000,server_saturated_burst_effect
 E,enet,1000,100000,adaptive,6,0.1925,97.14,571.72,1.0000,server_saturated_burst_effect
+F,gns,1000,100000,adaptive,4,0.5704,,,1.0000,valid=1_after_fix_client2phys_tickgap_diagnostic
+F,gns,1000,100000,adaptive,4,0.5510,,,1.0000,valid=1_after_fix_client2phys_tickgap_diagnostic
