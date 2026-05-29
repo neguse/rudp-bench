@@ -1,5 +1,12 @@
 # Scale sweep: conns 200..1000 under mixed traffic
 
+> **⚠️ 訂正 (2026-05-30): このレポートの結論は計測アーティファクトに汚染されている。**
+> netem を `limit` 未指定で張っていたため既定の **queue limit=1000 packets** が効いており、
+> 高 conns では BDP がこれを超えて netem が大量 drop していた。下表の「conns を上げると delivery が崩れる」
+> カーブの大半（特に〜600 conns）は **library 性能ではなく netem キュー溢れ**。netem `limit` を解放すると
+> enet/gns とも 600 conns で delivery 0.99 に回復する。本データは破棄し再取得すること。
+> 詳細・実測は [`../2026-05-30-netem-limit-artifact/report.md`](../2026-05-30-netem-limit-artifact/report.md)。
+
 **測定日:** 2026-05-29
 **目的:** 200 conn を上限と仮定していた前回の結果を 1000 conn まで延長し、
 各 lib が破綻する点と破綻の形を確定させる。
