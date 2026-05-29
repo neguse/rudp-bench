@@ -1,8 +1,11 @@
 #include "harness/scenario.h"
 
+#include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 
 namespace rudp_bench {
 namespace {
@@ -13,6 +16,52 @@ bool starts_with(const char* s, const char* p) {
 
 const char* value(const char* s, const char* p) {
   return s + std::strlen(p);
+}
+
+bool parse_u64(const char* s, uint64_t max_value, uint64_t* out) {
+  if (s == nullptr || *s == '\0' || *s == '-' || *s == '+') return false;
+  for (const char* p = s; *p != '\0'; ++p) {
+    if (*p < '0' || *p > '9') return false;
+  }
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(s, &end, 10);
+  if (errno == ERANGE || end == s || *end != '\0' || parsed > max_value) {
+    return false;
+  }
+  *out = static_cast<uint64_t>(parsed);
+  return true;
+}
+
+bool parse_u32(const char* s, uint32_t* out) {
+  uint64_t parsed = 0;
+  if (!parse_u64(s, std::numeric_limits<uint32_t>::max(), &parsed)) {
+    return false;
+  }
+  *out = static_cast<uint32_t>(parsed);
+  return true;
+}
+
+bool parse_u16(const char* s, uint16_t* out) {
+  uint64_t parsed = 0;
+  if (!parse_u64(s, std::numeric_limits<uint16_t>::max(), &parsed)) {
+    return false;
+  }
+  *out = static_cast<uint16_t>(parsed);
+  return true;
+}
+
+bool parse_loss_pct(const char* s, double* out) {
+  if (s == nullptr || *s == '\0') return false;
+  errno = 0;
+  char* end = nullptr;
+  double parsed = std::strtod(s, &end);
+  if (errno == ERANGE || end == s || *end != '\0' ||
+      !std::isfinite(parsed) || parsed < 0.0 || parsed > 100.0) {
+    return false;
+  }
+  *out = parsed;
+  return true;
 }
 
 }  // namespace
@@ -33,15 +82,33 @@ std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]) {
       else return std::nullopt;
     }
     else if (starts_with(a, "--host=")) c.host = value(a, "--host=");
-    else if (starts_with(a, "--port=")) c.port = static_cast<uint16_t>(std::atoi(value(a, "--port=")));
-    else if (starts_with(a, "--rate-r=")) c.rate_r = std::atoi(value(a, "--rate-r="));
-    else if (starts_with(a, "--rate-u=")) c.rate_u = std::atoi(value(a, "--rate-u="));
-    else if (starts_with(a, "--size=")) c.size_bytes = std::atoi(value(a, "--size="));
-    else if (starts_with(a, "--conns=")) c.conns = std::atoi(value(a, "--conns="));
-    else if (starts_with(a, "--duration=")) c.duration_s = std::atoi(value(a, "--duration="));
-    else if (starts_with(a, "--warmup=")) c.warmup_s = std::atoi(value(a, "--warmup="));
-    else if (starts_with(a, "--ramp-up-ms=")) c.ramp_up_ms = std::atoi(value(a, "--ramp-up-ms="));
-    else if (starts_with(a, "--loss=")) c.loss_pct = std::atof(value(a, "--loss="));
+    else if (starts_with(a, "--port=")) {
+      if (!parse_u16(value(a, "--port="), &c.port)) return std::nullopt;
+    }
+    else if (starts_with(a, "--rate-r=")) {
+      if (!parse_u32(value(a, "--rate-r="), &c.rate_r)) return std::nullopt;
+    }
+    else if (starts_with(a, "--rate-u=")) {
+      if (!parse_u32(value(a, "--rate-u="), &c.rate_u)) return std::nullopt;
+    }
+    else if (starts_with(a, "--size=")) {
+      if (!parse_u32(value(a, "--size="), &c.size_bytes)) return std::nullopt;
+    }
+    else if (starts_with(a, "--conns=")) {
+      if (!parse_u32(value(a, "--conns="), &c.conns)) return std::nullopt;
+    }
+    else if (starts_with(a, "--duration=")) {
+      if (!parse_u32(value(a, "--duration="), &c.duration_s)) return std::nullopt;
+    }
+    else if (starts_with(a, "--warmup=")) {
+      if (!parse_u32(value(a, "--warmup="), &c.warmup_s)) return std::nullopt;
+    }
+    else if (starts_with(a, "--ramp-up-ms=")) {
+      if (!parse_u32(value(a, "--ramp-up-ms="), &c.ramp_up_ms)) return std::nullopt;
+    }
+    else if (starts_with(a, "--loss=")) {
+      if (!parse_loss_pct(value(a, "--loss="), &c.loss_pct)) return std::nullopt;
+    }
     else if (starts_with(a, "--mode=")) {
       const char* v = value(a, "--mode=");
       if (std::strcmp(v, "echo") == 0) c.mode = ServerMode::Echo;
@@ -65,6 +132,10 @@ std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]) {
   if (c.library.empty()) return std::nullopt;
   if (c.rate_r == 0 && c.rate_u == 0) {
     std::cerr << "at least one of --rate-r / --rate-u must be > 0\n";
+    return std::nullopt;
+  }
+  if (c.conns == 0) {
+    std::cerr << "--conns must be > 0\n";
     return std::nullopt;
   }
   return c;

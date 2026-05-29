@@ -26,8 +26,8 @@
 // message boundaries we prepend a 4-byte little-endian length field to
 // every message.  recv() loops until the full frame is available.
 //
-// Unreliable mode is NOT supported by UDT4.  supports(false) returns false;
-// the harness emits an 'na' row for --reliable=u scenarios.
+// Unreliable mode is NOT supported by UDT4.  supports(false) returns false,
+// and the harness emits a skipped row for scenarios with rate_u > 0.
 //
 // One UDTSOCKET per connection.  Server accept() loop runs inside poll().
 // Recv is made non-blocking via UDT_RCVSYN=false; send stays blocking so

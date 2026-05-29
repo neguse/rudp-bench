@@ -75,7 +75,7 @@ TEST(Udt4Smoke, ReliableEcho) {
 TEST(Udt4Smoke, Capability) {
     auto a = create_adapter("udt4");
     ASSERT_NE(a, nullptr);
-    // UDT4 supports reliable only; unreliable → na row in harness.
+    // UDT4 supports reliable only; unreliable traffic is skipped by harness.
     EXPECT_TRUE(a->supports(true));
     EXPECT_FALSE(a->supports(false));
     EXPECT_FALSE(a->encryption_on());

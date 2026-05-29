@@ -92,15 +92,42 @@ static Config? ParseArgs(string[] args)
             if (cfg.Role != "server" && cfg.Role != "client") return null;
         }
         else if (arg.StartsWith("--host=")) cfg.Host = arg["--host=".Length..];
-        else if (arg.StartsWith("--port=")) cfg.Port = ushort.Parse(arg["--port=".Length..]);
-        else if (arg.StartsWith("--rate-r=")) cfg.RateR = uint.Parse(arg["--rate-r=".Length..]);
-        else if (arg.StartsWith("--rate-u=")) cfg.RateU = uint.Parse(arg["--rate-u=".Length..]);
-        else if (arg.StartsWith("--size=")) cfg.SizeBytes = uint.Parse(arg["--size=".Length..]);
-        else if (arg.StartsWith("--conns=")) cfg.Conns = uint.Parse(arg["--conns=".Length..]);
-        else if (arg.StartsWith("--duration=")) cfg.DurationS = uint.Parse(arg["--duration=".Length..]);
-        else if (arg.StartsWith("--warmup=")) cfg.WarmupS = uint.Parse(arg["--warmup=".Length..]);
-        else if (arg.StartsWith("--ramp-up-ms=")) cfg.RampUpMs = uint.Parse(arg["--ramp-up-ms=".Length..]);
-        else if (arg.StartsWith("--loss=")) cfg.Loss = double.Parse(arg["--loss=".Length..], CultureInfo.InvariantCulture);
+        else if (arg.StartsWith("--port="))
+        {
+            if (!TryParseUShort(arg["--port=".Length..], out cfg.Port)) return null;
+        }
+        else if (arg.StartsWith("--rate-r="))
+        {
+            if (!TryParseUInt(arg["--rate-r=".Length..], out cfg.RateR)) return null;
+        }
+        else if (arg.StartsWith("--rate-u="))
+        {
+            if (!TryParseUInt(arg["--rate-u=".Length..], out cfg.RateU)) return null;
+        }
+        else if (arg.StartsWith("--size="))
+        {
+            if (!TryParseUInt(arg["--size=".Length..], out cfg.SizeBytes)) return null;
+        }
+        else if (arg.StartsWith("--conns="))
+        {
+            if (!TryParseUInt(arg["--conns=".Length..], out cfg.Conns)) return null;
+        }
+        else if (arg.StartsWith("--duration="))
+        {
+            if (!TryParseUInt(arg["--duration=".Length..], out cfg.DurationS)) return null;
+        }
+        else if (arg.StartsWith("--warmup="))
+        {
+            if (!TryParseUInt(arg["--warmup=".Length..], out cfg.WarmupS)) return null;
+        }
+        else if (arg.StartsWith("--ramp-up-ms="))
+        {
+            if (!TryParseUInt(arg["--ramp-up-ms=".Length..], out cfg.RampUpMs)) return null;
+        }
+        else if (arg.StartsWith("--loss="))
+        {
+            if (!TryParseLossPct(arg["--loss=".Length..], out cfg.Loss)) return null;
+        }
         else if (arg.StartsWith("--mode="))
         {
             cfg.Mode = arg["--mode=".Length..];
@@ -120,7 +147,25 @@ static Config? ParseArgs(string[] args)
         Console.Error.WriteLine("at least one of --rate-r / --rate-u must be > 0");
         return null;
     }
+    if (cfg.Conns == 0)
+    {
+        Console.Error.WriteLine("--conns must be > 0");
+        return null;
+    }
     return cfg;
+}
+
+static bool TryParseUInt(string text, out uint value) =>
+    uint.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value);
+
+static bool TryParseUShort(string text, out ushort value) =>
+    ushort.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value);
+
+static bool TryParseLossPct(string text, out double value)
+{
+    if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value))
+        return false;
+    return double.IsFinite(value) && value >= 0.0 && value <= 100.0;
 }
 
 // ---------------------------------------------------------------------------

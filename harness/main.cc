@@ -83,8 +83,8 @@ int main(int argc, const char* argv[]) {
 
   // Capability check: each requested channel must be supported by the adapter.
   // Reducer interprets a skipped row by re-applying capability rules from
-  // capabilities.py, so the harness only needs to short-circuit (no `na` flag
-  // in the row schema anymore).
+  // capabilities.py, so the harness only needs to short-circuit (no explicit
+  // skip flag in the row schema).
   {
     if (cfg.rate_r > 0 && !adapter->supports(true)) {
       std::cerr << "library " << cfg.library

@@ -1,5 +1,19 @@
 #include <gtest/gtest.h>
+
+#include <initializer_list>
+#include <vector>
+
 #include "harness/scenario.h"
+
+namespace {
+
+bool Parses(std::initializer_list<const char*> args) {
+  std::vector<const char*> argv(args);
+  return rudp_bench::parse_scenario(static_cast<int>(argv.size()), argv.data())
+      .has_value();
+}
+
+}  // namespace
 
 TEST(Scenario, ParsesAllFlags) {
   const char* argv[] = {
@@ -54,4 +68,24 @@ TEST(Scenario, RoleServerStillRequiresAtLeastOneRate) {
   ASSERT_TRUE(cfg.has_value());
   EXPECT_EQ(cfg->role, rudp_bench::Role::Server);
   EXPECT_EQ(cfg->rate_u, 100u);
+}
+
+TEST(Scenario, RejectsMalformedNumericFlags) {
+  EXPECT_FALSE(Parses({"rudp-bench", "--library=raw_udp", "--rate-u=-1"}));
+  EXPECT_FALSE(Parses({"rudp-bench", "--library=raw_udp", "--rate-u= 1"}));
+  EXPECT_FALSE(Parses({"rudp-bench", "--library=raw_udp", "--rate-u=10x"}));
+  EXPECT_FALSE(Parses({"rudp-bench", "--library=raw_udp", "--rate-u="}));
+  EXPECT_FALSE(Parses({"rudp-bench", "--library=raw_udp", "--rate-u=1",
+                       "--port=70000"}));
+  EXPECT_FALSE(Parses({"rudp-bench", "--library=raw_udp", "--rate-u=1",
+                       "--loss=nan"}));
+  EXPECT_FALSE(Parses({"rudp-bench", "--library=raw_udp", "--rate-u=1",
+                       "--loss=101"}));
+  EXPECT_FALSE(Parses({"rudp-bench", "--library=raw_udp", "--rate-u=1",
+                       "--conns=0"}));
+}
+
+TEST(Scenario, AcceptsNumericBoundaryValues) {
+  EXPECT_TRUE(Parses({"rudp-bench", "--library=raw_udp", "--rate-u=1",
+                      "--port=65535", "--loss=100", "--conns=1"}));
 }
