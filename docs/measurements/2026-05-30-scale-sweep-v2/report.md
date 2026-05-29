@@ -25,9 +25,13 @@ spin による CPU 誤読、client 過少資源で汚染されていた（[`../2
 | enet | 0.990 | 0.991 | 0.990 | 0.749 | 0.241 |
 | kcp | 0.993 | 0.993 | 0.896 | 0.777 | 0.714 |
 | gns | 0.993 | 0.993 | 0.993 | 0.789 | 0.557 |
+| litenetlib † | 0.994 | 0.994 | 0.994 | 0.994 | 0.994 |
 | msquic | 0.593 | 0.587 | 0.573 | 0.579 | ✗ crash |
-| litenetlib | 0.993 | ✗ crash | ✗ crash | ✗ crash | ✗ crash |
 | mini_rudp | ✗ tick | ✗ tick | ✗ tick | ✗ tick | ✗ tick |
+
+† litenetlib は multi-proc client 対応後に再取得（2026-05-30）。client 負荷生成が重いため
+200-600conn は client 2物理コア、800-1000conn は **3物理コア**（procs=6）で attempted_ratio≥0.99 を確保。
+server は全点 1物理コアで他 lib と同条件。
 
 ### server CPU%（N=3 中央値、valid run のみ。server=1物理コア＝SMT 2スレッドで最大 ~200%）
 
@@ -36,8 +40,8 @@ spin による CPU 誤読、client 過少資源で汚染されていた（[`../2
 | enet | 60 | 85 | 95 | 98 | 97 |
 | kcp | 36 | 69 | 88 | 88 | 89 |
 | gns | 137 | 158 | 174 | 182 | 184 |
+| litenetlib | 124 | 147 | 171 | 190 | 191 |
 | msquic | 84 | 115 | 122 | 124 | ✗ |
-| litenetlib | 123 | ✗ | ✗ | ✗ | ✗ |
 
 ## 解釈
 
@@ -54,18 +58,19 @@ spin による CPU 誤読、client 過少資源で汚染されていた（[`../2
 - **msquic**: delivery が conns に依らず **~0.58 で一定**（スケール律速ではなく、QUIC datagram の unreliable 側が
   恒常的に ~42% 落ちている msquic 固有特性。要調査）。1000conn で client_crash。
 - **mini_rudp**: 全 conns で valid=0/client_tick。ベースライン実装が負荷を出し切れない（既知の破綻、想定内）。
-- **litenetlib**: 200conn のみ valid。400conn 以上は client_crash。**harness が litenetlib の multi-proc client farm に
-  未対応（procs=1 固定）**で単一プロセスが高 conns で落ちる。litenetlib の真のスケールは未測定。
+- **litenetlib (マルチスレッド server)**: multi-proc client 対応後の再取得で、**1000conn まで delivery 0.994 を維持**。
+  server CPU は 124→191% と上がり 1物理コア（SMT 2スレッド）をほぼ使い切る。同じ 1物理コア server でも gns が
+  1000 で 0.56 に落ちるのに対し litenetlib は 0.99 を保つ＝この負荷条件では最良のスケーラ（.NET threadpool で
+  受信/echo を捌ききっている）。※ delivery が gns より大きく良いのは意外なので、別条件での裏取り価値あり。
 
 ## 未解決・次の宿題
 
-1. ~~litenetlib: multi-proc client 対応~~ → **対応済み (2026-05-30)**。.NET adapter に RTT ヒストグラムの
-   bin 出力（C++ `LatencyHist` と同一バイナリ形式、`--bins-r-out`/`--bins-u-out`）を実装し、
-   `run_phase1_quick.sh` の litenetlib multi-proc client farm（procs>1 → conns 分割 → `combine_clients.py` で merge）を
-   有効化。あわせて litenetlib 側の tick_ok ゲートからも tick_gap を除去（C++ runner.cc と同じ修正）。
-   procs=4 で 400/600/800/1000conn とも valid=1 を確認（単一プロセスの 400conn client_crash は 100-250conn/proc 分割で解消）。
-   **ただし上表の litenetlib 行は修正前の値（200conn のみ）。fair な scale 数値には v2 config（server 1物理コア pin・
-   isolation・N=3）で litenetlib を再取得すること**（クラッシュ解消の確認は未 pin だったため delivery は比較不可）。
+1. ~~litenetlib: multi-proc client 対応~~ → **完了 (2026-05-30)**。実装: ①.NET adapter に RTT bin 出力
+   （C++ `LatencyHist` と同一形式、`--bins-r-out`/`--bins-u-out`）、②`run_phase1_quick.sh` に litenetlib
+   multi-proc farm、③litenetlib 側 tick_ok から tick_gap 除去、④`combine_clients.py` の tick_ok を per-proc AND
+   から**集約比率ベース**に変更（6 proc 分割時に1 proc が 0.989 に落ちると全体 fail になる過剰判定の修正。1000conn で
+   集約 attempted=0.992 なのに invalid になっていた）。上表 litenetlib 行は v2 config（server 1物理コア・N=3）で
+   再取得済み。litenetlib client は重いので 800-1000 は client 3物理コア必要（load generator 過剰供給の原則）。
 2. **msquic**: (a) 1000conn の client_crash、(b) delivery 一定 ~0.58 の原因（unreliable datagram の drop か flow control）。
 3. **conns 上限の拡張**: enet/kcp/gns とも 600 までは差が出ない。差別化は 800-1000+ で出るので、gns/kcp の tail を見るには
    1500-2000conn まで延ばす価値あり（その際 client 2物理コアで attempted_ratio=1.0 を維持できるか要確認、必要なら client コア増）。

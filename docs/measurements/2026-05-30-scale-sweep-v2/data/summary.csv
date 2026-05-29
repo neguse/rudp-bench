@@ -24,8 +24,8 @@ mini_rudp,400,0,,,client_tick
 mini_rudp,600,0,,,client_tick
 mini_rudp,800,0,,,client_tick
 mini_rudp,1000,0,,,client_tick
-litenetlib,200,1,0.993,122.98,
-litenetlib,400,0,,,client_crash_procs1_only
-litenetlib,600,0,,,client_crash
-litenetlib,800,0,,,client_crash
-litenetlib,1000,0,,,client_crash
+litenetlib,200,1,0.994,123.81,client_2phys
+litenetlib,400,1,0.994,147.42,client_2phys
+litenetlib,600,1,0.994,171.32,client_2phys
+litenetlib,800,1,0.994,190.12,client_3phys_required
+litenetlib,1000,1,0.994,191.13,client_3phys_combine_aggregate_tickok_fix
