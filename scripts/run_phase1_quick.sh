@@ -147,11 +147,6 @@ PORT=$PORT_BASE
 for lib in ${LIBS//,/ }; do
   PORT=$((PORT + 1))
 
-  if [ "$lib" = "litenetlib" ] && [ "$CLIENT_PROCS" -gt 1 ]; then
-    echo "skipping litenetlib: --client-procs > 1 unsupported (no bin output)" >&2
-    continue
-  fi
-
   if [ "$lib" = "msquic" ]; then
     RAMP_UP_MS="$RAMP_UP_MS_MSQUIC"
   else
@@ -187,12 +182,54 @@ for lib in ${LIBS//,/ }; do
       SPID=$!
       sleep 0.5
       set +e
-      run_timeout "$CLIENT_CPU" "$TIMEOUT_S" client "$LITENETLIB_BIN" --library="$lib" --role=client \
-        --host=127.0.0.1 --port="$PORT" \
-        --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS" \
-        --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
-        --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
-      C_STATUS=$?
+      if [ "$CLIENT_PROCS" -eq 1 ]; then
+        run_timeout "$CLIENT_CPU" "$TIMEOUT_S" client "$LITENETLIB_BIN" --library="$lib" --role=client \
+          --host=127.0.0.1 --port="$PORT" \
+          --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS" \
+          --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
+          --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
+        C_STATUS=$?
+      else
+        # Multi-process litenetlib client farm: N procs share CONNS, each emits
+        # RTT bin sidecars (LatencyHist binary); combine_clients.py merges them
+        # into $C_OUT just like the C++ multi-proc path.
+        CPIDS=()
+        COMBINE_ARGS=()
+        for i in $(seq 0 $((CLIENT_PROCS - 1))); do
+          CONNS_I=$((CONNS / CLIENT_PROCS))
+          if [ "$i" -lt $((CONNS % CLIENT_PROCS)) ]; then
+            CONNS_I=$((CONNS_I + 1))
+          fi
+          C_OUT_I="$RAW_DIR/c_${SCENARIO_ID}_p${i}.csv"
+          BINS_R_I="$RAW_DIR/c_${SCENARIO_ID}_p${i}_r.bin"
+          BINS_U_I="$RAW_DIR/c_${SCENARIO_ID}_p${i}_u.bin"
+          C_STDOUT_I="$RAW_DIR/c_${SCENARIO_ID}_p${i}.stdout.log"
+          C_STDERR_I="$RAW_DIR/c_${SCENARIO_ID}_p${i}.stderr.log"
+          run_timeout "$CLIENT_CPU" "$TIMEOUT_S" client "$LITENETLIB_BIN" --library="$lib" --role=client \
+            --host=127.0.0.1 --port="$PORT" \
+            --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS_I" \
+            --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
+            --out="$C_OUT_I" --bins-r-out="$BINS_R_I" --bins-u-out="$BINS_U_I" \
+            >"$C_STDOUT_I" 2>"$C_STDERR_I" &
+          CPIDS+=("$!")
+          COMBINE_ARGS+=(--client-csv="$C_OUT_I" --bins-r="$BINS_R_I" --bins-u="$BINS_U_I")
+        done
+        C_STATUS=0
+        for pid in "${CPIDS[@]}"; do
+          wait "$pid"
+          STATUS=$?
+          if [ "$STATUS" -ne 0 ] && [ "$C_STATUS" -eq 0 ]; then
+            C_STATUS="$STATUS"
+          fi
+        done
+        if [ "$C_STATUS" -eq 0 ]; then
+          python3 scripts/combine_clients.py "${COMBINE_ARGS[@]}" \
+            --out="$C_OUT" --conns-total="$CONNS"
+          C_STATUS=$?
+        fi
+        cat "$RAW_DIR"/c_"${SCENARIO_ID}"_p*.stdout.log > "$C_STDOUT" 2>/dev/null || true
+        cat "$RAW_DIR"/c_"${SCENARIO_ID}"_p*.stderr.log > "$C_STDERR" 2>/dev/null || true
+      fi
       wait "$SPID" 2>/dev/null
       S_STATUS=$?
       set -e

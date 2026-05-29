@@ -139,6 +139,8 @@ static Config? ParseArgs(string[] args)
             if (cfg.IdlePolicy != "spin" && cfg.IdlePolicy != "adaptive") return null;
         }
         else if (arg.StartsWith("--out=")) cfg.OutPath = arg["--out=".Length..];
+        else if (arg.StartsWith("--bins-r-out=")) cfg.BinsROut = arg["--bins-r-out=".Length..];
+        else if (arg.StartsWith("--bins-u-out=")) cfg.BinsUOut = arg["--bins-u-out=".Length..];
         else { Console.Error.WriteLine($"unknown flag: {arg}"); return null; }
     }
     if (string.IsNullOrEmpty(cfg.Library)) return null;
@@ -431,20 +433,21 @@ static CsvRow RunClient(Config cfg)
     ps.End();
     for (uint i = 0; i < cfg.Conns; i++) managers[i].Stop();
 
+    // Per-channel RTT histogram sidecars (same binary layout as the C++
+    // LatencyHist::write_binary) so combine_clients.py can merge a multi-proc
+    // litenetlib client farm by summing bins and recomputing percentiles.
+    if (!string.IsNullOrEmpty(cfg.BinsROut)) rttR.WriteBinary(cfg.BinsROut);
+    if (!string.IsNullOrEmpty(cfg.BinsUOut)) rttU.WriteBinary(cfg.BinsUOut);
+
     ulong tickGapP99Us = tick.TickGapP99Us;
     ulong pacingLagP99Us = tick.PacingLagP99Us;
     double attemptedRatio = targetAttempted > 0 ? (double)tick.Attempted / targetAttempted : 1.0;
     double acceptedRatio = tick.Attempted > 0 ? (double)tick.Accepted / tick.Attempted : 0.0;
-    // See harness/runner.cc tick_ok comment: pacing_lag stays diagnostic-only
-    // because attempted/accepted ratios are what actually catch broken runs.
-    // tick_gap budget scales with rate so heavy-poll libraries can still
-    // pass at low send rates.
-    ulong tickGapBudgetUs = combinedRate > 0
-        ? Math.Max(250UL, 1_000_000UL / combinedRate / 4)
-        : 250UL;
-    bool tickOk = tick.TickSamples > 0 &&
-        tickGapP99Us <= tickGapBudgetUs &&
-        acceptedRatio >= 0.99;
+    // Validity = functional correctness only (attempted/accepted ratios).
+    // Per-tick pacing lag (client_tick_gap_p99_us) is a diagnostic, NOT a
+    // pass/fail gate -- mirrors harness/runner.cc: gating on tick_gap falsely
+    // invalidated high-conn runs that emitted and accepted 100% of the load.
+    bool tickOk = acceptedRatio >= 0.99;
     if (combinedRate > 0)
     {
         tickOk = tickOk && attemptedRatio >= 0.99;
@@ -559,6 +562,8 @@ class Config
     public string Mode = "echo";  // "echo" / "broadcast"
     public string IdlePolicy = "spin"; // "spin" / "adaptive"
     public string OutPath = "";
+    public string BinsROut = ""; // reliable RTT histogram sidecar (LatencyHist binary)
+    public string BinsUOut = ""; // unreliable RTT histogram sidecar
 }
 
 // ---------------------------------------------------------------------------
@@ -814,6 +819,24 @@ class LatencyHist
         }
         _ = overflow_;
         return max_;
+    }
+
+    // Dense u64 little-endian dump mirroring harness/metrics.cc
+    // LatencyHist::write_binary so scripts/combine_clients.py can read it:
+    //   u32 magic='LHST'(0x5453484c), u32 version=1,
+    //   u64 count, overflow, max, bin_count, then u64 bins[bin_count].
+    // BinaryWriter writes little-endian on all platforms.
+    public void WriteBinary(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
+        using var w = new BinaryWriter(fs);
+        w.Write((uint)0x5453484C);
+        w.Write((uint)1);
+        w.Write(count_);
+        w.Write(overflow_);
+        w.Write(max_);
+        w.Write((ulong)BinCount);
+        for (int i = 0; i < BinCount; i++) w.Write(bins_[i]);
     }
 
     private static int BinIndex(ulong us)

@@ -59,7 +59,13 @@ spin による CPU 誤読、client 過少資源で汚染されていた（[`../2
 
 ## 未解決・次の宿題
 
-1. **litenetlib**: multi-proc client 対応 or 単一プロセスのクラッシュ原因究明（400conn で落ちる）。現状 200conn 超は測れない。
+1. ~~litenetlib: multi-proc client 対応~~ → **対応済み (2026-05-30)**。.NET adapter に RTT ヒストグラムの
+   bin 出力（C++ `LatencyHist` と同一バイナリ形式、`--bins-r-out`/`--bins-u-out`）を実装し、
+   `run_phase1_quick.sh` の litenetlib multi-proc client farm（procs>1 → conns 分割 → `combine_clients.py` で merge）を
+   有効化。あわせて litenetlib 側の tick_ok ゲートからも tick_gap を除去（C++ runner.cc と同じ修正）。
+   procs=4 で 400/600/800/1000conn とも valid=1 を確認（単一プロセスの 400conn client_crash は 100-250conn/proc 分割で解消）。
+   **ただし上表の litenetlib 行は修正前の値（200conn のみ）。fair な scale 数値には v2 config（server 1物理コア pin・
+   isolation・N=3）で litenetlib を再取得すること**（クラッシュ解消の確認は未 pin だったため delivery は比較不可）。
 2. **msquic**: (a) 1000conn の client_crash、(b) delivery 一定 ~0.58 の原因（unreliable datagram の drop か flow control）。
 3. **conns 上限の拡張**: enet/kcp/gns とも 600 までは差が出ない。差別化は 800-1000+ で出るので、gns/kcp の tail を見るには
    1500-2000conn まで延ばす価値あり（その際 client 2物理コアで attempted_ratio=1.0 を維持できるか要確認、必要なら client コア増）。
