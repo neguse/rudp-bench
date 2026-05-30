@@ -35,13 +35,18 @@ server は全点 1物理コアで他 lib と同条件。
 
 ### server CPU%（N=3 中央値、valid run のみ。server=1物理コア＝SMT 2スレッドで最大 ~200%）
 
-| lib | 200 | 400 | 600 | 800 | 1000 |
-|---|---|---|---|---|---|
-| enet | 60 | 85 | 95 | 98 | 97 |
-| kcp | 36 | 69 | 88 | 88 | 89 |
-| gns | 137 | 158 | 174 | 182 | 184 |
-| litenetlib | 124 | 147 | 171 | 190 | 191 |
-| msquic | 84 | 115 | 122 | 124 | ✗ |
+| lib | thread | 200 | 400 | 600 | 800 | 1000 |
+|---|---|---|---|---|---|---|
+| enet | single | 60 | 85 | 95 | 98 | 97 |
+| kcp | single | 36 | 69 | 88 | 88 | 89 |
+| gns | multi | 137 | 158 | 174 | 182 | 184 |
+| litenetlib | multi | 124 | 147 | 171 | 190 | 191 |
+| msquic | internal | 84 | 115 | 122 | 124 | ✗ |
+
+> **CPU% は thread モデルを併記して読むこと（DOC3/D5）。** 単一スレッド lib(enet/kcp)の上限は ~100%、
+> マルチスレッド lib(gns/litenetlib)と msquic(内部 worker)は ~200%（1物理コアの SMT 2レーン）。CPU 値を
+> 単独で並べると「enet が CPU 効率最良」等と誤読しやすいので `data/summary.csv` に `thread_model` 列を追加した。
+> ユーザー軸では「同一ハードで 2レーンを使い切るのは実力」なので割り引かない。
 
 ## 解釈
 
@@ -61,7 +66,13 @@ server は全点 1物理コアで他 lib と同条件。
 - **litenetlib (マルチスレッド server)**: multi-proc client 対応後の再取得で、**1000conn まで delivery 0.994 を維持**。
   server CPU は 124→191% と上がり 1物理コア（SMT 2スレッド）をほぼ使い切る。同じ 1物理コア server でも gns が
   1000 で 0.56 に落ちるのに対し litenetlib は 0.99 を保つ＝この負荷条件では最良のスケーラ（.NET threadpool で
-  受信/echo を捌ききっている）。※ delivery が gns より大きく良いのは意外なので、別条件での裏取り価値あり。
+  受信/echo を捌ききっている）。
+  - **【2026-05-30 コード精査で保留を解消】** 当初「gns より大きく良いのは意外＝アーティファクト疑い」と保留したが、
+    `delivery_ratio = received/accepted` の `received` は **server drop を必ず捕捉する**（落ちた echo は client に戻らない
+    ＝received されない）。したがって 0.994 を維持できているのは **echo を実際に捌けている証拠**であり、計測アーティファクト
+    ではなく**正当な実力の公算が高い**。確定的な裏取りが要るなら `StartInManualMode()` でシングルスレッド化して再測し、
+    「実力(スレッド並列)」か「資源(2レーン)」かを切り分けられる（gns との差は thread モデル差＝`summary.csv` の
+    `thread_model` 列、ユーザー軸では正当な実力差）。
 
 ## 未解決・次の宿題
 
@@ -72,6 +83,10 @@ server は全点 1物理コアで他 lib と同条件。
    集約 attempted=0.992 なのに invalid になっていた）。上表 litenetlib 行は v2 config（server 1物理コア・N=3）で
    再取得済み。litenetlib client は重いので 800-1000 は client 3物理コア必要（load generator 過剰供給の原則）。
 2. **msquic**: (a) 1000conn の client_crash、(b) delivery 一定 ~0.58 の原因（unreliable datagram の drop か flow control）。
+   → **【2026-05-30 計装追加】** adapter に datagram 送信状態の分類カウンタを実装(L1/L4)。close() 時に
+   `msquic_datagram: offered=.. submit_failed=.. acked=.. lost=.. canceled=..` を stderr に出すので、~0.58 の欠損が
+   **QUIC 側の LOST_DISCARDED(cwnd で捨てている)か submit_failed(そもそも送れていない)か**を次ランで切り分けられる。
+   併せて pacing を無効化(L2、`PacingEnabled=FALSE`)。これらの効果は再測で確認する（コード変更済み・数値は未更新）。
 3. **conns 上限の拡張**: enet/kcp/gns とも 600 までは差が出ない。差別化は 800-1000+ で出るので、gns/kcp の tail を見るには
    1500-2000conn まで延ばす価値あり（その際 client 2物理コアで attempted_ratio=1.0 を維持できるか要確認、必要なら client コア増）。
 

@@ -178,7 +178,8 @@ mini_rudp が一番速いが、これは 200 conn で破綻する反面(下記 #
   callback の完了を待ち、callback は adapter mutex 経由で main thread と詰まる
 - `RegistrationClose` も同様に block する
 - `atexit MsQuicClose` を呼ぶと glibc double-free
-- 現状の adapter は **close() を no-op、msquic ラン時のみ `std::_Exit(0)`** で回避
+- 現状は **adapter の close() を no-op、msquic ラン時のみ `std::_Exit(0)`** で回避
+  （`_Exit(0)` の所在は adapter ではなく `harness/main.cc` の `cfg.library=="msquic"` 分岐＝`write_output()` の後。close() は `adapters/msquic/msquic_adapter.cc` で純 no-op。2026-05-30 レビューで照合済み、記述は正確）
 
 ### 5. msquic 200conn は ramp 必須
 - 200 conn 一斉 connect (`for { ConnectionStart }`) → 全 conn CONNECTED 後に
@@ -214,6 +215,9 @@ other lib は期待通り。msquic datagram は internal queue / pacing で cong
   lifecycle hook と相性悪い場合は別途検討
 - ramp は msquic 専用、他 lib に入れると逆効果(enet で実測)
 - combined RTT histogram の罠は per-channel hist で回避済み
+- **unreliable channel の非等価(D2):** litenetlib `DeliveryMethod.Unreliable` と enet
+  `ENET_PACKET_FLAG_UNSEQUENCED` は厳密には非等価(両者とも順序保証なしだが内部 sequence の扱いが異なりうる)。
+  HoL は per-channel u99 の pure-u vs mixed 差で見ているため実害は小さいが、絶対比較時は要注意(詳細は dev-notes §5.6)
 
 ## 再現性(2nd run)
 

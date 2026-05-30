@@ -8,7 +8,8 @@
 1. [計測の落とし穴](#1-計測の落とし穴)
 2. [再現性ベンチ環境・手順(ARK/Minecraft 同居機)](#2-再現性ベンチ環境手順arkminecraft-同居機)
 3. [コードベース規約](#3-コードベース規約)
-4. [Phase 2 着手前の技術的負債](#4-phase-2-着手前の技術的負債)
+4. [Phase 2 着手前の技術的負債](#4-phase-2-着手前の技術的負債2026-05-30-計測妥当性レビューで照合済み)
+5. [計測指標の定義と既知の系統差](#5-計測指標の定義と既知の系統差2026-05-30-計測妥当性レビュー反映)
 
 関連: 測定レポートは [`docs/measurements/`](measurements/) 配下。
 
@@ -132,17 +133,65 @@ per-channel histogram 採用後の実測(2026-05-27、netem 25ms+5ms+5% loss、c
 
 ---
 
-## 4. Phase 2 着手前の技術的負債
+## 4. Phase 2 着手前の技術的負債(2026-05-30 計測妥当性レビューで照合済み)
 
-*(2026-04-28 の Plan 1 最終レビューで識別。commit `0bfa21b` で部分対応。**現状の解決状況は未照合 — 着手前に各 file:line を確認すること**。Phase 2 相当の scale 計測は既に進行しているため、一部は未対応のまま走っている可能性がある)*
+*(2026-04-28 の Plan 1 最終レビューで識別。2026-05-30 のレビュー(`tasks.md`)で各項目を現コードと照合し、解決状況を確定した。**コード参照は確認時点**)*
 
-Phase 1 の粗いスイープでは目立たないが、軸を細かく刻んで長時間ランすると結果を歪める可能性のある項目:
+1. ~~**size = 65536 が UDP datagram 上限超え**~~ → harness は `min_payload..max_payload` 外を skip row として弾く(`harness/main.cc`)。`mini_rudp` は L11 のヘッダ拡張で max_payload=65497、`raw_udp`=65507。スイープ側で上限超えを投げなければ無害(skip 扱い)。
+2. ~~**`LatencyHist`/`DeliveryTracker` 無制限成長**~~ → **解決済み**。固定サイズ bin 配列(`harness/metrics.h`)+ per-conn 65536 リング(`harness/sliding_dedup_window.h`)で上限あり。
+3. ~~**`ProcSampler` の RSS が 2点のみ**~~ → **解決済み**。RSS は 100ms periodic(M1 以前から)。**CPU も M1 で periodic 化**し `cpu_pct_peak` 列を追加(`harness/proc_sampler.cc` の `sample_cpu`)。さらに warmup を CPU 窓から除外(M2, `mark_measure_begin`)。
+4. **`mini_rudp`/`raw_udp` の CMakeLists 不整合** — トップレベルで `-Wall -Wextra -Wpedantic` がかかるため機能差なし(`CMakeLists.txt:12`)。adapter テンプレートとしてコピー時の紛らわしさのみ。実害なしのため未対応で記録のみ。
+5. ~~**ENet `inbox_` 無制限成長**~~ → **解決済み(L14)**。`ReusableInboundQueue` に `set_limit()`(リング)+ `dropped()` を追加。enet は 65536 上限、溢れたら `enet_inbox_dropped: N` を stderr に出す。
+6. ~~**`DeliveryTracker::pack` が conn_id 16bit 切り捨て**~~ → **解決済み**。dedup は `conn_id` を map キーにした per-conn 管理で衝突しない(`harness/metrics.cc`)。さらに M6 で seq mask を 48bit→64bit に拡張し将来の別用途でも別名衝突しない。
 
-1. **size = 65536 が UDP datagram 上限超え** — UDP 最大ペイロードは 65507B。`mini_rudp` のヘッダ 6B + 65536B は `EMSGSIZE` で `sendto` 失敗、または受信側 2KB バッファで切り詰め。`raw_udp` も送信失敗。
-   - 案A: `mini_rudp` にアプリ層フラグメンテーション/再アセンブリ実装(比較フェアだが高コスト)
-   - 案B(低コスト): スイープの size を 65536 → 8192 に下げ spec も修正
-2. **`LatencyHist::samples_` と `DeliveryTracker::received_keys_` が無制限成長**(`harness/metrics.{h,cc}`) — 高 throughput 長時間ランで harness 自体が数百 MB 食い、`rss_max_mb` が lib でなく harness オーバーヘッドを反映。reservoir sampling か上限付きリングバッファに切替(percentile は近似で可)
-3. **`ProcSampler` の RSS は begin/end の2点のみ**(`harness/proc_sampler.cc`) — run 中の peak が間で起きて戻ると取りこぼす。長時間ランなら periodic sampling を追加
-4. **`mini_rudp` と `raw_udp` の CMakeLists 不整合** — `raw_udp` には `-Wall -Wextra` があるが `mini_rudp` には無い(トップレベルでカバー済みで機能差はないが、adapter テンプレートとしてコピーされる時に紛らわしい)
-5. **ENet adapter の `inbox_` が無制限成長**(`adapters/enet/enet_adapter.cc`、項目2と同類) — harness が `recv` を引かないと RECEIVE イベントを溜め続ける。上限付きリングバッファ化 or push 前ドロップ + dropped カウンタ
-6. **`DeliveryTracker::pack` が conn_id 上位16bit切り捨て** — `(conn_id << 48) | (seq & 0xFFFF_FFFF_FFFF)`。`conns ≤ 1000` では問題ないが、`conns = 2000+` で衝突が理論上起きうる。`(uint64)conn_id<<32 | (seq & 0xFFFFFFFF)` 化で安全
+---
+
+## 5. 計測指標の定義と既知の系統差(2026-05-30 計測妥当性レビュー反映)
+
+*(`tasks.md` の D/M/L 系項目の結論。lib 横断比較で誤読しないための定義集)*
+
+### 5.1 delivery_ratio は「往復(echo)成功率」であって片道配信率ではない(D3)
+
+`delivery_ratio = received / accepted`。`accepted` は **client が adapter に送出受理された数**(`a.send()==0`)、`received` は **echo が client に戻って per-(conn,seq) で初観測された数**。したがって loss シナリオでは「往復で 1 回でも落ちれば未達」を測っている。片道配信率(server がいくつ受け取ったか)とは別物。片道を分離したい場合は server 側に受信カウント IF を足す必要がある(現状は未実装、round-trip 定義で運用)。
+
+### 5.2 server CPU% は thread モデルを併記して読む(D5 / DOC3)
+
+`cpu_pct` は全スレッド合算(`getrusage(RUSAGE_SELF)` / .NET `TotalProcessorTime`)。1物理コア(SMT 2スレッド)上限は ~200%。**単一スレッド lib(enet/kcp)の上限 ~100% と、マルチスレッド lib(gns/litenetlib、msquic は内部 worker)の ~200% は意味が違う**。ユーザー軸では「同一ハードで SMT 2レーンを使い切るのは実力」なので割り引かないが、`summary.csv` の CPU 値を単独で見ると誤読しやすい。**v2 summary.csv に `thread_model` 列を追加**(single/multi/internal_worker)。M1 で `cpu_pct_peak`(瞬間ピーク)も併記され、平均に薄まったスパイクが見える。
+
+### 5.3 CPU/RSS 計測 API の系統差(D6)
+
+C++ は `getrusage(RUSAGE_SELF)`、litenetlib は .NET `Process.TotalProcessorTime`。**両者とも全スレッド合算の whole-process CPU を測っており測定対象は同一**。サンプリング形状も揃えた(2点平均 + M1 periodic peak + M2 warmup 除外)。系統誤差をさらに潰すなら親プロセスが `/proc/<pid>/stat` を周期 poll する統一サンプラに寄せる余地があるが、現状の差は小さいと判断し未導入。
+
+### 5.4 client RSS は lib メモリ効率の指標にしない(M3)
+
+client 側 `rss_max_mb` には harness オーバーヘッド(per-conn 65536 dedup リング + LatencyHist 固定 bin)が混じる。**lib のメモリ効率を語るなら server 側 RSS を使う**。client RSS は load generator の規模指標として読む。
+
+### 5.5 高 conns の RTT には harness 由来の遅延が混じりうる(M5)
+
+RTT は「per-tick recv ドレイン時刻」基準(カーネル受信時刻ではない)。高 conns で 1 tick に大量ドレインすると後方メッセージの RTT が水増しされる。**`client_recv_drained_p99` が大きい行は RTT 絶対値を割り引く**(該当行フィルタで対処)。厳密化には `SO_TIMESTAMPNS` 採用が必要だが全 adapter 改修コストに見合わないため診断列での運用とする。
+
+### 5.6 LiteNetLib Unreliable ≠ enet UNSEQUENCED(D2)
+
+`DeliveryMethod.Unreliable`(litenetlib)と `ENET_PACKET_FLAG_UNSEQUENCED`(enet)は厳密には非等価。両者とも順序保証なしの fire-and-forget だが内部の sequence 取り扱いが異なりうるため、mixed の HoL 挙動が完全同一とは限らない。HoL 比較は per-channel u99 の pure-u vs mixed 差で見る(§1.1-1.2)前提なら実害は小さいが、絶対比較時は注記する。
+
+### 5.7 gns/msquic の暗号は API で切れない(L18 / OK2)
+
+`gns` は `encryption_on()=true` 固定(`adapters/gns/gns_adapter.cc`、NoNagle は指定済み)、`msquic` も QUIC で暗号必須。adapter 側で軽くする手段はない=仕様。ユーザー軸では「暗号しながら高 delivery は評価を上げる材料」なので問題ではない。改善余地が乏しいという事実のみ記録。
+
+### 5.8 mini_rudp は L11 で初めて測定の土俵に乗った(L10)
+
+旧 report の mini_rudp「全 cond valid=0/client_tick」は **server delivery の限界ではなく client adapter の負荷生成律速**(conn 毎に別 socket → syscall 過多)。L11 の単一 fd 多重化で `attempted_ratio=1.0 / tick_ok=1` になり、mini_rudp transport の delivery が初めて測定可能になった(200conn ローカルで dr~0.90 を観測)。
+
+### 5.9 新しい診断シグナル一覧(2026-05-30 追加)
+
+| シグナル | 出所 | 意味 |
+|---|---|---|
+| `cpu_pct_peak` (CSV列) | M1 | 100ms 区間 CPU% の最大。平均に薄まるスパイクを捕捉 |
+| `close_ms` (CSV列) | L6 | teardown(close())所要 ms。msquic は no-op で ~0(=同期 teardown 不可の lifecycle シグナル)、litenetlib は数百 ms の graceful stop |
+| `client_tick_ok_check` (diagnostics列) | S2 | reducer が比率から独立再計算した valid 判定。自己申告 `client_tick_ok` とのドリフト検出用 |
+| `msquic_datagram: offered/submit_failed/acked/lost/canceled` (stderr) | L1/L4 | QUIC datagram 送信状態の分類。「送ったが lost」と「そもそも submit 失敗」を切り分け |
+| `enet_inbox_dropped: N` (stderr) | L14 | 上限付き inbox が溢れて落とした受信メッセージ数 |
+
+### 5.10 msquic の close() / _Exit(0) の所在(L5 / DOC2 / S4)
+
+`adapters/msquic/msquic_adapter.cc` の `close()` は **純 no-op**(同期 teardown が worker と競合し deadlock/double-free するため)。`std::_Exit(0)` は **`harness/main.cc` 側**にあり `cfg.library=="msquic"` のときだけ実行(`write_output()` の後)。つまり 2026-05-28 report の「msquic ラン時のみ `_Exit(0)`」は**正しい記述**(所在は adapter ではなく harness)。終了コードベースの crash 判定は、実 run 中の crash は `_Exit(0)` 到達前に非0 signal で死ぬため正しく検出される(S4)。
