@@ -15,6 +15,7 @@ extern "C" {
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <unordered_map>
@@ -39,37 +40,69 @@ namespace {
 static constexpr uint8_t PREFIX_KCP = 0x01;
 static constexpr uint8_t PREFIX_RAW = 0x00;
 static constexpr int KCP_MTU     = 1400;
-// L7: the receiver's advertised rmt_wnd throttles the sender's effective send
-// window when the server falls behind draining. The 2026-05-31 re-measure
-// confirmed kcp@1000 is window/ARQ-bound, NOT CPU-bound (reliable p99=9.9s vs
-// unreliable p99=94ms on the same socket/CPU). 512 packets gives more headroom
-// to absorb drain lag before rmt_wnd collapses; per-conn cost is only the
-// ceiling, segments are still allocated on use.
-static constexpr int KCP_SND_WND = 512;
-static constexpr int KCP_RCV_WND = 512;
-// L9: flush/retransmit granularity. 5ms (down from 10). NOTE: stock ikcp.c
-// silently clamps any interval <10 back up to 10 inside ikcp_nodelay, so the
-// 5ms request is a no-op via the API. We set kcp->interval directly after
-// nodelay (interval is a public ikcpcb field) to bypass the clamp WITHOUT
-// modifying the vendored submodule. nodelay params: (nodelay=1, interval=5,
-// resend=2, nc=1).
-static constexpr int KCP_INTERVAL_MS = 5;
-
-// Apply nodelay then force the sub-10ms interval past ikcp_nodelay's floor.
-static inline void kcp_apply_tuning(ikcpcb* kcp) {
-  ikcp_nodelay(kcp, 1, KCP_INTERVAL_MS, 2, 1);  // L9
-  kcp->interval = static_cast<IUINT32>(KCP_INTERVAL_MS);
-  ikcp_setmtu(kcp, KCP_MTU);
-  ikcp_wndsize(kcp, KCP_SND_WND, KCP_RCV_WND);  // L7
-}
 static constexpr int KCP_MAX_FRAME = KCP_MTU + 32;
 static constexpr size_t RECV_BUF_SIZE = 65536 + 8;
+
+// kcp tuning. Defaults are the config chosen by the 2026-05-31 tuning sweep
+// (see docs/measurements/2026-05-31-kcp-tuning). Env overrides exist only to
+// re-run the sweep; production uses the defaults.
+//
+// Sweep findings (mixed 50/50, 1% loss, server=1 phys core, N=3):
+//   - interval is the 600<->1000 lever: 5ms lifts 1000 (HoL stall recovery) but
+//     costs 600 (extra flush overhead when not stalled); 10ms is the reverse.
+//     5ms wins net for the high-conn tail, which is where kcp competes.
+//   - window: at 5ms, 256 beats 384/512/1024 at BOTH 600 and 1000 (the 512 from
+//     the first pass was a regression). Bigger window does not help under the
+//     single-thread ARQ HoL ceiling; it just adds buffering latency.
+//   - REJECTED (measured worse): drain-interleave (helps 600 but craters 1000 to
+//     ~0.50 and saturates CPU), phase-desync (neutral), fastresend=1 (more
+//     spurious retx), minrto>30 (no gain). All left as off-by-default toggles.
+//   KCP_WND        snd/rcv window in packets               (default 256)
+//   KCP_INTERVAL   flush/retx granularity ms               (default 5)
+//   KCP_RESEND     fastresend dup-ack threshold            (default 2)
+//   KCP_NC         nocwnd (1=disable congestion window)    (default 1)
+//   KCP_MINRTO     min RTO ms override (0=nodelay default 30)
+//   KCP_DRAIN_CHUNK  re-drain socket every N conns during scan (0=off, rejected)
+//   KCP_DESYNC     stagger per-conn flush phase (0/1, rejected as neutral)
+struct KcpTuning {
+  int wnd, interval, resend, nc, minrto, drain_chunk, desync;
+};
+inline const KcpTuning& kcp_tuning() {
+  static const KcpTuning t = []() {
+    auto gi = [](const char* k, int d) {
+      const char* v = std::getenv(k);
+      return (v && *v) ? std::atoi(v) : d;
+    };
+    return KcpTuning{gi("KCP_WND", 256), gi("KCP_INTERVAL", 5),
+                     gi("KCP_RESEND", 2), gi("KCP_NC", 1), gi("KCP_MINRTO", 0),
+                     gi("KCP_DRAIN_CHUNK", 0), gi("KCP_DESYNC", 0)};
+  }();
+  return t;
+}
 
 inline IUINT32 now_ms() {
   using namespace std::chrono;
   return static_cast<IUINT32>(
       duration_cast<milliseconds>(steady_clock::now().time_since_epoch())
           .count() & 0xFFFFFFFFu);
+}
+
+// Apply nodelay then force the sub-10ms interval past ikcp_nodelay's floor
+// (stock ikcp clamps interval<10 to 10; interval is a public ikcpcb field so we
+// set it directly WITHOUT modifying the vendored submodule). Optionally stagger
+// the flush phase per conn (KCP_DESYNC) so not all conns become due in the same
+// poll — that spreads the update burst and lets socket draining interleave.
+static inline void kcp_apply_tuning(ikcpcb* kcp, IUINT32 conv) {
+  const auto& t = kcp_tuning();
+  ikcp_nodelay(kcp, 1, t.interval, t.resend, t.nc);
+  kcp->interval = static_cast<IUINT32>(t.interval);
+  if (t.minrto > 0) kcp->rx_minrto = static_cast<IUINT32>(t.minrto);
+  ikcp_setmtu(kcp, KCP_MTU);
+  ikcp_wndsize(kcp, t.wnd, t.wnd);
+  if (t.desync && t.interval > 1) {
+    kcp->updated = 1;  // skip ikcp_update's "first call" ts_flush reset
+    kcp->ts_flush = now_ms() + (conv % static_cast<IUINT32>(t.interval));
+  }
 }
 
 static void set_nonblock(int fd) {
@@ -202,7 +235,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     conn->out_ctx.is_server = false;
     conn->kcp = ikcp_create(conn->conv, &conn->out_ctx);
     ikcp_setoutput(conn->kcp, kcp_output_cb);
-    kcp_apply_tuning(conn->kcp);
+    kcp_apply_tuning(conn->kcp, conn->conv);
     // KCP はハンドシェイク不要 – ソケット生成後即座に connected
     conn->connected = true;
     conns_[id] = std::move(conn);
@@ -269,11 +302,22 @@ class KcpAdapter : public rudp_bench::Adapter {
     if (!force_scan_ && !had_input && !time_due(now, earliest_due_)) return;
     force_scan_ = false;
 
+    const int drain_chunk = kcp_tuning().drain_chunk;
     IUINT32 next_earliest = now + 60'000;  // far-future sentinel
     bool any = false;
+    int since_drain = 0;
     for (auto& [id, conn] : conns_) {
       (void)id;
       if (!conn->kcp) continue;
+      // Interleave socket draining so a long 1000-conn update scan does not
+      // starve the receive side (input piling in the socket buffer -> overflow
+      // -> KCP retransmit -> window stall). Refresh `now` after re-draining so
+      // later conns see their true due time.
+      if (drain_chunk > 0 && ++since_drain >= drain_chunk) {
+        drain_socket();
+        now = now_ms();
+        since_drain = 0;
+      }
       if (conn->update_due || conn->next_update == 0 ||
           time_due(now, conn->next_update)) {
         ikcp_update(conn->kcp, now);
@@ -328,7 +372,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     if (conn->kcp) return;
     conn->kcp = ikcp_create(conn->conv, &conn->out_ctx);
     ikcp_setoutput(conn->kcp, kcp_output_cb);
-    kcp_apply_tuning(conn->kcp);
+    kcp_apply_tuning(conn->kcp, conn->conv);
     conn->update_due = true;
   }
 
