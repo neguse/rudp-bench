@@ -5,6 +5,7 @@
 #include <enet/enet.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -19,12 +20,91 @@ namespace {
 // per-poll drain (kServerRecvDrainLimit=1024); overflow drops oldest + counts.
 constexpr size_t kEnetInboxLimit = 1u << 16;
 
+// --- Optional pooling allocator (ENET_POOL=1, default on) ----------------
+// enet does ~3 small mallocs per message (ENetPacket + data buffer +
+// ENetOutgoingCommand) plus per-ack ENetAcknowledgement; at high conns that
+// malloc/free churn dominates the single-thread CPU that saturates at 1000conn.
+// Replace glibc malloc with thread-local, size-segregated free-lists (O(1),
+// lock-free in the single-threaded benchmark) via enet_initialize_with_callbacks
+// — no submodule change. A size_t header before each block records the rounded
+// size so free() can find the right bucket (0 = oversize raw malloc).
+namespace enet_pool {
+constexpr size_t kAlign = 16;        // header + user alignment
+constexpr size_t kMaxPooled = 4096;  // larger -> raw malloc
+constexpr size_t kNBuckets = kMaxPooled / kAlign + 1;
+thread_local void* t_free[kNBuckets] = {nullptr};
+
+inline size_t roundup(size_t s) { return (s + kAlign - 1) & ~(kAlign - 1); }
+
+void* ealloc(size_t size) {
+  if (size == 0) size = 1;
+  if (size > kMaxPooled) {
+    char* p = static_cast<char*>(std::malloc(kAlign + size));
+    if (!p) return nullptr;
+    *reinterpret_cast<size_t*>(p) = 0;  // 0 = raw
+    return p + kAlign;
+  }
+  size_t r = roundup(size);
+  size_t b = r / kAlign;
+  if (void* h = t_free[b]) {
+    t_free[b] = *reinterpret_cast<void**>(h);
+    return h;
+  }
+  char* p = static_cast<char*>(std::malloc(kAlign + r));
+  if (!p) return nullptr;
+  *reinterpret_cast<size_t*>(p) = r;
+  return p + kAlign;
+}
+
+void efree(void* mem) {
+  if (!mem) return;
+  char* p = static_cast<char*>(mem) - kAlign;
+  size_t r = *reinterpret_cast<size_t*>(p);
+  if (r == 0) { std::free(p); return; }
+  size_t b = r / kAlign;
+  *reinterpret_cast<void**>(mem) = t_free[b];
+  t_free[b] = mem;
+}
+
+void enomem() { std::abort(); }
+}  // namespace enet_pool
+
+inline bool enet_pool_enabled() {
+  static const bool on = []() {
+    const char* v = std::getenv("ENET_POOL");
+    return v ? std::atoi(v) != 0 : true;  // default ON
+  }();
+  return on;
+}
+
+// ENET_RCVBUF_KB: override enet's socket SO_RCVBUF/SO_SNDBUF (default 256KB set
+// internally by enet). A bigger receive buffer can hold more datagrams while the
+// CPU-saturated single thread catches up at 1000conn, reducing kernel drops.
+inline void enet_apply_socket_buf(ENetHost* host) {
+  const char* v = std::getenv("ENET_RCVBUF_KB");
+  if (!v || !*v) return;
+  int kb = std::atoi(v);
+  if (kb <= 0) return;
+  int bytes = kb * 1024;
+  enet_socket_set_option(host->socket, ENET_SOCKOPT_RCVBUF, bytes);
+  enet_socket_set_option(host->socket, ENET_SOCKOPT_SNDBUF, bytes);
+}
+
 void ensure_enet_init() {
   static std::once_flag flag;
   std::call_once(flag, []() {
-    if (enet_initialize() != 0) {
-      std::abort();
+    int rc;
+    if (enet_pool_enabled()) {
+      ENetCallbacks cb;
+      std::memset(&cb, 0, sizeof(cb));
+      cb.malloc = enet_pool::ealloc;
+      cb.free = enet_pool::efree;
+      cb.no_memory = enet_pool::enomem;
+      rc = enet_initialize_with_callbacks(ENET_VERSION, &cb);
+    } else {
+      rc = enet_initialize();
     }
+    if (rc != 0) std::abort();
     std::atexit([]() { enet_deinitialize(); });
   });
 }
@@ -51,12 +131,14 @@ class EnetAdapter : public rudp_bench::Adapter {
     // 早める)。上限は ENET_PROTOCOL_MAXIMUM_PEER_ID=0xFFF=4095。
     host_ = enet_host_create(&addr, peer_count(), 2, 0, 0);
     if (!host_) std::abort();
+    enet_apply_socket_buf(host_);
   }
 
   uint32_t client_connect(const char* host, uint16_t port) override {
     if (!host_) {
       host_ = enet_host_create(nullptr, peer_count(), 2, 0, 0);
       if (!host_) std::abort();
+      enet_apply_socket_buf(host_);
     }
     ENetAddress addr{};
     enet_address_set_host(&addr, host);
