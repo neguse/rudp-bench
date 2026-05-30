@@ -1,0 +1,13 @@
+library,scenario_id,conns,n_total,n_valid,valid,delivery_ratio_median,server_cpu_pct_median,rtt_r_p50_us_median,rtt_r_p95_us_median,rtt_r_p99_us_median,rtt_u_p50_us_median,rtt_u_p95_us_median,rtt_u_p99_us_median,included_run_ids,note
+enet,enet_r50_u50_64_1000_echo_0_adaptive,1000,3,3,1,0.4388,97.90,733300,823400,958400,728400,749600,757300,r1;r2;r3,
+enet,enet_r50_u50_64_200_echo_0_adaptive,200,3,3,1,0.9893,45.34,51200,84100,125400,50400,62000,66800,r1;r2;r3,
+enet,enet_r50_u50_64_600_echo_0_adaptive,600,3,3,1,0.9906,93.50,53500,86100,128200,52700,64800,69400,r1;r2;r3,
+gns,gns_r50_u50_64_1000_echo_0_adaptive,1000,3,3,1,0.8661,181.43,171500,369900,504900,93800,150100,166700,r1;r2;r3,
+gns,gns_r50_u50_64_200_echo_0_adaptive,200,3,3,1,0.9923,91.05,54200,109600,145500,53300,73600,114800,r1;r2;r3,
+gns,gns_r50_u50_64_600_echo_0_adaptive,600,3,3,1,0.9922,160.70,58800,112100,151700,57800,79500,110500,r1;r2;r3,
+kcp,kcp_r50_u50_64_1000_echo_0_adaptive,1000,3,3,1,0.7727,89.00,246700,2573000,7017000,64900,76000,83700,r1;r2;r3,
+kcp,kcp_r50_u50_64_200_echo_0_adaptive,200,3,3,1,0.9924,37.10,58000,84900,127500,50300,61900,66700,r1;r2;r3,
+kcp,kcp_r50_u50_64_600_echo_0_adaptive,600,3,3,1,0.8955,91.17,108600,191600,253100,62700,76000,83800,r1;r2;r3,
+litenetlib,litenetlib_r50_u50_64_1000_echo_0_adaptive,1000,3,0,0,,,,,,,,,,client_tick
+litenetlib,litenetlib_r50_u50_64_200_echo_0_adaptive,200,3,3,1,0.9933,121.71,68400,190300,494900,66200,82800,94800,r1;r2;r3,
+litenetlib,litenetlib_r50_u50_64_600_echo_0_adaptive,600,3,3,1,0.9942,171.19,72100,221700,569800,69600,116700,230400,r1;r2;r3,
