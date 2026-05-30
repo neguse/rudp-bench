@@ -142,6 +142,7 @@ struct ChannelSched {
 
 CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   ProcSampler ps;
+  a.hint_connections(cfg.conns);
   a.server_listen(cfg.port);
   ps.begin();
 
@@ -226,6 +227,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   ClientTickStats tick;
 
   // connect all (optionally rate-limited so listener / TLS stack can absorb).
+  a.hint_connections(cfg.conns);
   std::vector<uint32_t> ids;
   ids.reserve(cfg.conns);
   auto t_connect_begin = clock::now();

@@ -39,17 +39,29 @@ namespace {
 static constexpr uint8_t PREFIX_KCP = 0x01;
 static constexpr uint8_t PREFIX_RAW = 0x00;
 static constexpr int KCP_MTU     = 1400;
-// L7: 128-packet windows let the receiver's advertised rmt_wnd throttle the
-// sender's effective send window when the server falls behind draining (the
-// suspected cause of kcp's 0.71@1000 with CPU still at 88%, i.e. non-saturated).
-// 256 packets doubles the buffering headroom that absorbs server-side drain
-// lag; per-conn cost is only the ceiling, segments are still allocated on use.
-static constexpr int KCP_SND_WND = 256;
-static constexpr int KCP_RCV_WND = 256;
-// L9: flush/retransmit granularity. 5ms (down from 10) makes ACK/retx response
-// ~2x faster; affordable now that poll() no longer rescans all conns every call
-// (L8). nodelay params: (nodelay=1, interval=5, resend=2, nc=1).
+// L7: the receiver's advertised rmt_wnd throttles the sender's effective send
+// window when the server falls behind draining. The 2026-05-31 re-measure
+// confirmed kcp@1000 is window/ARQ-bound, NOT CPU-bound (reliable p99=9.9s vs
+// unreliable p99=94ms on the same socket/CPU). 512 packets gives more headroom
+// to absorb drain lag before rmt_wnd collapses; per-conn cost is only the
+// ceiling, segments are still allocated on use.
+static constexpr int KCP_SND_WND = 512;
+static constexpr int KCP_RCV_WND = 512;
+// L9: flush/retransmit granularity. 5ms (down from 10). NOTE: stock ikcp.c
+// silently clamps any interval <10 back up to 10 inside ikcp_nodelay, so the
+// 5ms request is a no-op via the API. We set kcp->interval directly after
+// nodelay (interval is a public ikcpcb field) to bypass the clamp WITHOUT
+// modifying the vendored submodule. nodelay params: (nodelay=1, interval=5,
+// resend=2, nc=1).
 static constexpr int KCP_INTERVAL_MS = 5;
+
+// Apply nodelay then force the sub-10ms interval past ikcp_nodelay's floor.
+static inline void kcp_apply_tuning(ikcpcb* kcp) {
+  ikcp_nodelay(kcp, 1, KCP_INTERVAL_MS, 2, 1);  // L9
+  kcp->interval = static_cast<IUINT32>(KCP_INTERVAL_MS);
+  ikcp_setmtu(kcp, KCP_MTU);
+  ikcp_wndsize(kcp, KCP_SND_WND, KCP_RCV_WND);  // L7
+}
 static constexpr int KCP_MAX_FRAME = KCP_MTU + 32;
 static constexpr size_t RECV_BUF_SIZE = 65536 + 8;
 
@@ -190,9 +202,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     conn->out_ctx.is_server = false;
     conn->kcp = ikcp_create(conn->conv, &conn->out_ctx);
     ikcp_setoutput(conn->kcp, kcp_output_cb);
-    ikcp_nodelay(conn->kcp, 1, KCP_INTERVAL_MS, 2, 1);  // L9
-    ikcp_setmtu(conn->kcp, KCP_MTU);
-    ikcp_wndsize(conn->kcp, KCP_SND_WND, KCP_RCV_WND);
+    kcp_apply_tuning(conn->kcp);
     // KCP はハンドシェイク不要 – ソケット生成後即座に connected
     conn->connected = true;
     conns_[id] = std::move(conn);
@@ -318,9 +328,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     if (conn->kcp) return;
     conn->kcp = ikcp_create(conn->conv, &conn->out_ctx);
     ikcp_setoutput(conn->kcp, kcp_output_cb);
-    ikcp_nodelay(conn->kcp, 1, KCP_INTERVAL_MS, 2, 1);  // L9
-    ikcp_setmtu(conn->kcp, KCP_MTU);
-    ikcp_wndsize(conn->kcp, KCP_SND_WND, KCP_RCV_WND);
+    kcp_apply_tuning(conn->kcp);
     conn->update_due = true;
   }
 

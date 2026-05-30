@@ -39,20 +39,23 @@ class EnetAdapter : public rudp_bench::Adapter {
     if (host_) enet_host_destroy(host_);
   }
 
+  void hint_connections(uint32_t n) override { hint_conns_ = n; }
+
   void server_listen(uint16_t port) override {
     ENetAddress addr{};
     addr.host = ENET_HOST_ANY;
     addr.port = port;
-    // 最大ピア数 4095(ENet プロトコル上限 ENET_PROTOCOL_MAXIMUM_PEER_ID=0xFFF)、2 channel、帯域無制限
-    host_ = enet_host_create(&addr, 4095, 2, 0, 0);
+    // peerCount を実 conn 数に合わせる。enet_protocol_send_outgoing_commands /
+    // bandwidth_throttle は毎 flush で host->peers の全スロットを線形走査するため、
+    // 4095 固定だと実 conn 数に関係ない固定 CPU 税が乗る(高 conns の単コア飽和を
+    // 早める)。上限は ENET_PROTOCOL_MAXIMUM_PEER_ID=0xFFF=4095。
+    host_ = enet_host_create(&addr, peer_count(), 2, 0, 0);
     if (!host_) std::abort();
   }
 
   uint32_t client_connect(const char* host, uint16_t port) override {
     if (!host_) {
-      // 同一クライアントから複数 peer を張る用途で 4095 (ENet 上限) を確保。
-      // 32 にすると 33 本目の enet_host_connect が NULL → abort する。
-      host_ = enet_host_create(nullptr, 4095, 2, 0, 0);
+      host_ = enet_host_create(nullptr, peer_count(), 2, 0, 0);
       if (!host_) std::abort();
     }
     ENetAddress addr{};
@@ -176,6 +179,15 @@ class EnetAdapter : public rudp_bench::Adapter {
   bool encryption_on() const override { return false; }
 
  private:
+  // 実 conn 数 + 余裕(12.5% + 8)を ENet 上限 4095 でクランプ。hint 無し(0)なら
+  // 従来どおり 4095。client/server とも同じ計算。
+  size_t peer_count() const {
+    if (hint_conns_ == 0) return 4095;
+    uint32_t want = hint_conns_ + hint_conns_ / 8 + 8;
+    return want > 4095 ? 4095 : want;
+  }
+
+  uint32_t hint_conns_ = 0;
   ENetHost* host_ = nullptr;
 
   // peer ↔ conn_id マッピング(双方向)

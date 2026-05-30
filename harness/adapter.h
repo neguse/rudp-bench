@@ -19,6 +19,12 @@ struct ConnectionStats {
 struct Adapter {
   virtual ~Adapter() = default;
 
+  // Optional hint: the run will use about `n` connections (per role/process).
+  // Adapters that pre-size per-peer structures (e.g. enet's host peerCount)
+  // can use it to avoid a fixed cost proportional to a hardcoded maximum.
+  // Called once before server_listen / the client_connect loop. Default no-op.
+  virtual void hint_connections(uint32_t /*n*/) {}
+
   // server-side: バインドして listen 開始。失敗時は abort。
   virtual void server_listen(uint16_t port) = 0;
 

@@ -15,7 +15,8 @@
 
 namespace {
 
-constexpr int GNS_RECV_BATCH = 64;
+// Larger batch now that one ReceiveMessagesOnPollGroup call drains all conns.
+constexpr int GNS_RECV_BATCH = 256;
 
 // Forward declaration — defined after GnsAdapter.
 static void gns_status_callback(SteamNetConnectionStatusChangedCallback_t* info);
@@ -49,6 +50,13 @@ class GnsAdapter : public rudp_bench::Adapter {
   GnsAdapter() {
     ensure_gns_init();
     iface_ = SteamNetworkingSockets();
+    // One poll group for ALL connections so receive draining is a few
+    // ReceiveMessagesOnPollGroup calls per tick instead of one
+    // ReceiveMessagesOnConnection per conn. The per-conn path took the global
+    // tables lock + each conn's m_pLock every tick, colliding head-on with the
+    // single GNS service thread that holds m_pLock during decrypt — the cause
+    // of the 1000conn collapse (0.993@600 -> 0.565@1000).
+    poll_group_ = iface_->CreatePollGroup();
   }
 
   ~GnsAdapter() override { close(); }
@@ -132,17 +140,24 @@ class GnsAdapter : public rudp_bench::Adapter {
     // コールバックを同期的に発火させる (接続状態変化 / 到着通知)
     iface_->RunCallbacks();
 
-    // 全接続からメッセージを受信する。scratch を再利用して tick ごとの
-    // vector allocation を避ける。
-    {
-      std::lock_guard<std::mutex> lock(mtx_);
-      poll_conns_.clear();
-      poll_conns_.reserve(id_to_conn_.size());
-      for (auto& [id, hConn] : id_to_conn_) poll_conns_.emplace_back(id, hConn);
-    }
-
-    for (auto& [id, hConn] : poll_conns_) {
-      drain_connection(id, hConn);
+    // Drain ALL connections in one poll group instead of looping per-conn.
+    // Each message carries its own m_conn, which we map back to our conn id.
+    SteamNetworkingMessage_t* msgs[GNS_RECV_BATCH];
+    for (;;) {
+      int n = iface_->ReceiveMessagesOnPollGroup(poll_group_, msgs, GNS_RECV_BATCH);
+      if (n <= 0) break;
+      {
+        std::lock_guard<std::mutex> lock(mtx_);
+        for (int i = 0; i < n; ++i) {
+          uint32_t id = 0;
+          auto it = conn_to_id_.find(msgs[i]->m_conn);
+          if (it != conn_to_id_.end()) id = it->second;
+          inbox_.enqueue(id, static_cast<const uint8_t*>(msgs[i]->m_pData),
+                         msgs[i]->m_cbSize);
+        }
+      }
+      for (int i = 0; i < n; ++i) msgs[i]->Release();
+      if (n < GNS_RECV_BATCH) break;
     }
   }
 
@@ -169,6 +184,10 @@ class GnsAdapter : public rudp_bench::Adapter {
       iface_->CloseConnection(hConn, 0, nullptr, false);
       std::lock_guard<std::mutex> glock(g_gns.mtx);
       g_gns.conn_map.erase(hConn);
+    }
+    if (poll_group_ != k_HSteamNetPollGroup_Invalid) {
+      iface_->DestroyPollGroup(poll_group_);
+      poll_group_ = k_HSteamNetPollGroup_Invalid;
     }
   }
 
@@ -210,6 +229,9 @@ class GnsAdapter : public rudp_bench::Adapter {
       }
 
       case k_ESteamNetworkingConnectionState_Connected: {
+        // Route this conn's inbound messages through the shared poll group
+        // (both server-accepted and client-initiated conns reach Connected).
+        iface_->SetConnectionPollGroup(hConn, poll_group_);
         std::lock_guard<std::mutex> lock(mtx_);
         auto it = conn_to_id_.find(hConn);
         if (it != conn_to_id_.end()) {
@@ -238,31 +260,14 @@ class GnsAdapter : public rudp_bench::Adapter {
   }
 
  private:
-  void drain_connection(uint32_t id, HSteamNetConnection hConn) {
-    for (;;) {
-      SteamNetworkingMessage_t* msgs[GNS_RECV_BATCH];
-      int n = iface_->ReceiveMessagesOnConnection(hConn, msgs, GNS_RECV_BATCH);
-      if (n <= 0) return;
-      {
-        std::lock_guard<std::mutex> lock(mtx_);
-        for (int i = 0; i < n; ++i) {
-          const auto* p = static_cast<const uint8_t*>(msgs[i]->m_pData);
-          inbox_.enqueue(id, p, msgs[i]->m_cbSize);
-        }
-      }
-      for (int i = 0; i < n; ++i) msgs[i]->Release();
-      if (n < GNS_RECV_BATCH) return;
-    }
-  }
-
   ISteamNetworkingSockets* iface_ = nullptr;
   HSteamListenSocket listen_sock_ = k_HSteamListenSocket_Invalid;
+  HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
 
   std::mutex mtx_;
   std::unordered_map<uint32_t, HSteamNetConnection> id_to_conn_;
   std::unordered_map<HSteamNetConnection, uint32_t> conn_to_id_;
   std::unordered_set<uint32_t> connected_ids_;
-  std::vector<std::pair<uint32_t, HSteamNetConnection>> poll_conns_;
   uint32_t next_id_ = 1;
 
   rudp_bench::ReusableInboundQueue inbox_;
