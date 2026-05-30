@@ -111,6 +111,12 @@ class RawUdpAdapter : public rudp_bench::Adapter {
   }
 
   uint32_t client_connect(const char* host, uint16_t port) override {
+    // L16: one fd per conn is intentional for this pure-UDP baseline. Unlike
+    // mini_rudp (which multiplexes to survive at scale, L11), raw_udp is
+    // unreliable-only with no per-conn protocol state, so the extra poll/recv
+    // syscalls are light and the simpler per-fd model is the more honest
+    // baseline. Reviewed: acceptable, kept as-is. Socket buffers are 256KB
+    // (make_udp_socket -> tune_socket_buffers), matching the other adapters.
     Conn c;
     c.fd = make_udp_socket();
     c.peer.sin_family = AF_INET;

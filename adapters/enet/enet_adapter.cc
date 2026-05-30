@@ -4,6 +4,7 @@
 
 #include <enet/enet.h>
 
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -12,6 +13,11 @@
 #include <vector>
 
 namespace {
+
+// L14: bound the inbound queue so a slow consumer cannot grow harness RSS
+// without limit. 65536 messages is generous headroom over the harness's
+// per-poll drain (kServerRecvDrainLimit=1024); overflow drops oldest + counts.
+constexpr size_t kEnetInboxLimit = 1u << 16;
 
 void ensure_enet_init() {
   static std::once_flag flag;
@@ -25,7 +31,10 @@ void ensure_enet_init() {
 
 class EnetAdapter : public rudp_bench::Adapter {
  public:
-  EnetAdapter() { ensure_enet_init(); }
+  EnetAdapter() {
+    ensure_enet_init();
+    inbox_.set_limit(kEnetInboxLimit);  // L14
+  }
   ~EnetAdapter() override {
     if (host_) enet_host_destroy(host_);
   }
@@ -141,8 +150,23 @@ class EnetAdapter : public rudp_bench::Adapter {
   }
 
   void close() override {
-    if (host_) { enet_host_destroy(host_); host_ = nullptr; }
+    if (host_) {
+      // L14: surface any bounded-inbox drops (captured into stderr_path).
+      if (inbox_.dropped() > 0) {
+        std::fprintf(stderr, "enet_inbox_dropped: %llu\n",
+                     (unsigned long long)inbox_.dropped());
+        std::fflush(stderr);
+      }
+      enet_host_destroy(host_);
+      host_ = nullptr;
+    }
   }
+
+  // L15: ENet already sets SO_RCVBUF/SO_SNDBUF to 256KB on its internal socket
+  // (third_party/enet/host.c:65-66, ENET_HOST_RECEIVE_BUFFER_SIZE = 256*1024),
+  // so it is on the same socket-buffer footing as raw_udp — no extra tuning
+  // needed here. mini_rudp/kcp are brought up to the same 256KB to even the
+  // baseline (L17).
 
   const char* name() const override { return "enet"; }
   bool supports(bool /*reliable*/) const override { return true; }

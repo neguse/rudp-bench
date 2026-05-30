@@ -42,6 +42,26 @@ TEST(ReusableInboundQueue, OversizeDropsMessageAndRecyclesBuffer) {
   EXPECT_EQ(q.free_buffers(), 1u);
 }
 
+TEST(ReusableInboundQueue, BoundedRingDropsOldestAndCounts) {
+  ReusableInboundQueue q;
+  q.set_limit(2);
+  const char m[] = "m";
+  q.enqueue(1, reinterpret_cast<const uint8_t*>(m), sizeof(m));
+  q.enqueue(2, reinterpret_cast<const uint8_t*>(m), sizeof(m));
+  q.enqueue(3, reinterpret_cast<const uint8_t*>(m), sizeof(m));  // evicts cid=1
+  EXPECT_EQ(q.queued(), 2u);
+  EXPECT_EQ(q.dropped(), 1u);
+
+  char buf[8];
+  size_t len = 0;
+  uint32_t cid = 0;
+  EXPECT_EQ(q.recv(buf, sizeof(buf), &len, &cid), 1);
+  EXPECT_EQ(cid, 2u);  // oldest (cid=1) was dropped, cid=2 is now front
+  EXPECT_EQ(q.recv(buf, sizeof(buf), &len, &cid), 1);
+  EXPECT_EQ(cid, 3u);
+  EXPECT_EQ(q.recv(buf, sizeof(buf), &len, &cid), 0);
+}
+
 TEST(ReusableInboundQueue, ReusesFreedBuffers) {
   ReusableInboundQueue q;
   const char msg[] = "reused";

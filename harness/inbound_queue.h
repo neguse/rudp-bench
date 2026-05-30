@@ -10,7 +10,20 @@ namespace rudp_bench {
 
 class ReusableInboundQueue {
  public:
+  // L14: optional bound. limit==0 (default) keeps the original unbounded
+  // behaviour; a positive limit turns this into a ring — when full, the oldest
+  // queued message is dropped (and counted) to make room. This caps harness
+  // memory if the consumer ever falls behind, instead of growing without bound.
+  void set_limit(size_t limit) { limit_ = limit; }
+  uint64_t dropped() const { return dropped_; }
+
   void enqueue(uint32_t conn_id, const uint8_t* data, size_t len) {
+    if (limit_ > 0 && ready_.size() >= limit_) {
+      Message old = std::move(ready_.front());
+      ready_.pop_front();
+      recycle(std::move(old.data));
+      ++dropped_;
+    }
     std::vector<uint8_t> buf;
     if (!free_.empty()) {
       buf = std::move(free_.back());
@@ -58,6 +71,8 @@ class ReusableInboundQueue {
 
   std::deque<Message> ready_;
   std::vector<std::vector<uint8_t>> free_;
+  size_t limit_ = 0;
+  uint64_t dropped_ = 0;
 };
 
 }  // namespace rudp_bench

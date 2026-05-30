@@ -65,6 +65,14 @@ static void set_nonblock(int fd) {
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+// L17: 256KB SO_RCVBUF/SO_SNDBUF to match raw_udp / enet / mini_rudp so the
+// socket-buffer playing field is even across the UDP-based adapters.
+static void tune_socket_buffers(int fd) {
+  int bytes = 256 * 1024;
+  ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
+  ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
+}
+
 static uint64_t addr_key(const sockaddr_in& a) {
   return (static_cast<uint64_t>(a.sin_addr.s_addr) << 32) |
          static_cast<uint64_t>(a.sin_port);
@@ -153,6 +161,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     a.sin_port = htons(port);
     if (::bind(server_fd_, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0)
       std::abort();
+    tune_socket_buffers(server_fd_);  // L17
     set_nonblock(server_fd_);
   }
 
@@ -165,6 +174,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     if (client_fd_ < 0) {
       client_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
       if (client_fd_ < 0) std::abort();
+      tune_socket_buffers(client_fd_);  // L17
       set_nonblock(client_fd_);
       sockaddr_in srv{};
       srv.sin_family = AF_INET;

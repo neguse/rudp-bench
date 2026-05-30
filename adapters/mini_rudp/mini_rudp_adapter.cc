@@ -33,6 +33,9 @@ constexpr uint16_t FLAG_REL = 2;
 constexpr size_t MAX_UDP_PAYLOAD = 65507;
 constexpr size_t MAX_PENDING_RELIABLE_PER_CONN = 65'536;
 constexpr auto RETX_TIMEOUT = std::chrono::milliseconds(50);
+// L17: match raw_udp (256KB) and enet (256KB internal) so the baseline
+// comparison is on an even socket-buffer footing.
+constexpr int UDP_SOCKET_BUFFER_BYTES = 256 * 1024;
 
 struct Header {
   uint16_t flags;
@@ -87,6 +90,12 @@ void set_nonblock(int fd) {
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+void tune_socket_buffers(int fd) {
+  int bytes = UDP_SOCKET_BUFFER_BYTES;
+  ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
+  ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
+}
+
 class MiniRudpAdapter : public rudp_bench::Adapter {
  public:
   ~MiniRudpAdapter() override { close(); }
@@ -95,6 +104,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     server_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     int reuse = 1;
     ::setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    tune_socket_buffers(server_fd_);  // L17
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -107,6 +117,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     // L11: 1 本の共有ソケットを初回だけ生成。以降の conn は全てこの fd を多重化。
     if (client_fd_ < 0) {
       client_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+      tune_socket_buffers(client_fd_);  // L17
       set_nonblock(client_fd_);
     }
     uint32_t id = next_id_++;
