@@ -39,8 +39,17 @@ namespace {
 static constexpr uint8_t PREFIX_KCP = 0x01;
 static constexpr uint8_t PREFIX_RAW = 0x00;
 static constexpr int KCP_MTU     = 1400;
-static constexpr int KCP_SND_WND = 128;
-static constexpr int KCP_RCV_WND = 128;
+// L7: 128-packet windows let the receiver's advertised rmt_wnd throttle the
+// sender's effective send window when the server falls behind draining (the
+// suspected cause of kcp's 0.71@1000 with CPU still at 88%, i.e. non-saturated).
+// 256 packets doubles the buffering headroom that absorbs server-side drain
+// lag; per-conn cost is only the ceiling, segments are still allocated on use.
+static constexpr int KCP_SND_WND = 256;
+static constexpr int KCP_RCV_WND = 256;
+// L9: flush/retransmit granularity. 5ms (down from 10) makes ACK/retx response
+// ~2x faster; affordable now that poll() no longer rescans all conns every call
+// (L8). nodelay params: (nodelay=1, interval=5, resend=2, nc=1).
+static constexpr int KCP_INTERVAL_MS = 5;
 static constexpr int KCP_MAX_FRAME = KCP_MTU + 32;
 static constexpr size_t RECV_BUF_SIZE = 65536 + 8;
 
@@ -171,12 +180,13 @@ class KcpAdapter : public rudp_bench::Adapter {
     conn->out_ctx.is_server = false;
     conn->kcp = ikcp_create(conn->conv, &conn->out_ctx);
     ikcp_setoutput(conn->kcp, kcp_output_cb);
-    ikcp_nodelay(conn->kcp, 1, 10, 2, 1);
+    ikcp_nodelay(conn->kcp, 1, KCP_INTERVAL_MS, 2, 1);  // L9
     ikcp_setmtu(conn->kcp, KCP_MTU);
     ikcp_wndsize(conn->kcp, KCP_SND_WND, KCP_RCV_WND);
     // KCP はハンドシェイク不要 – ソケット生成後即座に connected
     conn->connected = true;
     conns_[id] = std::move(conn);
+    force_scan_ = true;  // L8: ensure the next poll() services the new conn
     return id;
   }
 
@@ -204,6 +214,7 @@ class KcpAdapter : public rudp_bench::Adapter {
         return -1;
       }
       conn->update_due = true;
+      force_scan_ = true;  // L8: flush the freshly-queued segment next poll
       return 0;
     }
 
@@ -228,18 +239,35 @@ class KcpAdapter : public rudp_bench::Adapter {
   }
 
   void poll() override {
-    drain_socket();
+    bool had_input = drain_socket();
     IUINT32 now = now_ms();
+    // L8: skip the O(conns) scan when nothing is due and no KCP input arrived.
+    // The harness spins poll() far faster than the 5ms KCP interval, so between
+    // due boundaries this is the common case and becomes O(1). At a due boundary
+    // we scan all conns, but since every conn shares one interval the due-set
+    // ~= all conns — a heap would not beat the linear scan there.
+    if (!force_scan_ && !had_input && !time_due(now, earliest_due_)) return;
+    force_scan_ = false;
+
+    IUINT32 next_earliest = now + 60'000;  // far-future sentinel
+    bool any = false;
     for (auto& [id, conn] : conns_) {
-      if (conn->kcp &&
-          (conn->update_due || conn->next_update == 0 ||
-           time_due(now, conn->next_update))) {
+      (void)id;
+      if (!conn->kcp) continue;
+      if (conn->update_due || conn->next_update == 0 ||
+          time_due(now, conn->next_update)) {
         ikcp_update(conn->kcp, now);
         drain_kcp(conn.get());
         conn->next_update = ikcp_check(conn->kcp, now);
         conn->update_due = false;
       }
+      // Track the soonest next_update to decide the next early-out.
+      if (!any || time_due(next_earliest, conn->next_update)) {
+        next_earliest = conn->next_update;
+        any = true;
+      }
     }
+    earliest_due_ = any ? next_earliest : (now + 60'000);
   }
 
   void close() override {
@@ -266,6 +294,11 @@ class KcpAdapter : public rudp_bench::Adapter {
   std::unordered_map<uint32_t, std::unique_ptr<KcpConn>> conns_;
   std::unordered_map<AddrConvKey, uint32_t, AddrConvKeyHash> id_by_addrconv_;
   uint32_t next_id_ = 1;
+  // L8: incremental earliest-due tracking so poll() can early-out in O(1) when
+  // nothing is due. force_scan_ is set whenever a conn newly needs an update
+  // outside poll() (new conn, reliable send, KCP input) so we never skip it.
+  IUINT32 earliest_due_ = 0;
+  bool force_scan_ = true;
   std::vector<uint8_t> raw_send_scratch_;
   std::array<uint8_t, RECV_BUF_SIZE> recv_scratch_{};
   rudp_bench::ReusableInboundQueue inbox_;
@@ -275,7 +308,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     if (conn->kcp) return;
     conn->kcp = ikcp_create(conn->conv, &conn->out_ctx);
     ikcp_setoutput(conn->kcp, kcp_output_cb);
-    ikcp_nodelay(conn->kcp, 1, 10, 2, 1);
+    ikcp_nodelay(conn->kcp, 1, KCP_INTERVAL_MS, 2, 1);  // L9
     ikcp_setmtu(conn->kcp, KCP_MTU);
     ikcp_wndsize(conn->kcp, KCP_SND_WND, KCP_RCV_WND);
     conn->update_due = true;
@@ -296,10 +329,12 @@ class KcpAdapter : public rudp_bench::Adapter {
     return id;
   }
 
-  // socket から受信した生バイト列を KCP に投入 or unreliable inbox に積む
-  void drain_socket() {
+  // socket から受信した生バイト列を KCP に投入 or unreliable inbox に積む。
+  // KCP フレームを 1 つでも input したら true（poll() がスキャン要否を判断、L8）。
+  bool drain_socket() {
     uint8_t* raw = recv_scratch_.data();
     const size_t raw_cap = recv_scratch_.size();
+    bool had_kcp_input = false;
 
     if (is_server_) {
       sockaddr_in src{};
@@ -321,6 +356,7 @@ class KcpAdapter : public rudp_bench::Adapter {
           ikcp_input(conn->kcp, reinterpret_cast<char*>(raw + 1),
                      static_cast<long>(n - 1));
           conn->update_due = true;
+          had_kcp_input = true;
         } else if (prefix == PREFIX_RAW && n >= 5) {
           IUINT32 conv; std::memcpy(&conv, raw + 1, 4);
           AddrConvKey key{addr_key(src), conv};
@@ -344,6 +380,7 @@ class KcpAdapter : public rudp_bench::Adapter {
             ikcp_input(it->second->kcp, reinterpret_cast<char*>(raw + 1),
                        static_cast<long>(n - 1));
             it->second->update_due = true;
+            had_kcp_input = true;
           }
         } else if (prefix == PREFIX_RAW && n >= 5) {
           IUINT32 conv; std::memcpy(&conv, raw + 1, 4);
@@ -354,6 +391,7 @@ class KcpAdapter : public rudp_bench::Adapter {
         }
       }
     }
+    return had_kcp_input;
   }
 
   // KCP デコード済みメッセージを inbox_ に移す
