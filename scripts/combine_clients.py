@@ -116,6 +116,8 @@ SUM_COLS = [
 MAX_COLS = [
     "rss_mb",
     "connect_ms",
+    "close_ms",
+    "cpu_pct_peak",
     "client_tick_gap_p99_us",
     "client_tick_gap_max_us",
     "client_pacing_lag_p99_us",

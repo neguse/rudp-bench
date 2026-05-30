@@ -69,7 +69,13 @@ class DeliveryTracker {
  private:
   static constexpr size_t kDedupWindowPerConn =
       SlidingDedupWindow::kDefaultLimit;
-  static constexpr uint64_t kSeqMask = 0x0000FFFFFFFFFFFFULL;
+  // Dedup is already isolated per conn_id (received_by_conn_ keys on conn_id),
+  // so the seq itself only has to be unique within one conn. The runner packs
+  // global_seq = (conn_index << 32) | local_seq; keeping the full 64 bits means
+  // the key can never alias even if a future caller reuses the high bits for
+  // something other than the conn index (M6 — the old 48-bit mask was a latent
+  // trap, harmless only because the high bits happened to match conn_id).
+  static constexpr uint64_t kSeqMask = 0xFFFFFFFFFFFFFFFFULL;
 
   uint64_t accepted_count_ = 0;
   uint64_t received_count_ = 0;

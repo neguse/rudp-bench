@@ -66,6 +66,46 @@ TEST(DeliveryTracker, DedupWindowIsPerConnection) {
   EXPECT_STREQ(d.dedup_policy(), "sliding_window_65536_per_conn");
 }
 
+// D4: pin the broadcast accounting semantics so a future refactor cannot
+// silently change them. In broadcast mode the runner marks `accepted` once per
+// expected delivery (expected_per_send = conns), while the receive side dedups
+// per (conn_id, seq). The intended invariant: each distinct (receiving cid,
+// origin seq) echo is counted exactly once, and a duplicate of the SAME
+// (cid, seq) collapses — so the same cid receiving the same seq twice is one
+// delivery, never two. delivery_ratio is received/accepted over these rules.
+TEST(DeliveryTracker, BroadcastAccountingSemantics) {
+  DeliveryTracker d;
+  // One client send in a 3-conn broadcast scenario: accepted bumped 3x.
+  const uint64_t seq = (uint64_t{1} << 32) | 7;  // origin conn 1, local seq 7
+  d.mark_accepted(seq, 1);
+  d.mark_accepted(seq, 1);
+  d.mark_accepted(seq, 1);
+  EXPECT_EQ(d.accepted(), 3u);
+
+  // The echo reaches all three receiving conns: distinct cids each count once.
+  EXPECT_TRUE(d.mark_received(seq, 1));
+  EXPECT_TRUE(d.mark_received(seq, 2));
+  EXPECT_TRUE(d.mark_received(seq, 3));
+  EXPECT_EQ(d.received(), 3u);
+
+  // A duplicate of the SAME (cid, seq) must NOT inflate received.
+  EXPECT_FALSE(d.mark_received(seq, 2));
+  EXPECT_EQ(d.received(), 3u);
+  EXPECT_DOUBLE_EQ(d.delivery_ratio(), 1.0);
+}
+
+// M6: the dedup key must survive seq values that use the full 64-bit range
+// (high 32 bits = conn index packed by the runner). The old 48-bit mask would
+// alias seqs that differ only above bit 48; verify no false dedup now.
+TEST(DeliveryTracker, FullWidthSeqDoesNotAlias) {
+  DeliveryTracker d;
+  const uint64_t a = (uint64_t{0x1234} << 48) | 5;
+  const uint64_t b = (uint64_t{0x5678} << 48) | 5;  // differs only above bit 48
+  EXPECT_TRUE(d.mark_received(a, 0));
+  EXPECT_TRUE(d.mark_received(b, 0));  // must be treated as distinct
+  EXPECT_EQ(d.received(), 2u);
+}
+
 TEST(SlidingDedupWindow, KeepsOnlyRecentKeys) {
   SlidingDedupWindow w(3);
   EXPECT_TRUE(w.insert(1));

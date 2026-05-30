@@ -50,6 +50,8 @@ struct CsvRow {
   uint32_t conn_disc_transport = 0;  // bench 中に transport で切れた数
   uint32_t conn_disc_peer = 0;       // peer から close 通告された数
   std::string delivery_dedup_policy = "sliding_window_65536_per_conn";
+  double cpu_pct_peak = 0.0;         // periodic-sampled peak CPU% (M1)
+  uint64_t close_ms = 0;             // teardown(close()) 所要時間 ms (L6)
 };
 
 void write_header(std::ostream& os);

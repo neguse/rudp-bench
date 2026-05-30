@@ -21,6 +21,35 @@ TEST(ProcSampler, CpuTimeIncreasesUnderBusyWork) {
   EXPECT_GT(s.cpu_pct(), 0.0);
 }
 
+TEST(ProcSampler, CpuPeakSurfacesSpikeAndMeasureBeginExcludesWarmup) {
+  ProcSampler s;
+  s.begin();
+  // "warmup": ~80ms of busy CPU that must NOT count toward the measured window.
+  auto burn = [](std::chrono::milliseconds d) {
+    auto t0 = std::chrono::steady_clock::now();
+    volatile uint64_t x = 0;
+    while (std::chrono::steady_clock::now() - t0 < d) {
+      for (int i = 0; i < 100000; ++i) x += i;
+    }
+    (void)x;
+  };
+  burn(std::chrono::milliseconds(80));
+  s.sample_cpu();
+  s.mark_measure_begin();  // M2: re-baseline; warmup CPU dropped from here
+
+  // measured window: a short busy spike then idle, sampling between.
+  burn(std::chrono::milliseconds(40));
+  s.sample_cpu();
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+  s.sample_cpu();
+  s.end();
+
+  // Peak (busy interval) must exceed the mean (busy+idle) — M1 surfaces spikes.
+  EXPECT_GT(s.cpu_pct_peak(), 0.0);
+  EXPECT_GE(s.cpu_pct_peak(), s.cpu_pct());
+  EXPECT_GE(s.cpu_samples(), 2u);
+}
+
 TEST(ProcSampler, RssReadable) {
   ProcSampler s;
   s.begin();

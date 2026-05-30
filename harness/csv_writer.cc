@@ -19,7 +19,7 @@ void write_header(std::ostream& os) {
      << "client_recv_drained_p99,client_recv_drained_max,"
      << "client_outstanding_max,client_tick_ok,"
      << "conn_peak,conn_disc_transport,conn_disc_peer,"
-     << "delivery_dedup_policy\n";
+     << "delivery_dedup_policy,cpu_pct_peak,close_ms\n";
 }
 
 void write_row(std::ostream& os, const CsvRow& r) {
@@ -46,7 +46,8 @@ void write_row(std::ostream& os, const CsvRow& r) {
      << r.client_outstanding_max << ',' << r.client_tick_ok << ','
      << r.conn_peak << ',' << r.conn_disc_transport << ','
      << r.conn_disc_peer << ','
-     << r.delivery_dedup_policy << '\n';
+     << r.delivery_dedup_policy << ','
+     << std::setprecision(2) << r.cpu_pct_peak << ',' << r.close_ms << '\n';
 }
 
 }  // namespace rudp_bench

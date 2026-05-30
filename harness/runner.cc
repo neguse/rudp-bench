@@ -111,11 +111,12 @@ void adaptive_idle_for(std::chrono::microseconds d) {
   if (d.count() > 0) std::this_thread::sleep_for(d);
 }
 
-void sample_rss_if_due(ProcSampler& ps,
-                       std::chrono::steady_clock::time_point now,
-                       std::chrono::steady_clock::time_point& next_sample) {
+void sample_proc_if_due(ProcSampler& ps,
+                        std::chrono::steady_clock::time_point now,
+                        std::chrono::steady_clock::time_point& next_sample) {
   if (now < next_sample) return;
   ps.sample_rss();
+  ps.sample_cpu();  // M1: per-interval CPU so spikes surface as cpu_pct_peak
   next_sample = now + kRssSampleInterval;
 }
 
@@ -146,11 +147,20 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
 
   std::vector<uint8_t> buf(65536);
   std::unordered_set<uint32_t> known_conns;  // broadcast 配信先
-  auto deadline = std::chrono::steady_clock::now() +
-                  std::chrono::seconds(cfg.duration_s + cfg.warmup_s + 2);
-  auto next_rss_sample = std::chrono::steady_clock::now() + kRssSampleInterval;
+  auto start = std::chrono::steady_clock::now();
+  auto deadline = start + std::chrono::seconds(cfg.duration_s + cfg.warmup_s + 2);
+  // M2: exclude warmup from the server CPU window too. The server has no
+  // explicit warmup gate (it just reacts), so re-baseline once warmup elapses.
+  auto measure_begin = start + std::chrono::seconds(cfg.warmup_s);
+  bool measure_started = (cfg.warmup_s == 0);
+  auto next_rss_sample = start + kRssSampleInterval;
   while (std::chrono::steady_clock::now() < deadline) {
-    sample_rss_if_due(ps, std::chrono::steady_clock::now(), next_rss_sample);
+    auto loop_now = std::chrono::steady_clock::now();
+    if (!measure_started && loop_now >= measure_begin) {
+      ps.mark_measure_begin();
+      measure_started = true;
+    }
+    sample_proc_if_due(ps, loop_now, next_rss_sample);
     a.poll();
     bool did_work = false;
     for (size_t drained = 0; drained < kServerRecvDrainLimit; ++drained) {
@@ -177,7 +187,10 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
     }
   }
   ps.end();
+  auto t_close0 = std::chrono::steady_clock::now();
   a.close();
+  uint64_t close_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - t_close0).count();
 
   // Server reports the flush_policy of the reliable channel if reliable
   // traffic was active, else unreliable. Combined runs surface the reliable
@@ -193,7 +206,9 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   row.conns = cfg.conns;
   row.loss = cfg.loss_pct;
   row.cpu_pct = ps.cpu_pct();
+  row.cpu_pct_peak = ps.cpu_pct_peak();
   row.rss_mb = ps.rss_max_mb();
+  row.close_ms = close_ms;
   row.duration_s = cfg.duration_s;
   row.mode = (cfg.mode == ServerMode::Broadcast) ? "broadcast" : "echo";
   row.idle_policy = idle_policy_name(cfg.idle_policy);
@@ -266,6 +281,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
 
   auto tail_until = run_end + std::chrono::milliseconds(500);
   auto next_rss_sample = clock::now() + kRssSampleInterval;
+  bool measure_started = (cfg.warmup_s == 0);  // M2: re-baseline CPU at warmup_end
 
   auto try_send_on = [&](ChannelSched& sched, uint32_t i,
                          clock::time_point now, bool& did_work) {
@@ -289,7 +305,13 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
     std::memcpy(payload.data() + 8, &ts, 8);
     payload[kReliableFlagOffset] = sched.reliable ? 1 : 0;
     if (a.send(ids[i], payload.data(), payload.size(), sched.reliable) == 0) {
-      if (in_measure(now)) {
+      // M4: gate accepted on the SAME bounded window as attempted (in_active).
+      // try_send_on only runs while now < run_end so this matches in_measure in
+      // practice, but using in_active makes the symmetry explicit and removes a
+      // latent off-by-a-tick drift in attempted_ratio if the caller ever sends
+      // past run_end. The recv-side delivery marking keeps the unbounded
+      // in_measure() because tail echoes legitimately arrive after run_end.
+      if (in_active) {
         tick.record_accepted(expected_per_send);
         for (uint32_t k = 0; k < expected_per_send; ++k) {
           dt.mark_accepted(global_seq, ids[i]);
@@ -317,7 +339,11 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
 
   while (clock::now() < tail_until) {
     auto now = clock::now();
-    sample_rss_if_due(ps, now, next_rss_sample);
+    if (!measure_started && now >= warmup_end) {
+      ps.mark_measure_begin();  // M2: drop warmup from the CPU window
+      measure_started = true;
+    }
+    sample_proc_if_due(ps, now, next_rss_sample);
     bool in_diag = now >= warmup_end;
     bool did_work = false;
     tick.record_tick(now, in_diag);
@@ -366,7 +392,13 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   ps.end();
   // close() は自己 shutdown を発生させるので、観測値はその前に snapshot。
   ConnectionStats cs = a.connection_stats();
+  // L6: time teardown. A lib that cannot synchronously tear down (e.g. msquic,
+  // whose close() is a deliberate no-op) shows close_ms≈0, which is itself the
+  // lifecycle-health signal — it is not measuring a clean shutdown.
+  auto t_close0 = clock::now();
   a.close();
+  uint64_t close_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          clock::now() - t_close0).count();
 
   bool reliable_active = cfg.rate_r > 0;
   CsvRow row;
@@ -398,7 +430,9 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.accepted = dt.accepted();
   row.delivery_ratio = dt.delivery_ratio();
   row.cpu_pct = ps.cpu_pct();
+  row.cpu_pct_peak = ps.cpu_pct_peak();
   row.rss_mb = ps.rss_max_mb();
+  row.close_ms = close_ms;
   row.connect_ms = connect_ms;
   row.duration_s = cfg.duration_s;
   row.mode = (cfg.mode == ServerMode::Broadcast) ? "broadcast" : "echo";
