@@ -52,11 +52,12 @@ return 0;
 static bool PayloadSupported(Config cfg) =>
     cfg.SizeBytes >= Config.MinPayloadBytes && cfg.SizeBytes <= Config.MaxPayloadBytes;
 
-static void SampleRssIfDue(ProcSampler ps, ref long nextSampleTicks)
+static void SampleProcIfDue(ProcSampler ps, ref long nextSampleTicks)
 {
     long nowTicks = Stopwatch.GetTimestamp();
     if (nowTicks < nextSampleTicks) return;
     ps.SampleRss();
+    ps.SampleCpu();  // M1
     nextSampleTicks = nowTicks + ProcSampler.RssSampleIntervalTicks;
 }
 
@@ -193,6 +194,11 @@ static CsvRow RunServer(Config cfg)
     var ps = new ProcSampler();
     ps.Begin();
     long nextRssSampleTicks = Stopwatch.GetTimestamp() + ProcSampler.RssSampleIntervalTicks;
+    // M2: exclude warmup from the server CPU window (mirrors run_server in
+    // harness/runner.cc — the server has no explicit warmup gate, so re-baseline
+    // once warmup elapses).
+    long serverMeasureBeginTicks = Stopwatch.GetTimestamp() + (long)(cfg.WarmupS * Stopwatch.Frequency);
+    bool measureStarted = cfg.WarmupS == 0;
 
     // クライアントの warmup + duration + tail_drain を収容するため +2秒余裕
     long deadlineTicks = Stopwatch.GetTimestamp() +
@@ -203,7 +209,12 @@ static CsvRow RunServer(Config cfg)
 
     while (Stopwatch.GetTimestamp() < deadlineTicks)
     {
-        SampleRssIfDue(ps, ref nextRssSampleTicks);
+        if (!measureStarted && Stopwatch.GetTimestamp() >= serverMeasureBeginTicks)
+        {
+            ps.MarkMeasureBegin();
+            measureStarted = true;
+        }
+        SampleProcIfDue(ps, ref nextRssSampleTicks);
         manager.PollEvents();
         bool didWork = inbox.Count > 0;
 
@@ -232,7 +243,9 @@ static CsvRow RunServer(Config cfg)
     }
 
     ps.End();
+    long tCloseBegin = Stopwatch.GetTimestamp();  // L6: time teardown
     manager.Stop();
+    ulong closeMs = (ulong)((Stopwatch.GetTimestamp() - tCloseBegin) * 1000L / Stopwatch.Frequency);
 
     return new CsvRow
     {
@@ -246,7 +259,9 @@ static CsvRow RunServer(Config cfg)
         Loss = cfg.Loss,
         DurationS = cfg.DurationS,
         CpuPct = ps.CpuPct(),
+        CpuPctPeak = ps.CpuPctPeak(),
         RssMb = ps.RssMbMax,
+        CloseMs = closeMs,
         Mode = cfg.Mode,
         IdlePolicy = cfg.IdlePolicy,
         FlushPolicy = FlushPolicy(cfg),
@@ -319,6 +334,7 @@ static CsvRow RunClient(Config cfg)
     var ps = new ProcSampler();
     ps.Begin();
     long nextRssSampleTicks = Stopwatch.GetTimestamp() + ProcSampler.RssSampleIntervalTicks;
+    bool measureStarted = cfg.WarmupS == 0;  // M2
 
     // タイミングは Stopwatch ベース（DateTime.UtcNow より高精度）
     long nowTicks = Stopwatch.GetTimestamp();
@@ -366,7 +382,14 @@ static CsvRow RunClient(Config cfg)
             ? DeliveryMethod.ReliableOrdered
             : DeliveryMethod.Unreliable;
         peers[i].Send(payload, method);
-        if (inActive)
+        // D1: count accepted only when the peer is actually connected, matching
+        // the C++ harness which marks accepted only on a.send()==0. NetPeer.Send
+        // is void (cannot fail-return), so the connected state is the closest
+        // "the transport accepted this send" signal. In steady state every peer
+        // is connected (we waited for all before measuring), so this normally
+        // agrees with the old unconditional count — it only differs if a peer
+        // drops mid-run, which should not inflate accepted.
+        if (inActive && peers[i].ConnectionState == ConnectionState.Connected)
         {
             tick.RecordAccepted(expectedPerSend);
             for (uint k = 0; k < expectedPerSend; k++) delivery.MarkAccepted(globalSeq, i);
@@ -382,7 +405,12 @@ static CsvRow RunClient(Config cfg)
     {
         nowTicks = Stopwatch.GetTimestamp();
         if (nowTicks >= tailUntilTicks) break;
-        SampleRssIfDue(ps, ref nextRssSampleTicks);
+        if (!measureStarted && nowTicks >= warmupEndTicks)
+        {
+            ps.MarkMeasureBegin();  // M2
+            measureStarted = true;
+        }
+        SampleProcIfDue(ps, ref nextRssSampleTicks);
 
         bool inDiag = nowTicks >= warmupEndTicks;
         bool inActiveSend = nowTicks >= warmupEndTicks && nowTicks < runEndTicks;
@@ -431,7 +459,9 @@ static CsvRow RunClient(Config cfg)
     }
 
     ps.End();
+    long tCloseBegin = Stopwatch.GetTimestamp();  // L6: time teardown
     for (uint i = 0; i < cfg.Conns; i++) managers[i].Stop();
+    ulong closeMs = (ulong)((Stopwatch.GetTimestamp() - tCloseBegin) * 1000L / Stopwatch.Frequency);
 
     // Per-channel RTT histogram sidecars (same binary layout as the C++
     // LatencyHist::write_binary) so combine_clients.py can merge a multi-proc
@@ -475,7 +505,9 @@ static CsvRow RunClient(Config cfg)
         Accepted = delivery.Accepted,
         DeliveryRatio = delivery.DeliveryRatio,
         CpuPct = ps.CpuPct(),
+        CpuPctPeak = ps.CpuPctPeak(),
         RssMb = ps.RssMbMax,
+        CloseMs = closeMs,
         ConnectMs = connectMs,
         DurationS = cfg.DurationS,
         Mode = cfg.Mode,
@@ -515,7 +547,8 @@ static string CsvHeader() =>
     "client_missed_pacing,client_attempted,client_accepted," +
     "client_attempted_ratio,client_accepted_ratio," +
     "client_recv_drained_p99,client_recv_drained_max," +
-    "client_outstanding_max,client_tick_ok,delivery_dedup_policy";
+    "client_outstanding_max,client_tick_ok,delivery_dedup_policy," +
+    "cpu_pct_peak,close_ms";
 
 static string FormatRow(CsvRow r) =>
     $"{r.Library},{r.Encryption},{r.Phase}," +
@@ -536,7 +569,8 @@ static string FormatRow(CsvRow r) =>
     $"{r.ClientAttemptedRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.ClientAcceptedRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.ClientRecvDrainedP99},{r.ClientRecvDrainedMax}," +
-    $"{r.ClientOutstandingMax},{r.ClientTickOk},{r.DeliveryDedupPolicy}";
+    $"{r.ClientOutstandingMax},{r.ClientTickOk},{r.DeliveryDedupPolicy}," +
+    $"{r.CpuPctPeak.ToString("F2", CultureInfo.InvariantCulture)},{r.CloseMs}";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -612,6 +646,8 @@ class CsvRow
     public ulong ClientOutstandingMax;
     public uint ClientTickOk;
     public string DeliveryDedupPolicy = DeliveryTracker.DedupPolicy;
+    public double CpuPctPeak;  // M1
+    public ulong CloseMs;      // L6
 }
 
 sealed class PooledInbox<TConn>
@@ -918,10 +954,20 @@ class ProcSampler
 {
     public static readonly long RssSampleIntervalTicks = Math.Max(1L, Stopwatch.Frequency / 10);
 
+    // D6: TotalProcessorTime is the .NET equivalent of getrusage(RUSAGE_SELF)
+    // used by the C++ harness — both sum CPU across ALL threads of the process,
+    // so the two are measuring the same quantity (whole-process CPU). The
+    // sampling shape is also kept identical to harness/proc_sampler.cc: a 2-point
+    // mean plus a periodic per-interval peak (M1), re-baselined at warmup_end so
+    // warmup is excluded (M2).
     private TimeSpan cpuBefore_;
     private TimeSpan cpuAfter_;
     private long wallBeforeTicks_;
     private long wallAfterTicks_;
+    private TimeSpan cpuLast_;
+    private long cpuLastTicks_;
+    private double cpuPctPeak_;
+    private ulong cpuSamples_;
     private ulong rssMbMax_;
     private ulong rssSamples_;
 
@@ -931,9 +977,25 @@ class ProcSampler
         proc.Refresh();
         cpuBefore_ = proc.TotalProcessorTime;
         wallBeforeTicks_ = Stopwatch.GetTimestamp();
+        cpuLast_ = cpuBefore_;
+        cpuLastTicks_ = wallBeforeTicks_;
+        cpuPctPeak_ = 0.0;
+        cpuSamples_ = 0;
         rssMbMax_ = 0;
         rssSamples_ = 0;
         SampleRss();
+    }
+
+    // M2: re-baseline the CPU/wall window to "now" so warmup is not counted.
+    public void MarkMeasureBegin()
+    {
+        var proc = Process.GetCurrentProcess();
+        proc.Refresh();
+        cpuBefore_ = proc.TotalProcessorTime;
+        wallBeforeTicks_ = Stopwatch.GetTimestamp();
+        cpuLast_ = cpuBefore_;
+        cpuLastTicks_ = wallBeforeTicks_;
+        cpuPctPeak_ = 0.0;
     }
 
     public void SampleRss()
@@ -943,8 +1005,27 @@ class ProcSampler
         rssSamples_++;
     }
 
+    // M1: per-interval CPU% so short spikes surface as the peak.
+    public void SampleCpu()
+    {
+        var proc = Process.GetCurrentProcess();
+        proc.Refresh();
+        TimeSpan nowCpu = proc.TotalProcessorTime;
+        long nowTicks = Stopwatch.GetTimestamp();
+        double wallS = (double)(nowTicks - cpuLastTicks_) / Stopwatch.Frequency;
+        if (wallS > 0)
+        {
+            double pct = (nowCpu - cpuLast_).TotalSeconds / wallS * 100.0;
+            if (pct > cpuPctPeak_) cpuPctPeak_ = pct;
+            cpuSamples_++;
+        }
+        cpuLast_ = nowCpu;
+        cpuLastTicks_ = nowTicks;
+    }
+
     public void End()
     {
+        SampleCpu();
         var proc = Process.GetCurrentProcess();
         proc.Refresh();
         cpuAfter_ = proc.TotalProcessorTime;
@@ -958,6 +1039,8 @@ class ProcSampler
         double wallS = (double)(wallAfterTicks_ - wallBeforeTicks_) / Stopwatch.Frequency;
         return wallS > 0 ? cpuS / wallS * 100.0 : 0.0;
     }
+
+    public double CpuPctPeak() => cpuPctPeak_ > 0.0 ? cpuPctPeak_ : CpuPct();
 
     public ulong RssMbMax => rssMbMax_;
     public ulong RssSamples => rssSamples_;
