@@ -43,6 +43,7 @@ DIAGNOSTIC_FIELDS = [
     "accepted_ratio",
     "delivery_ratio",
     "client_tick_ok",
+    "client_tick_ok_check",
     "client_tick_gap_p99_us",
     "client_pacing_lag_p99_us",
     "raw_result_path",
@@ -164,6 +165,15 @@ def unsupported_conns(args: argparse.Namespace) -> bool:
 
 
 def role_exit_reason(role: str, raw: Optional[Dict[str, str]], status: str) -> str:
+    # S4: msquic terminates the process with std::_Exit(0) (harness/main.cc),
+    # but ONLY on the success path, AFTER write_output() has produced the raw
+    # CSV. So a normal msquic run reaches here as status 0 + present raw = "ok".
+    # A real failure during the measured run (a worker SIGSEGV/SIGABRT) kills the
+    # process with a non-zero signal *before* _Exit(0) runs, so it still surfaces
+    # as {role}_crash here (this is how the v2 report's 1000-conn client_crash
+    # was caught). The only thing _Exit(0) masks is a crash during clean teardown
+    # — which is intentional and irrelevant to the measurement. If msquic somehow
+    # exits 0 without writing a row, raw is None below and we flag missing_raw.
     status_code = int_or_none(status)
     if status_code == TIMEOUT_STATUS:
         return f"{role}_timeout"
@@ -204,6 +214,28 @@ def client_accepted_ratio(raw: Dict[str, str]) -> str:
     if attempted == 0:
         return "0.0000"
     return f"{accepted / attempted:.4f}"
+
+
+def recomputed_tick_ok(raw: Optional[Dict[str, str]]) -> str:
+    """S2: recompute the validity gate from the ratios in the raw CSV instead of
+    trusting the producing binary's self-reported client_tick_ok. Both the C++
+    harness (runner.cc) and the litenetlib adapter (Program.cs) define tick_ok as
+    accepted_ratio>=0.99, plus attempted_ratio>=0.99 when a send rate is set.
+    Surfacing this independently computed value lets a reader spot any drift
+    between those two implementations (the only reason litenetlib's self-reported
+    flag could differ from the C++ libraries')."""
+    if raw is None:
+        return ""
+    try:
+        acc_ratio = float(raw.get("client_accepted_ratio") or 0.0)
+        att_ratio = float(raw.get("client_attempted_ratio") or 0.0)
+    except ValueError:
+        return ""
+    combined = int_or_zero(raw.get("rate_r")) + int_or_zero(raw.get("rate_u"))
+    ok = acc_ratio >= 0.99
+    if combined > 0:
+        ok = ok and att_ratio >= 0.99
+    return "1" if ok else "0"
 
 
 def canonical_delivery_ratio(client: Optional[Dict[str, str]]) -> str:
@@ -308,6 +340,7 @@ def diagnostic_row(run_id: str, scenario_id: str, role: str,
         "accepted_ratio": client_accepted_ratio(raw) if is_client else "",
         "delivery_ratio": canonical_delivery_ratio(raw) if is_client else "",
         "client_tick_ok": raw.get("client_tick_ok", "") if is_client else "",
+        "client_tick_ok_check": recomputed_tick_ok(raw) if is_client else "",
         "client_tick_gap_p99_us": raw.get("client_tick_gap_p99_us", "") if is_client else "",
         "client_pacing_lag_p99_us": raw.get("client_pacing_lag_p99_us", "") if is_client else "",
         "raw_result_path": raw_path,

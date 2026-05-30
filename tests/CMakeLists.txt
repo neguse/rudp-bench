@@ -40,6 +40,10 @@ if(PYTHON3_EXECUTABLE)
                 --build-dir "${CMAKE_BINARY_DIR}"
     )
     set_tests_properties(test_combine_clients PROPERTIES TIMEOUT 15)
+    add_test(
+        NAME test_aggregate_runs
+        COMMAND ${PYTHON3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_aggregate_runs.py"
+    )
 endif()
 
 add_executable(test_raw_udp_smoke test_raw_udp_smoke.cc)

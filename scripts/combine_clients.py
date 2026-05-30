@@ -113,6 +113,11 @@ SUM_COLS = [
 ]
 
 # Columns aggregated by max across N client CSVs (worst observed).
+# S3: rtt_* are deliberately NOT here. They are recomputed below from the merged
+# histogram bins (the only correct cross-proc percentile), and a max-of-per-proc
+# fallback is applied explicitly when the bin sidecars are missing. The old code
+# listed rtt_* here and then overwrote them, leaving a misleading max in the one
+# path (empty bins) where the overwrite produced 0.
 MAX_COLS = [
     "rss_mb",
     "connect_ms",
@@ -125,13 +130,11 @@ MAX_COLS = [
     "client_recv_drained_p99",
     "client_recv_drained_max",
     "client_outstanding_max",
-    "rtt_r_p50_us",
-    "rtt_r_p95_us",
-    "rtt_r_p99_us",
-    "rtt_u_p50_us",
-    "rtt_u_p95_us",
-    "rtt_u_p99_us",
 ]
+
+# rtt percentile columns, recomputed from merged bins (fallback: max of procs).
+RTT_R_COLS = ["rtt_r_p50_us", "rtt_r_p95_us", "rtt_r_p99_us"]
+RTT_U_COLS = ["rtt_u_p50_us", "rtt_u_p95_us", "rtt_u_p99_us"]
 
 # Columns aggregated by sum then re-derived ratios after.
 PASSTHROUGH_FROM_FIRST = [
@@ -235,13 +238,18 @@ def combine(
     for col in MAX_COLS:
         combined[col] = str(max(to_int(r.get(col, "")) for r in rows))
 
-    # Recompute percentiles from merged histogram bins.
-    combined["rtt_r_p50_us"] = str(hist_r.percentile_us(0.50))
-    combined["rtt_r_p95_us"] = str(hist_r.percentile_us(0.95))
-    combined["rtt_r_p99_us"] = str(hist_r.percentile_us(0.99))
-    combined["rtt_u_p50_us"] = str(hist_u.percentile_us(0.50))
-    combined["rtt_u_p95_us"] = str(hist_u.percentile_us(0.95))
-    combined["rtt_u_p99_us"] = str(hist_u.percentile_us(0.99))
+    # S3: recompute rtt percentiles from merged bins. If the bin sidecars are
+    # missing/empty (hist.count == 0), fall back to the max of each proc's
+    # reported percentile rather than silently emitting 0.
+    def rtt_value(hist: Histogram, p: float, col: str) -> str:
+        if hist.count > 0:
+            return str(hist.percentile_us(p))
+        return str(max(to_int(r.get(col, "")) for r in rows))
+
+    for col, p in zip(RTT_R_COLS, (0.50, 0.95, 0.99)):
+        combined[col] = rtt_value(hist_r, p, col)
+    for col, p in zip(RTT_U_COLS, (0.50, 0.95, 0.99)):
+        combined[col] = rtt_value(hist_u, p, col)
 
     # Aggregate throughput from individual rows.
     mbps, msg_per_sec = combine_throughput(rows)
