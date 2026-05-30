@@ -22,11 +22,11 @@ CAPABILITIES: Dict[str, Dict[str, object]] = {
         "max_conns": None,
         "modes": {
             "r": {
-                "max_payload": 65501,
+                "max_payload": 65497,
                 "flush_policy": "immediate_retransmit_poll",
                 "transport": "udp_datagram_ack",
             },
-            "u": {"max_payload": 65501, "flush_policy": "immediate", "transport": "udp_datagram"},
+            "u": {"max_payload": 65497, "flush_policy": "immediate", "transport": "udp_datagram"},
         },
     },
     "enet": {

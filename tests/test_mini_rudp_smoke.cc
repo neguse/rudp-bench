@@ -112,8 +112,9 @@ TEST(MiniRudpSmoke, Capability) {
   auto a = create_adapter("mini_rudp");
   EXPECT_TRUE(a->supports(true));
   EXPECT_TRUE(a->supports(false));
-  EXPECT_EQ(a->max_payload_bytes(true), 65501u);
-  EXPECT_EQ(a->max_payload_bytes(false), 65501u);
+  // 10-byte wire header (flags u16 + conv u32 + seq u32) after L11 multiplexing.
+  EXPECT_EQ(a->max_payload_bytes(true), 65497u);
+  EXPECT_EQ(a->max_payload_bytes(false), 65497u);
   EXPECT_FALSE(a->encryption_on());
   EXPECT_STREQ(a->name(), "mini_rudp");
 }
