@@ -53,6 +53,21 @@ void ensure_msquic_cert() {
 
 const QUIC_BUFFER Alpn = {9, (uint8_t*)"rudp-bnch"};
 
+// L2: the suspected cause of the flat ~0.58 datagram delivery is that, with a
+// full congestion window, msquic discards unreliable datagrams (LOST_DISCARDED)
+// rather than queueing them — a roughly constant drop fraction independent of
+// conns. Disable pacing so submitted datagrams are offered to the network
+// immediately instead of being held by the pacer. (BBR, the other lever, is
+// gated behind QUIC_API_ENABLE_PREVIEW_FEATURES in this vendored msquic and the
+// prebuilt runtime may not carry it, so it is intentionally not forced here.)
+// Whether pacing-off lifts delivery — or whether the loss is purely cwnd-driven
+// discard — is now observable via the L1/L4 datagram send-state counters; the
+// instrumentation is what makes this a verifiable change rather than a guess.
+void apply_datagram_tuning(QUIC_SETTINGS& settings) {
+  settings.PacingEnabled = FALSE;
+  settings.IsSet.PacingEnabled = TRUE;
+}
+
 struct SendCtx {
   std::vector<uint8_t> data;
   QUIC_BUFFER buf;
@@ -95,6 +110,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
     settings.IsSet.PeerUnidiStreamCount = TRUE;
     settings.DatagramReceiveEnabled = TRUE;
     settings.IsSet.DatagramReceiveEnabled = TRUE;
+    apply_datagram_tuning(settings);
 
     status = MsQuic->ConfigurationOpen(reg_, &Alpn, 1, &settings, sizeof(settings), nullptr, &config_);
     if (QUIC_FAILED(status)) MSQUIC_DIE("server ConfigurationOpen", status);
@@ -137,6 +153,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
       settings.IsSet.PeerUnidiStreamCount = TRUE;
       settings.DatagramReceiveEnabled = TRUE;
       settings.IsSet.DatagramReceiveEnabled = TRUE;
+      apply_datagram_tuning(settings);
 
       if (QUIC_STATUS s = MsQuic->ConfigurationOpen(
               reg_, &Alpn, 1, &settings, sizeof(settings), nullptr, &config_);
@@ -206,11 +223,34 @@ class MsquicAdapter : public rudp_bench::Adapter {
   }
 
   void close() override {
-    // Fully no-op: any synchronous msquic teardown call (ConnectionClose,
-    // ListenerClose, RegistrationClose, MsQuicClose) races with workers
-    // still draining callbacks at this scale and ends in deadlock or
-    // glibc double-free. The harness is exiting; the OS reclaims fds and
-    // memory at process termination.
+    // Teardown stays a no-op: any synchronous msquic teardown call
+    // (ConnectionClose, ListenerClose, RegistrationClose, MsQuicClose) races
+    // with workers still draining callbacks at this scale and ends in deadlock
+    // or glibc double-free. The harness is exiting; the OS reclaims fds and
+    // memory at process termination. (close_ms≈0 is the expected lifecycle
+    // signal — see harness/runner.cc L6.)
+    //
+    // L1/L4: emit the datagram send-state tally to stderr (captured by the run
+    // harness into stderr_path). offered = QUIC accepted for tx; acked = peer
+    // received; lost = QUIC discarded (cwnd/congestion); canceled = torn down;
+    // submit_failed = DatagramSend rejected outright. lost+canceled is the
+    // "sent but not delivered" mass that the flat ~0.58 delivery hides.
+    if (!closed_) {
+      closed_ = true;
+      uint64_t offered = dgram_offered_.load();
+      uint64_t submit_failed = dgram_submit_failed_.load();
+      if (offered > 0 || submit_failed > 0) {
+        std::fprintf(stderr,
+                     "msquic_datagram: offered=%llu submit_failed=%llu "
+                     "acked=%llu lost=%llu canceled=%llu\n",
+                     (unsigned long long)offered,
+                     (unsigned long long)submit_failed,
+                     (unsigned long long)dgram_acked_.load(),
+                     (unsigned long long)dgram_lost_.load(),
+                     (unsigned long long)dgram_canceled_.load());
+        std::fflush(stderr);
+      }
+    }
   }
 
   const char* name() const override { return "msquic"; }
@@ -271,23 +311,41 @@ class MsquicAdapter : public rudp_bench::Adapter {
       }
 
       case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED: {
-        uint32_t cid = 0;
-        {
-          std::lock_guard<std::mutex> lock(mtx_);
-          auto it = conn_to_id_.find(conn);
-          if (it != conn_to_id_.end()) cid = it->second;
-        }
+        // L3: one critical section instead of two on the hot recv path. The
+        // old code locked to map conn->cid, unlocked, then re-locked to
+        // enqueue — doubling lock churn under the single mtx_ that already
+        // serializes every worker callback against main.
         const auto* buf = ev->DATAGRAM_RECEIVED.Buffer;
-        {
-          std::lock_guard<std::mutex> lock(mtx_);
-          inbox_.enqueue(cid, buf->Buffer, buf->Length);
-        }
+        std::lock_guard<std::mutex> lock(mtx_);
+        uint32_t cid = 0;
+        auto it = conn_to_id_.find(conn);
+        if (it != conn_to_id_.end()) cid = it->second;
+        inbox_.enqueue(cid, buf->Buffer, buf->Length);
         break;
       }
 
       case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED: {
-        if (QUIC_DATAGRAM_SEND_STATE_IS_FINAL(
-                ev->DATAGRAM_SEND_STATE_CHANGED.State)) {
+        auto state = ev->DATAGRAM_SEND_STATE_CHANGED.State;
+        if (QUIC_DATAGRAM_SEND_STATE_IS_FINAL(state)) {
+          // L1/L4: classify the terminal state instead of silently dropping it.
+          // ACKNOWLEDGED == the peer got it; LOST_DISCARDED == QUIC itself gave
+          // up on it (congestion/cwnd, the suspected cause of the flat ~0.58);
+          // CANCELED == torn down before send. This is what separates "sent but
+          // lost" from "never offered" (dgram_submit_failed_).
+          switch (state) {
+            case QUIC_DATAGRAM_SEND_ACKNOWLEDGED:
+            case QUIC_DATAGRAM_SEND_ACKNOWLEDGED_SPURIOUS:
+              dgram_acked_.fetch_add(1, std::memory_order_relaxed);
+              break;
+            case QUIC_DATAGRAM_SEND_LOST_DISCARDED:
+              dgram_lost_.fetch_add(1, std::memory_order_relaxed);
+              break;
+            case QUIC_DATAGRAM_SEND_CANCELED:
+              dgram_canceled_.fetch_add(1, std::memory_order_relaxed);
+              break;
+            default:
+              break;
+          }
           auto* ctx = static_cast<SendCtx*>(
               ev->DATAGRAM_SEND_STATE_CHANGED.ClientContext);
           delete ctx;
@@ -425,9 +483,11 @@ class MsquicAdapter : public rudp_bench::Adapter {
     ctx->buf.Length = static_cast<uint32_t>(len);
 
     if (QUIC_FAILED(MsQuic->DatagramSend(conn, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx))) {
+      dgram_submit_failed_.fetch_add(1, std::memory_order_relaxed);
       delete ctx;
       return -1;
     }
+    dgram_offered_.fetch_add(1, std::memory_order_relaxed);
     return 0;
   }
 
@@ -491,6 +551,15 @@ class MsquicAdapter : public rudp_bench::Adapter {
   std::atomic<uint32_t> connected_now_{0};
   std::atomic<uint32_t> shutdown_by_transport_{0};
   std::atomic<uint32_t> shutdown_by_peer_{0};
+
+  // L1/L4: datagram send-state accounting. dgram_offered_ counts DatagramSend
+  // calls that QUIC accepted for transmission; the rest are terminal states.
+  std::atomic<uint64_t> dgram_offered_{0};
+  std::atomic<uint64_t> dgram_submit_failed_{0};
+  std::atomic<uint64_t> dgram_acked_{0};
+  std::atomic<uint64_t> dgram_lost_{0};
+  std::atomic<uint64_t> dgram_canceled_{0};
+  bool closed_ = false;
 
   rudp_bench::ReusableInboundQueue inbox_;
 
