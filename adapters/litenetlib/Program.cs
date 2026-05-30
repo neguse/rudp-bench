@@ -179,6 +179,7 @@ static CsvRow RunServer(Config cfg)
 {
     var listener = new EventBasedNetListener();
     var manager = new NetManager(listener) { AutoRecycle = true };
+    LnlTune.Apply(manager, (int)cfg.Conns);  // server stays threaded; pool sized to all conns
 
     // 受信メッセージキュー（PollEvents()内で同期的にpushされる）
     var inbox = new PooledInbox<NetPeer>();
@@ -295,7 +296,14 @@ static CsvRow RunClient(Config cfg)
             inbox.Add(connId, reader);
 
         var manager = new NetManager(listener) { AutoRecycle = true };
-        if (!manager.Start())
+        LnlTune.Apply(manager, 1);  // client: one peer per NetManager
+        // LNL_MANUAL: run each client NetManager WITHOUT its ReceiveThread +
+        // LogicThread (2 OS threads/conn -> ~2000 threads at 1000 conns, the
+        // reason the client needed 3 phys cores). In manual mode PollEvents()
+        // does the receive and PumpManual() drives the logic from the main loop,
+        // so the client polls like the C++ load generators do.
+        bool started = LnlTune.Manual ? manager.StartInManualMode(0) : manager.Start();
+        if (!started)
         {
             Console.Error.WriteLine($"NetManager.Start() failed for conn {connId}");
             Environment.Exit(2);
@@ -317,6 +325,7 @@ static CsvRow RunClient(Config cfg)
             while (Stopwatch.GetTimestamp() < dueTicks)
             {
                 for (uint j = 0; j <= i; j++) managers[j].PollEvents();
+                LnlTune.PumpManual(managers, i + 1);
                 Thread.Sleep(1);
             }
         }
@@ -326,6 +335,7 @@ static CsvRow RunClient(Config cfg)
     while (!connected.All(c => c))
     {
         for (uint i = 0; i < cfg.Conns; i++) managers[i].PollEvents();
+        LnlTune.PumpManual(managers, cfg.Conns);
         Thread.Sleep(1);
     }
     long tConnectEndTicks = Stopwatch.GetTimestamp();
@@ -427,6 +437,7 @@ static CsvRow RunClient(Config cfg)
         }
 
         for (uint i = 0; i < cfg.Conns; i++) managers[i].PollEvents();
+        LnlTune.PumpManual(managers, cfg.Conns);
 
         ulong drainedThisTick = 0;
         foreach (var msg in inbox.Entries)
@@ -944,6 +955,76 @@ class DeliveryTracker
     public ulong Accepted => acceptedCount_;
     public ulong Received => receivedCount_;
     public double DeliveryRatio => acceptedCount_ > 0 ? (double)receivedCount_ / acceptedCount_ : 0.0;
+}
+
+// ---------------------------------------------------------------------------
+// LnlTune — LiteNetLib tuning. Defaults are the config chosen by the
+// 2026-05-31 sweep (docs/measurements/2026-05-31-litenetlib-tuning); env
+// overrides exist only to re-run the sweep.
+//
+// Sweep findings (mixed 50/50, 1% loss, server=1 phys core, client=2 phys
+// cores, N=3):
+//   - The client's per-conn NetManager spawns 2 OS threads/conn; at 1000 conns
+//     that ~2000-thread thrash made the client (not the server) the bottleneck
+//     (threaded attempted_ratio ~0.88 -> INVALID). StartInManualMode removes
+//     the threads and the client polls like the C++ load generators -> 1000conn
+//     becomes VALID on 2 cores, and the TRUE server scaling is finally visible:
+//     ~0.99 to 1500, 0.957 at 2000 (server CPU only 188%, not saturated).
+//   - PacketPoolSize=1000 is exhausted past ~1000 in-flight packets -> GC
+//     pressure; auto-scaling it to 2x conns lifts 2000conn 0.957 -> 0.989.
+//   - IPv6Enabled dual-binds v4+v6 and selects both sockets every loop; off
+//     (this is an IPv4 benchmark) lifts it further; combined 0.957 -> 0.9965.
+//   - REJECTED: UseNativeSockets (no gain + corrupted rtt timestamps),
+//     DOTNET_gcServer (marginal, hurt when combined). Left as off-by-default.
+//   LNL_MANUAL      client StartInManualMode (no per-conn threads)   (default 1)
+//   LNL_MANUAL_UPDATE_MS  manual logic cadence ms                    (default 5)
+//   LNL_IPV6        IPv6Enabled (1 to re-enable dual-bind)           (default 0)
+//   LNL_UPDATE      UpdateTime ms                                    (default 15)
+//   LNL_POOL        PacketPoolSize (0 = auto: max(1000, conns*2))    (default 0)
+//   LNL_NATIVE      UseNativeSockets                                 (default 0)
+// Server GC via DOTNET_gcServer (rejected; off by default).
+// ---------------------------------------------------------------------------
+
+static class LnlTune
+{
+    public static readonly bool Manual = GetI("LNL_MANUAL", 1) != 0;
+    public static readonly bool Ipv6 = GetI("LNL_IPV6", 0) != 0;
+    public static readonly int PoolOverride = GetI("LNL_POOL", 0);
+    public static readonly int UpdateTime = GetI("LNL_UPDATE", 15);
+    public static readonly bool Native = GetI("LNL_NATIVE", 0) != 0;
+    public static readonly float ManualUpdateMs = GetI("LNL_MANUAL_UPDATE_MS", 5);
+
+    static long s_lastManualTicks;
+
+    static int GetI(string k, int d)
+    {
+        var v = Environment.GetEnvironmentVariable(k);
+        return int.TryParse(v, out var r) ? r : d;
+    }
+
+    // `conns` = number of peers this NetManager serves (server: all conns,
+    // client: 1) so the packet pool is sized where it matters (the server).
+    public static void Apply(NetManager m, int conns)
+    {
+        m.IPv6Enabled = Ipv6;
+        m.UpdateTime = UpdateTime;
+        m.UseNativeSockets = Native;
+        m.PacketPoolSize = PoolOverride > 0 ? PoolOverride : Math.Max(1000, conns * 2);
+    }
+
+    // Drive manual-mode logic from the caller's poll loop, gated to ~UpdateTime
+    // cadence so it matches the threaded LogicThread instead of running every
+    // (very frequent) tick.
+    public static void PumpManual(NetManager[] managers, uint count)
+    {
+        if (!Manual) return;
+        long now = Stopwatch.GetTimestamp();
+        if (s_lastManualTicks == 0) s_lastManualTicks = now;
+        float dtMs = (now - s_lastManualTicks) * 1000f / Stopwatch.Frequency;
+        if (dtMs < ManualUpdateMs) return;
+        s_lastManualTicks = now;
+        for (uint i = 0; i < count; i++) managers[i].ManualUpdate(dtMs);
+    }
 }
 
 // ---------------------------------------------------------------------------
