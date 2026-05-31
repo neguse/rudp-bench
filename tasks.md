@@ -125,3 +125,28 @@ S1,S2,S3(scripts)。実機ループバックで確認した代表例: **mini_rud
 **再測で数値確定が必要（コードは変更済み・性能効果は未測定）:** L2(pacing-off),L3(lock 縮小),L7-L9(kcp 窓/interval/poll),
 L11-L13(mini_rudp 多重化/プール) 等の性能改善は netem+隔離での再ランで効果を定量化する（`scripts/aggregate_runs.py` で
 N=3 中央値を再現可能化済み＝S1）。これらは「正しく動く（smoke/unit 緑・配信不変）」までを保証し、改善幅は未保証。
+
+---
+
+## G. 横展開バックログ（2026-05-31 の enet/kcp/litenetlib チューニングからの派生）
+
+**方針(重要):** 「CPU を削減**しうるか**」は**コードで証明する**（実行命令数 / メモリアクセス / ロック経路 / O() を読む）。
+測定は**効き幅(magnitude)専用**で、飽和点は run-to-run ±0.08 と巨大なので N=3-5 では ~0.05 の差を解像できない。
+**別セッション比較を数字根拠にしない**（buffer/peerCount でこれを踏んだ — dev-notes §1.5）。enet で確立した2パターンを全 adapter に横展開する。
+
+- [ ] **G1 ［per-message malloc churn を全 adapter で code 監査 → プール化］** enet は glibc malloc を thread-local freelist に置換して効いた（機構: glibc tcache は 1 bin 7 個まで。高 conns の in-flight 同サイズ確保が 7 を超えると fastbin/smallbin の**ロック経路**に落ちる。freelist は無制限・ロック無しで回避）。各 adapter で「毎メッセージ heap alloc が tcache を溢れさせる churn があるか」を**コードで**判定し、あれば pool 化:
+  - **未対応**: msquic — `SendCtx` を毎送信 `new`/`delete`（`send_datagram`/`send_stream`、stream の `StreamCtx` も）。glibc 直叩き。pool 化余地。
+  - **未対応**: gns — message alloc は GNS 内部(`CSteamNetworkingMessage::New`)で adapter からは触れないが、adapter 側 alloc の有無を確認。
+  - **適用済み(棚卸し)**: mini_rudp = reliable pending を `free_buffers_` プール再利用(L12)、unreliable は `send_scratch_` 再利用。kcp = `raw_send_scratch_` 再利用。enet = thread-local pool(2026-05-31)。raw_udp = alloc 僅少。
+  - litenetlib は .NET ＝ ArrayPool/PacketPool で別管理(PacketPoolSize は L31 で auto-scale 済み)。
+
+- [ ] **G2 ［固定 O(max)/全件スキャン税を全 adapter で code 監査 → O(actual) 化］** enet は `host->peers[0..4095]` を毎 flush 走査（`protocol.c:1611`、`ENetPeer` ~500B 巨大構造体で cache-miss 支配）→ 実 conns に sizing で除去。各 adapter で「実 conn 数でなく上限/全件を毎 tick 走査する箇所」を洗い出し O(actual) 化:
+  - **適用済み(棚卸し)**: kcp poll = O(due) 早期 return(L8)。mini_rudp poll retx = `earliest_retx_` 早期 return(L12)。gns = PollGroup でまとめ受信(per-conn ループ解消、2026-05-31)。enet = peerCount sizing。
+  - **未対応**: msquic — 単一 `mtx_` が全 worker callback と main を直列化(L3、ロック scope は一部縮小したが深い分割は未)。
+  - 残りの adapter(slikenet/udt4/yojimbo)は未監査。
+
+- [ ] **G3 ［CPU 削減主張の検証ルールをコード規約に追記］** dev-notes §3 か §5 に「性能改善の主張は (a)機構=コードで証明、(b)効き幅=同一セッション A/B + 十分な N（飽和点は非飽和点で測るかノイズ明記）、(c)別セッション比較は禁止」を明文化。今回の buffer 誤結論を反面教師として記録(済: dev-notes §1.5 が該当、明示リンク)。
+
+- [ ] **G4 ［socket buffer ポリシーの確定］** 全 UDP adapter 256KB 固定を維持（enet=無効/ノイズ、kcp=有害/bufferbloat を 2026-05-31 A/B で確認）。litenetlib の内部 1MB は実質非アドバンテージ。一律変更を検討するなら**全 adapter 同時** + 各 lib の bufferbloat 特性を code で確認してから（`ENET_RCVBUF_KB`/`KCP_RCVBUF_KB` トグル有り）。
+
+- [ ] **G5 ［残課題の横展開（既存）］** msquic の forward-path datagram 未達を server 側受信計装で切り分け / gns 0.866→0.9+(RecvBufferMessages・echo 送信バッチ) / kcp 0.76 超は service ループ多スレor ikcp.c 再送最適化(stock 境界注記) / litenetlib の真の server 崩壊点(2000超、client コア増で測定)。いずれも上記 G1-G3 の方針で。
