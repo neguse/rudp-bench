@@ -110,10 +110,17 @@ static void set_nonblock(int fd) {
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-// L17: 256KB SO_RCVBUF/SO_SNDBUF to match raw_udp / enet / mini_rudp so the
-// socket-buffer playing field is even across the UDP-based adapters.
+// L17: 256KB SO_RCVBUF/SO_SNDBUF, uniform across UDP adapters. NOTE: a bigger
+// buffer HURTS kcp — a 2026-05-31 A/B at 1000conn showed 1MB bufferbloats the
+// ARQ (more queued segments -> spurious RTO retransmits), dropping 0.78 -> 0.52.
+// 256KB is best for kcp. KCP_RCVBUF_KB overrides (sweeps only).
 static void tune_socket_buffers(int fd) {
-  int bytes = 256 * 1024;
+  int kb = 256;
+  if (const char* v = std::getenv("KCP_RCVBUF_KB"); v && *v) {
+    int e = std::atoi(v);
+    if (e > 0) kb = e;
+  }
+  int bytes = kb * 1024;
   ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
   ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
 }

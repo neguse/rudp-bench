@@ -33,8 +33,8 @@ constexpr uint16_t FLAG_REL = 2;
 constexpr size_t MAX_UDP_PAYLOAD = 65507;
 constexpr size_t MAX_PENDING_RELIABLE_PER_CONN = 65'536;
 constexpr auto RETX_TIMEOUT = std::chrono::milliseconds(50);
-// L17: match raw_udp (256KB) and enet (256KB internal) so the baseline
-// comparison is on an even socket-buffer footing.
+// L17: 256KB, uniform across the UDP adapters. A 2026-05-31 A/B confirmed a
+// bigger buffer is no help (enet) or harmful (kcp bufferbloat), so 256KB stays.
 constexpr int UDP_SOCKET_BUFFER_BYTES = 256 * 1024;
 
 struct Header {

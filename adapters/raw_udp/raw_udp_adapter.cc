@@ -19,6 +19,11 @@
 namespace {
 
 constexpr size_t MAX_UDP_PAYLOAD = 65507;
+// L17: 256KB SO_RCVBUF/SO_SNDBUF, uniform across the UDP adapters (matches
+// gns/enet internal defaults). A 2026-05-31 clean A/B found a bigger buffer does
+// NOT help (enet: 0.589 vs 0.588 at 1000conn — the earlier "buffer helps" trend
+// was run-to-run noise at the saturation knee) and actively HURTS kcp (1MB
+// bufferbloats its ARQ: 0.78 -> 0.52). So 256KB stays.
 constexpr int UDP_SOCKET_BUFFER_BYTES = 256 * 1024;
 constexpr ssize_t RECV_WOULD_BLOCK = -2;
 

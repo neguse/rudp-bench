@@ -77,14 +77,17 @@ inline bool enet_pool_enabled() {
   return on;
 }
 
-// ENET_RCVBUF_KB: override enet's socket SO_RCVBUF/SO_SNDBUF (default 256KB set
-// internally by enet). A bigger receive buffer can hold more datagrams while the
-// CPU-saturated single thread catches up at 1000conn, reducing kernel drops.
+// Socket SO_RCVBUF/SO_SNDBUF = 256KB, matching enet's own internal default and
+// the other UDP adapters (L17). A 2026-05-31 clean A/B found a bigger buffer does
+// NOT help enet at the 1000conn saturation knee (0.589 vs 0.588 at 1MB — the
+// earlier "buffer helps" was run-to-run noise). ENET_RCVBUF_KB overrides for
+// sweeps; default 256 keeps the field even and avoids the kcp-style bufferbloat.
 inline void enet_apply_socket_buf(ENetHost* host) {
-  const char* v = std::getenv("ENET_RCVBUF_KB");
-  if (!v || !*v) return;
-  int kb = std::atoi(v);
-  if (kb <= 0) return;
+  int kb = 256;
+  if (const char* v = std::getenv("ENET_RCVBUF_KB"); v && *v) {
+    int e = std::atoi(v);
+    if (e > 0) kb = e;
+  }
   int bytes = kb * 1024;
   enet_socket_set_option(host->socket, ENET_SOCKOPT_RCVBUF, bytes);
   enet_socket_set_option(host->socket, ENET_SOCKOPT_SNDBUF, bytes);
