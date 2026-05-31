@@ -265,8 +265,13 @@ class EnetAdapter : public rudp_bench::Adapter {
 
  private:
   // 実 conn 数 + 余裕(12.5% + 8)を ENet 上限 4095 でクランプ。hint 無し(0)なら
-  // 従来どおり 4095。client/server とも同じ計算。
+  // 従来どおり 4095。client/server とも同じ計算。ENET_PEERCOUNT で固定上書き可
+  // (A/B 用: 4095 を強制して sized と比較)。
   size_t peer_count() const {
+    if (const char* v = std::getenv("ENET_PEERCOUNT"); v && *v) {
+      int e = std::atoi(v);
+      if (e > 0) return e > 4095 ? 4095 : static_cast<size_t>(e);
+    }
     if (hint_conns_ == 0) return 4095;
     uint32_t want = hint_conns_ + hint_conns_ / 8 + 8;
     return want > 4095 ? 4095 : want;
