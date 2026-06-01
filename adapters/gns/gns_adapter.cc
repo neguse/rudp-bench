@@ -6,6 +6,7 @@
 #include <steam/isteamnetworkingutils.h>
 
 #include <arpa/inet.h>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -17,6 +18,11 @@ namespace {
 
 // Larger batch now that one ReceiveMessagesOnPollGroup call drains all conns.
 constexpr int GNS_RECV_BATCH = 256;
+
+struct GnsOptions {
+  bool use_nagle = false;
+  bool split_lanes = false;
+};
 
 // Forward declaration — defined after GnsAdapter.
 static void gns_status_callback(SteamNetConnectionStatusChangedCallback_t* info);
@@ -47,7 +53,7 @@ void ensure_gns_init() {
 
 class GnsAdapter : public rudp_bench::Adapter {
  public:
-  GnsAdapter() {
+  explicit GnsAdapter(GnsOptions options = {}) : options_(options) {
     ensure_gns_init();
     iface_ = SteamNetworkingSockets();
     // One poll group for ALL connections so receive draining is a few
@@ -120,11 +126,23 @@ class GnsAdapter : public rudp_bench::Adapter {
       if (it == id_to_conn_.end()) return -1;
       hConn = it->second;
     }
-    // GNS の Nagle はデフォルト 5ms。msquic / yojimbo 等は Nagle 相当の遅延を
-    // 入れていないため、bench のフェアネスのため NoNagle を立てて即時送信する。
     int flags = reliable ? k_nSteamNetworkingSend_Reliable
                          : k_nSteamNetworkingSend_Unreliable;
-    flags |= k_nSteamNetworkingSend_NoNagle;
+    if (!options_.use_nagle) flags |= k_nSteamNetworkingSend_NoNagle;
+    if (options_.split_lanes) {
+      SteamNetworkingMessage_t* msg =
+          SteamNetworkingUtils()->AllocateMessage(static_cast<int>(len));
+      if (!msg) return -1;
+      std::memcpy(msg->m_pData, data, len);
+      msg->m_cbSize = static_cast<int>(len);
+      msg->m_conn = hConn;
+      msg->m_nFlags = flags;
+      msg->m_idxLane = reliable ? 0 : 1;
+      SteamNetworkingMessage_t* msgs[1] = {msg};
+      int64 result = 0;
+      iface_->SendMessages(1, msgs, &result);
+      return (result >= 0 || result == -k_EResultIgnored) ? 0 : -1;
+    }
     EResult r = iface_->SendMessageToConnection(
         hConn, data, static_cast<uint32>(len), flags, nullptr);
     // k_EResultIgnored: unreliable dropped due to NoDelay — not an error
@@ -194,7 +212,12 @@ class GnsAdapter : public rudp_bench::Adapter {
   const char* name() const override { return "gns"; }
   bool supports(bool /*reliable*/) const override { return true; }
   size_t max_payload_bytes(bool /*reliable*/) const override { return 65536; }
-  const char* flush_policy(bool /*reliable*/) const override { return "no_nagle"; }
+  const char* flush_policy(bool /*reliable*/) const override {
+    if (options_.split_lanes) {
+      return options_.use_nagle ? "nagle_split_lanes" : "no_nagle_split_lanes";
+    }
+    return options_.use_nagle ? "nagle" : "no_nagle";
+  }
   bool encryption_on() const override { return true; }
 
   // gns_status_callback から呼ばれる (g_gns.mtx は既に解放済み)
@@ -231,6 +254,10 @@ class GnsAdapter : public rudp_bench::Adapter {
       case k_ESteamNetworkingConnectionState_Connected: {
         // Route this conn's inbound messages through the shared poll group
         // (both server-accepted and client-initiated conns reach Connected).
+        if (options_.split_lanes) {
+          EResult r = iface_->ConfigureConnectionLanes(hConn, 2, nullptr, nullptr);
+          if (r != k_EResultOK) std::abort();
+        }
         iface_->SetConnectionPollGroup(hConn, poll_group_);
         std::lock_guard<std::mutex> lock(mtx_);
         auto it = conn_to_id_.find(hConn);
@@ -263,6 +290,7 @@ class GnsAdapter : public rudp_bench::Adapter {
   ISteamNetworkingSockets* iface_ = nullptr;
   HSteamListenSocket listen_sock_ = k_HSteamListenSocket_Invalid;
   HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
+  GnsOptions options_;
 
   std::mutex mtx_;
   std::unordered_map<uint32_t, HSteamNetConnection> id_to_conn_;
@@ -308,5 +336,14 @@ static void gns_status_callback(SteamNetConnectionStatusChangedCallback_t* info)
 namespace rudp_bench {
 void register_gns_adapter() {
   register_adapter("gns", []() { return std::make_unique<GnsAdapter>(); });
+  register_adapter("gns_nagle", []() {
+    return std::make_unique<GnsAdapter>(GnsOptions{true, false});
+  });
+  register_adapter("gns_split_no_nagle", []() {
+    return std::make_unique<GnsAdapter>(GnsOptions{false, true});
+  });
+  register_adapter("gns_split_nagle", []() {
+    return std::make_unique<GnsAdapter>(GnsOptions{true, true});
+  });
 }
 }  // namespace rudp_bench

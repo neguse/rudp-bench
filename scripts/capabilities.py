@@ -92,6 +92,30 @@ CAPABILITIES: Dict[str, Dict[str, object]] = {
             "u": {"max_payload": 65536, "flush_policy": "no_nagle", "transport": "gns_message"},
         },
     },
+    "gns_nagle": {
+        "encryption": "on",
+        "max_conns": None,
+        "modes": {
+            "r": {"max_payload": 65536, "flush_policy": "nagle", "transport": "gns_message"},
+            "u": {"max_payload": 65536, "flush_policy": "nagle", "transport": "gns_message"},
+        },
+    },
+    "gns_split_no_nagle": {
+        "encryption": "on",
+        "max_conns": None,
+        "modes": {
+            "r": {"max_payload": 65536, "flush_policy": "no_nagle_split_lanes", "transport": "gns_message"},
+            "u": {"max_payload": 65536, "flush_policy": "no_nagle_split_lanes", "transport": "gns_message"},
+        },
+    },
+    "gns_split_nagle": {
+        "encryption": "on",
+        "max_conns": None,
+        "modes": {
+            "r": {"max_payload": 65536, "flush_policy": "nagle_split_lanes", "transport": "gns_message"},
+            "u": {"max_payload": 65536, "flush_policy": "nagle_split_lanes", "transport": "gns_message"},
+        },
+    },
     "msquic": {
         "encryption": "on",
         "max_conns": None,
