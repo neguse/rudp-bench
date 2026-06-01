@@ -46,11 +46,13 @@ fi
 echo "=== client.csv ==="
 cat "$TMP/client.csv"
 
-# delivery_ratio は CSV 19 列目 (1-indexed)
-# header: library,encryption,phase,rate_r,rate_u,size,conns,loss,throughput_mbps,
-#         msg_per_sec,rtt_r_p{50,95,99}_us,rtt_u_p{50,95,99}_us,
-#         delivered,accepted,delivery_ratio,...
-DELIVERY_RATIO=$(tail -n1 "$TMP/client.csv" | cut -d',' -f19)
+DELIVERY_RATIO=$(awk -F, '
+NR == 1 {
+    for (i = 1; i <= NF; i++) if ($i == "delivery_ratio") col = i
+    next
+}
+NR == 2 && col { print $col }
+' "$TMP/client.csv")
 echo "delivery_ratio = $DELIVERY_RATIO"
 
 if awk "BEGIN { exit ($DELIVERY_RATIO > 0) ? 0 : 1 }"; then

@@ -10,7 +10,13 @@ void write_header(std::ostream& os) {
      << "throughput_mbps,msg_per_sec,"
      << "rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,"
      << "rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,"
-     << "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
+     << "delivered,accepted,delivered_r,delivered_u,accepted_r,accepted_u,"
+     << "delivery_ratio,"
+     << "server_received,server_echo_accepted,"
+     << "server_received_r,server_received_u,"
+     << "server_echo_accepted_r,server_echo_accepted_u,"
+     << "server_recv_drained_p99,server_recv_drained_max,"
+     << "cpu_pct,rss_mb,connect_ms,duration_s,"
      << "mode,idle_policy,flush_policy,client_tick_gap_p99_us,"
      << "client_tick_gap_max_us,"
      << "client_pacing_lag_p99_us,client_pacing_lag_max_us,"
@@ -32,7 +38,13 @@ void write_row(std::ostream& os, const CsvRow& r) {
      << r.rtt_r_p50_us << ',' << r.rtt_r_p95_us << ',' << r.rtt_r_p99_us << ','
      << r.rtt_u_p50_us << ',' << r.rtt_u_p95_us << ',' << r.rtt_u_p99_us << ','
      << r.delivered << ',' << r.accepted << ','
+     << r.delivered_r << ',' << r.delivered_u << ','
+     << r.accepted_r << ',' << r.accepted_u << ','
      << std::setprecision(4) << r.delivery_ratio << ','
+     << r.server_received << ',' << r.server_echo_accepted << ','
+     << r.server_received_r << ',' << r.server_received_u << ','
+     << r.server_echo_accepted_r << ',' << r.server_echo_accepted_u << ','
+     << r.server_recv_drained_p99 << ',' << r.server_recv_drained_max << ','
      << std::setprecision(2) << r.cpu_pct << ','
      << r.rss_mb << ',' << r.connect_ms << ',' << r.duration_s << ','
      << r.mode << ',' << r.idle_policy << ',' << r.flush_policy << ','

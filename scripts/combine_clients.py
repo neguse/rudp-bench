@@ -107,9 +107,16 @@ class Histogram:
 SUM_COLS = [
     "delivered",
     "accepted",
+    "delivered_r",
+    "delivered_u",
+    "accepted_r",
+    "accepted_u",
     "client_attempted",
     "client_accepted",
     "client_missed_pacing",
+    "conn_peak",
+    "conn_disc_transport",
+    "conn_disc_peer",
 ]
 
 # Columns aggregated by max across N client CSVs (worst observed).

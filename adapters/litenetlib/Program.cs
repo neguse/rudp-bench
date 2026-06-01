@@ -3,13 +3,12 @@
 //
 // CSV column order (mirrors harness/csv_writer.h write_row exactly):
 //   library,encryption,phase,rate_r,rate_u,size,conns,loss,
-//   throughput_mbps,msg_per_sec,rtt_p50_us,rtt_p95_us,rtt_p99_us,
-//   delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,
+//   throughput_mbps,msg_per_sec,rtt_r_p*_us,rtt_u_p*_us,
+//   delivered,accepted,delivered_r/u,accepted_r/u,delivery_ratio,...
 //   mode,idle_policy,flush_policy,...
 //
-// Payload layout: bytes [0..8) seq, [8..16) ts_ns, [16] reliable flag (0/1),
-// [17..size) padding. Server reads the flag and echoes back on the same channel
-// so mixed reliable+unreliable runs exercise per-channel HoL behavior.
+// Payload layout: bytes [0..8) seq, [8..16) ts_ns, [16] flags
+// (bit0=reliable, bit1=measurement-window), [17..size) padding.
 
 using LiteNetLib;
 using System;
@@ -29,7 +28,7 @@ if (cfg == null)
 {
     Console.Error.WriteLine("usage: litenetlib_adapter --library=<name> --role=server|client " +
         "--host= --port= --rate-r= --rate-u= --size= --conns= " +
-        "--duration= --warmup= --loss= --idle=spin|adaptive --out=");
+        "--duration= --warmup= --ramp-up-ms= --tail-ms= --loss= --idle=spin|adaptive --out=");
     return 2;
 }
 
@@ -125,6 +124,10 @@ static Config? ParseArgs(string[] args)
         {
             if (!TryParseUInt(arg["--ramp-up-ms=".Length..], out cfg.RampUpMs)) return null;
         }
+        else if (arg.StartsWith("--tail-ms="))
+        {
+            if (!TryParseUInt(arg["--tail-ms=".Length..], out cfg.TailMs)) return null;
+        }
         else if (arg.StartsWith("--loss="))
         {
             if (!TryParseLossPct(arg["--loss=".Length..], out cfg.Loss)) return null;
@@ -201,12 +204,28 @@ static CsvRow RunServer(Config cfg)
     long serverMeasureBeginTicks = Stopwatch.GetTimestamp() + (long)(cfg.WarmupS * Stopwatch.Frequency);
     bool measureStarted = cfg.WarmupS == 0;
 
-    // クライアントの warmup + duration + tail_drain を収容するため +2秒余裕
+    // クライアントの warmup + duration + tail_drain を収容するため、tail
+    // より少し長く待つ。従来の最小 +2 秒は維持する。
+    long serverTailTicks = (long)Math.Max(2000u, cfg.TailMs + 500u) * Stopwatch.Frequency / 1000;
     long deadlineTicks = Stopwatch.GetTimestamp() +
-        (long)((cfg.WarmupS + cfg.DurationS + 2) * Stopwatch.Frequency);
+        (long)((cfg.WarmupS + cfg.DurationS) * Stopwatch.Frequency) + serverTailTicks;
 
     var knownPeers = new HashSet<NetPeer>();
     bool broadcast = cfg.Mode == "broadcast";
+    ulong serverReceived = 0;
+    ulong serverEchoAccepted = 0;
+    ulong serverReceivedR = 0;
+    ulong serverReceivedU = 0;
+    ulong serverEchoAcceptedR = 0;
+    ulong serverEchoAcceptedU = 0;
+    var serverRecvDrained = new BoundedHistogram(100_000);
+
+    void CountEchoAccepted(bool reliable)
+    {
+        serverEchoAccepted++;
+        if (reliable) serverEchoAcceptedR++;
+        else serverEchoAcceptedU++;
+    }
 
     while (Stopwatch.GetTimestamp() < deadlineTicks)
     {
@@ -218,26 +237,43 @@ static CsvRow RunServer(Config cfg)
         SampleProcIfDue(ps, ref nextRssSampleTicks);
         manager.PollEvents();
         bool didWork = inbox.Count > 0;
+        ulong drainedThisTick = 0;
 
         foreach (var msg in inbox.Entries)
         {
+            drainedThisTick++;
             knownPeers.Add(msg.Conn);
             if (msg.Length < Config.MinPayloadBytes) continue;
             // Echo on the same channel the message arrived on; client tagged
-            // byte 16 with the reliable flag.
-            var deliveryMethod = msg.Buffer[16] != 0
+            // byte 16 with the reliable/measurement flags.
+            bool reliable = (msg.Buffer[16] & 0x01) != 0;
+            bool measured = (msg.Buffer[16] & 0x02) != 0;
+            if (measured)
+            {
+                serverReceived++;
+                if (reliable) serverReceivedR++;
+                else serverReceivedU++;
+            }
+            var deliveryMethod = reliable
                 ? DeliveryMethod.ReliableOrdered
                 : DeliveryMethod.Unreliable;
             if (broadcast)
             {
                 foreach (var target in knownPeers)
+                {
                     target.Send(new ReadOnlySpan<byte>(msg.Buffer, 0, msg.Length), 0, deliveryMethod);
+                    if (measured && target.ConnectionState == ConnectionState.Connected)
+                        CountEchoAccepted(reliable);
+                }
             }
             else
             {
                 msg.Conn.Send(new ReadOnlySpan<byte>(msg.Buffer, 0, msg.Length), 0, deliveryMethod);
+                if (measured && msg.Conn.ConnectionState == ConnectionState.Connected)
+                    CountEchoAccepted(reliable);
             }
         }
+        if (drainedThisTick > 0) serverRecvDrained.Record(drainedThisTick);
         inbox.Clear();
 
         if (!didWork && cfg.IdlePolicy == "adaptive") Thread.Sleep(0);
@@ -259,6 +295,14 @@ static CsvRow RunServer(Config cfg)
         Conns = cfg.Conns,
         Loss = cfg.Loss,
         DurationS = cfg.DurationS,
+        ServerReceived = serverReceived,
+        ServerEchoAccepted = serverEchoAccepted,
+        ServerReceivedR = serverReceivedR,
+        ServerReceivedU = serverReceivedU,
+        ServerEchoAcceptedR = serverEchoAcceptedR,
+        ServerEchoAcceptedU = serverEchoAcceptedU,
+        ServerRecvDrainedP99 = serverRecvDrained.PercentilePerMille(990),
+        ServerRecvDrainedMax = serverRecvDrained.Max,
         CpuPct = ps.CpuPct(),
         CpuPctPeak = ps.CpuPctPeak(),
         RssMb = ps.RssMbMax,
@@ -266,6 +310,9 @@ static CsvRow RunServer(Config cfg)
         Mode = cfg.Mode,
         IdlePolicy = cfg.IdlePolicy,
         FlushPolicy = FlushPolicy(cfg),
+        ConnPeak = (uint)knownPeers.Count,
+        ConnDiscTransport = 0,
+        ConnDiscPeer = 0,
     };
 }
 
@@ -350,7 +397,7 @@ static CsvRow RunClient(Config cfg)
     long nowTicks = Stopwatch.GetTimestamp();
     long warmupEndTicks = nowTicks + (long)(cfg.WarmupS * Stopwatch.Frequency);
     long runEndTicks = warmupEndTicks + (long)(cfg.DurationS * Stopwatch.Frequency);
-    long tailUntilTicks = runEndTicks + Stopwatch.Frequency / 2; // +500ms tail drain
+    long tailUntilTicks = runEndTicks + (long)cfg.TailMs * Stopwatch.Frequency / 1000;
 
     var rttR = new LatencyHist();
     var rttU = new LatencyHist();
@@ -366,6 +413,10 @@ static CsvRow RunClient(Config cfg)
     uint expectedPerSend = cfg.Mode == "broadcast" ? cfg.Conns : 1u;
     ulong targetAttempted = combinedRate * cfg.Conns * cfg.DurationS * expectedPerSend;
     ulong outstanding = 0;
+    ulong acceptedR = 0;
+    ulong acceptedU = 0;
+    ulong deliveredR = 0;
+    ulong deliveredU = 0;
 
     var payload = new byte[Math.Max(cfg.SizeBytes, Config.MinPayloadBytes)];
     Array.Fill(payload, (byte)0xAB);
@@ -386,7 +437,8 @@ static CsvRow RunClient(Config cfg)
         ulong tsNs = (ulong)(Stopwatch.GetTimestamp() * 1_000_000_000L / Stopwatch.Frequency);
         BitConverter.TryWriteBytes(payload.AsSpan(0, 8), globalSeq);
         BitConverter.TryWriteBytes(payload.AsSpan(8, 8), tsNs);
-        payload[16] = sched.Reliable ? (byte)1 : (byte)0;
+        payload[16] = (byte)((sched.Reliable ? 0x01 : 0x00) |
+                             (inActive ? 0x02 : 0x00));
 
         var method = sched.Reliable
             ? DeliveryMethod.ReliableOrdered
@@ -403,6 +455,8 @@ static CsvRow RunClient(Config cfg)
         {
             tick.RecordAccepted(expectedPerSend);
             for (uint k = 0; k < expectedPerSend; k++) delivery.MarkAccepted(globalSeq, i);
+            if (sched.Reliable) acceptedR += expectedPerSend;
+            else acceptedU += expectedPerSend;
             outstanding += expectedPerSend;
             tick.RecordOutstanding(outstanding);
         }
@@ -450,16 +504,21 @@ static CsvRow RunClient(Config cfg)
 
             ulong seq = BitConverter.ToUInt64(msg.Buffer, 0);
             ulong tsNs = BitConverter.ToUInt64(msg.Buffer, 8);
-            bool reliableMsg = msg.Buffer[16] != 0;
+            bool reliableMsg = (msg.Buffer[16] & 0x01) != 0;
+            bool measuredMsg = (msg.Buffer[16] & 0x02) != 0;
             ulong nowNs = (ulong)(nowTicks * 1_000_000_000L / Stopwatch.Frequency);
             ulong rttUs = (nowNs > tsNs) ? (nowNs - tsNs) / 1000 : 0;
 
-            if (inMeasureNow)
+            if (inMeasureNow && measuredMsg)
             {
                 (reliableMsg ? rttR : rttU).RecordUs(rttUs);
                 throughput.Record((ulong)msg.Length);
-                if (delivery.MarkReceived(seq, msg.Conn) && outstanding > 0)
-                    outstanding--;
+                if (delivery.MarkReceived(seq, msg.Conn))
+                {
+                    if (reliableMsg) deliveredR++;
+                    else deliveredU++;
+                    if (outstanding > 0) outstanding--;
+                }
             }
         }
         if (inDiag && drainedThisTick > 0) tick.RecordRecvDrained(drainedThisTick);
@@ -514,6 +573,10 @@ static CsvRow RunClient(Config cfg)
         RttUP99Us = rttU.PercentileUs(0.99),
         Delivered = delivery.Received,
         Accepted = delivery.Accepted,
+        DeliveredR = deliveredR,
+        DeliveredU = deliveredU,
+        AcceptedR = acceptedR,
+        AcceptedU = acceptedU,
         DeliveryRatio = delivery.DeliveryRatio,
         CpuPct = ps.CpuPct(),
         CpuPctPeak = ps.CpuPctPeak(),
@@ -537,6 +600,9 @@ static CsvRow RunClient(Config cfg)
         ClientRecvDrainedMax = tick.RecvDrainedMax,
         ClientOutstandingMax = tick.OutstandingMax,
         ClientTickOk = tickOk ? 1u : 0u,
+        ConnPeak = cfg.Conns,
+        ConnDiscTransport = 0,
+        ConnDiscPeer = 0,
     };
 }
 
@@ -551,14 +617,22 @@ static string CsvHeader() =>
     "throughput_mbps,msg_per_sec," +
     "rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us," +
     "rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us," +
-    "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s," +
+    "delivered,accepted,delivered_r,delivered_u,accepted_r,accepted_u," +
+    "delivery_ratio," +
+    "server_received,server_echo_accepted," +
+    "server_received_r,server_received_u," +
+    "server_echo_accepted_r,server_echo_accepted_u," +
+    "server_recv_drained_p99,server_recv_drained_max," +
+    "cpu_pct,rss_mb,connect_ms,duration_s," +
     "mode,idle_policy,flush_policy,client_tick_gap_p99_us," +
     "client_tick_gap_max_us," +
     "client_pacing_lag_p99_us,client_pacing_lag_max_us," +
     "client_missed_pacing,client_attempted,client_accepted," +
     "client_attempted_ratio,client_accepted_ratio," +
     "client_recv_drained_p99,client_recv_drained_max," +
-    "client_outstanding_max,client_tick_ok,delivery_dedup_policy," +
+    "client_outstanding_max,client_tick_ok," +
+    "conn_peak,conn_disc_transport,conn_disc_peer," +
+    "delivery_dedup_policy," +
     "cpu_pct_peak,close_ms";
 
 static string FormatRow(CsvRow r) =>
@@ -571,7 +645,12 @@ static string FormatRow(CsvRow r) =>
     $"{r.RttRP50Us},{r.RttRP95Us},{r.RttRP99Us}," +
     $"{r.RttUP50Us},{r.RttUP95Us},{r.RttUP99Us}," +
     $"{r.Delivered},{r.Accepted}," +
+    $"{r.DeliveredR},{r.DeliveredU},{r.AcceptedR},{r.AcceptedU}," +
     $"{r.DeliveryRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
+    $"{r.ServerReceived},{r.ServerEchoAccepted}," +
+    $"{r.ServerReceivedR},{r.ServerReceivedU}," +
+    $"{r.ServerEchoAcceptedR},{r.ServerEchoAcceptedU}," +
+    $"{r.ServerRecvDrainedP99},{r.ServerRecvDrainedMax}," +
     $"{r.CpuPct.ToString("F2", CultureInfo.InvariantCulture)}," +
     $"{r.RssMb},{r.ConnectMs},{r.DurationS},{r.Mode},{r.IdlePolicy},{r.FlushPolicy}," +
     $"{r.ClientTickGapP99Us},{r.ClientTickGapMaxUs}," +
@@ -580,7 +659,9 @@ static string FormatRow(CsvRow r) =>
     $"{r.ClientAttemptedRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.ClientAcceptedRatio.ToString("F4", CultureInfo.InvariantCulture)}," +
     $"{r.ClientRecvDrainedP99},{r.ClientRecvDrainedMax}," +
-    $"{r.ClientOutstandingMax},{r.ClientTickOk},{r.DeliveryDedupPolicy}," +
+    $"{r.ClientOutstandingMax},{r.ClientTickOk}," +
+    $"{r.ConnPeak},{r.ConnDiscTransport},{r.ConnDiscPeer}," +
+    $"{r.DeliveryDedupPolicy}," +
     $"{r.CpuPctPeak.ToString("F2", CultureInfo.InvariantCulture)},{r.CloseMs}";
 
 // ---------------------------------------------------------------------------
@@ -589,7 +670,7 @@ static string FormatRow(CsvRow r) =>
 
 class Config
 {
-    public const uint MinPayloadBytes = 17;  // 8B seq + 8B ts + 1B reliable flag
+    public const uint MinPayloadBytes = 17;  // 8B seq + 8B ts + 1B flags
     public const uint MaxPayloadBytes = 1000;
 
     public string Library = "litenetlib";
@@ -603,6 +684,7 @@ class Config
     public uint DurationS = 30;
     public uint WarmupS = 5; // spec: JIT/GC ウォームアップのため 5 秒デフォルト
     public uint RampUpMs = 0; // connect を等間隔に分散する時間。0 で即時(従来挙動)
+    public uint TailMs = 500; // active window 後に echo/retransmit を待つ時間
     public double Loss = 0.0;
     public string Mode = "echo";  // "echo" / "broadcast"
     public string IdlePolicy = "spin"; // "spin" / "adaptive"
@@ -635,7 +717,19 @@ class CsvRow
     public ulong RttUP99Us;
     public ulong Delivered;
     public ulong Accepted;
+    public ulong DeliveredR;
+    public ulong DeliveredU;
+    public ulong AcceptedR;
+    public ulong AcceptedU;
     public double DeliveryRatio;
+    public ulong ServerReceived;
+    public ulong ServerEchoAccepted;
+    public ulong ServerReceivedR;
+    public ulong ServerReceivedU;
+    public ulong ServerEchoAcceptedR;
+    public ulong ServerEchoAcceptedU;
+    public ulong ServerRecvDrainedP99;
+    public ulong ServerRecvDrainedMax;
     public double CpuPct;
     public ulong RssMb;
     public ulong ConnectMs;
@@ -656,6 +750,9 @@ class CsvRow
     public ulong ClientRecvDrainedMax;
     public ulong ClientOutstandingMax;
     public uint ClientTickOk;
+    public uint ConnPeak;
+    public uint ConnDiscTransport;
+    public uint ConnDiscPeer;
     public string DeliveryDedupPolicy = DeliveryTracker.DedupPolicy;
     public double CpuPctPeak;  // M1
     public ulong CloseMs;      // L6

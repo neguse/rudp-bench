@@ -62,6 +62,8 @@ def main() -> int:
         assert len(scenario_rows) == 1
         scenario = scenario_rows[0]
         assert scenario["idle_policy"] == "spin"
+        assert scenario["ramp_up_ms"] == "0"
+        assert scenario["tail_ms"] == "500"
         assert scenario["pinning_policy"] == "none"
         assert scenario["supports_reliability"] == "1"
         assert scenario["min_payload_bytes"] == "17"

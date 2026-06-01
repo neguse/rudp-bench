@@ -1,0 +1,7 @@
+run_id,scenario_id,library,valid,invalid_reason,delivery_ratio,forward_delivery_ratio,forward_delivery_ratio_r,forward_delivery_ratio_u,server_echo_accept_ratio,server_echo_accept_ratio_r,server_echo_accept_ratio_u,return_delivery_ratio,rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,server_cpu_pct,server_cpu_pct_peak
+enet_drain_unlimited_tail5000_n3_1,enet_r50_u50_64_1000_echo_1_adaptive,enet,1,ok,0.8594,0.8822,0.9928,0.7690,1.0000,1.0000,1.0000,0.9741,183700,1280000,3027000,76400,113300,175500,87.04,100.00
+enet_drain_unlimited_tail5000_n3_2,enet_r50_u50_64_1000_echo_1_adaptive,enet,1,ok,0.8419,0.8729,0.9807,0.7564,1.0000,1.0000,1.0000,0.9644,215000,1528000,3857000,87100,143900,167900,86.82,99.78
+enet_drain_unlimited_tail5000_n3_3,enet_r50_u50_64_1000_echo_1_adaptive,enet,1,ok,0.8413,0.8638,0.9748,0.7406,1.0000,1.0000,1.0000,0.9739,233500,1856000,4277000,79500,126500,210200,86.78,99.62
+gns_drain_unlimited_tail5000_n3_1,gns_r50_u50_64_1000_echo_1_adaptive,gns,1,ok,0.8524,0.8559,1.0000,0.7118,1.0000,1.0000,1.0000,0.9959,178800,397800,556300,95900,160900,190200,158.80,196.05
+gns_drain_unlimited_tail5000_n3_2,gns_r50_u50_64_1000_echo_1_adaptive,gns,1,ok,0.8581,0.8618,1.0000,0.7236,1.0000,1.0000,1.0000,0.9957,177300,394200,553000,95200,165800,188500,159.63,196.05
+gns_drain_unlimited_tail5000_n3_3,gns_r50_u50_64_1000_echo_1_adaptive,gns,1,ok,0.8616,0.8653,1.0000,0.7305,1.0000,1.0000,1.0000,0.9958,173300,377000,529800,92300,155600,191300,160.42,195.65

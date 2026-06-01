@@ -27,6 +27,8 @@ SIZE=100
 CONNS=10
 RATE_R=50
 RATE_U=0
+LOSS=0
+TAIL_MS=500
 CLIENT_PROCS=1
 # Per-lib ramp: msquic alone needs spread-out connects (its workers race when
 # all 200 conns handshake at once). Other libs degrade when ramp_up_ms > 0
@@ -53,6 +55,8 @@ for arg in "$@"; do
     --size=*) SIZE="${arg#*=}" ;;
     --rate-r=*) RATE_R="${arg#*=}" ;;
     --rate-u=*) RATE_U="${arg#*=}" ;;
+    --loss=*) LOSS="${arg#*=}" ;;
+    --tail-ms=*) TAIL_MS="${arg#*=}" ;;
     --client-procs=*) CLIENT_PROCS="${arg#*=}" ;;
     --ramp-up-ms=*) RAMP_UP_MS_DEFAULT="${arg#*=}"; RAMP_UP_MS_MSQUIC="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
@@ -115,6 +119,49 @@ run_timeout() {
   local label="$3"  # server|client, used as slice suffix in systemd mode
   shift 3
   if [ "$ISOLATE" = "systemd" ] && [ -n "$cpu" ]; then
+    SYSTEMD_ENV_ARGS=()
+    if [ "${ENET_NO_THROTTLE+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_NO_THROTTLE=$ENET_NO_THROTTLE")
+    fi
+    if [ "${ENET_BATCH_POLL+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_BATCH_POLL=$ENET_BATCH_POLL")
+    fi
+    if [ "${ENET_POOL+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_POOL=$ENET_POOL")
+    fi
+    if [ "${ENET_RCVBUF_KB+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_RCVBUF_KB=$ENET_RCVBUF_KB")
+    fi
+    if [ "${ENET_PEERCOUNT+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_PEERCOUNT=$ENET_PEERCOUNT")
+    fi
+    if [ "${ENET_INITIAL_RTT_MS+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_INITIAL_RTT_MS=$ENET_INITIAL_RTT_MS")
+    fi
+    if [ "${ENET_INITIAL_RTT_VAR_MS+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_INITIAL_RTT_VAR_MS=$ENET_INITIAL_RTT_VAR_MS")
+    fi
+    if [ "${ENET_PING_MS+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_PING_MS=$ENET_PING_MS")
+    fi
+    if [ "${ENET_TIMEOUT_LIMIT+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_TIMEOUT_LIMIT=$ENET_TIMEOUT_LIMIT")
+    fi
+    if [ "${ENET_TIMEOUT_MIN_MS+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_TIMEOUT_MIN_MS=$ENET_TIMEOUT_MIN_MS")
+    fi
+    if [ "${ENET_TIMEOUT_MAX_MS+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_TIMEOUT_MAX_MS=$ENET_TIMEOUT_MAX_MS")
+    fi
+    if [ "${ENET_UNRELIABLE_MODE+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_UNRELIABLE_MODE=$ENET_UNRELIABLE_MODE")
+    fi
+    if [ "${ENET_UNSEQUENCED+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "ENET_UNSEQUENCED=$ENET_UNSEQUENCED")
+    fi
+    if [ "${RUDP_SERVER_RECV_DRAIN_LIMIT+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "RUDP_SERVER_RECV_DRAIN_LIMIT=$RUDP_SERVER_RECV_DRAIN_LIMIT")
+    fi
     # Unit is killed by systemd after RuntimeMaxSec; also wrap with timeout
     # as a belt-and-suspenders against systemd-run hanging.
     # WorkingDirectory preserves CWD so relative --out paths resolve correctly.
@@ -127,6 +174,7 @@ run_timeout() {
       -p User="$USER" \
       -p LimitCORE=infinity \
       -p RuntimeMaxSec="${timeout_s}s" \
+      "${SYSTEMD_ENV_ARGS[@]}" \
       --quiet --wait --pipe --collect \
       "$@"
   elif [ -n "$cpu" ]; then
@@ -138,7 +186,6 @@ run_timeout() {
 
 # 軸固定 (size, conns, rate-r, rate-u は CLI で上書き可能)
 MODE=echo
-LOSS=0
 DURATION=20
 
 PORT_BASE=30000
@@ -166,7 +213,8 @@ for lib in ${LIBS//,/ }; do
 
   if [ "$lib" = "litenetlib" ]; then
     WARMUP_ARG="$LITENETLIB_WARMUP"
-    TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + 10))
+    TAIL_TIMEOUT_S=$(((TAIL_MS + 999) / 1000))
+    TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + TAIL_TIMEOUT_S + 10))
     if [ ! -x "$LITENETLIB_BIN" ]; then
       : >"$S_STDOUT"
       : >"$C_STDOUT"
@@ -176,7 +224,7 @@ for lib in ${LIBS//,/ }; do
       C_STATUS=127
     else
       run_timeout "$SERVER_CPU" "$TIMEOUT_S" server "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
-        --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --loss="$LOSS" \
+        --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$LOSS" \
         --size="$SIZE" --conns="$CONNS" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \
         >"$S_STDOUT" 2>"$S_STDERR" &
       SPID=$!
@@ -186,7 +234,7 @@ for lib in ${LIBS//,/ }; do
         run_timeout "$CLIENT_CPU" "$TIMEOUT_S" client "$LITENETLIB_BIN" --library="$lib" --role=client \
           --host=127.0.0.1 --port="$PORT" \
           --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS" \
-          --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
+          --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
           --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
         C_STATUS=$?
       else
@@ -208,7 +256,7 @@ for lib in ${LIBS//,/ }; do
           run_timeout "$CLIENT_CPU" "$TIMEOUT_S" client "$LITENETLIB_BIN" --library="$lib" --role=client \
             --host=127.0.0.1 --port="$PORT" \
             --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS_I" \
-            --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
+            --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
             --out="$C_OUT_I" --bins-r-out="$BINS_R_I" --bins-u-out="$BINS_U_I" \
             >"$C_STDOUT_I" 2>"$C_STDERR_I" &
           CPIDS+=("$!")
@@ -235,18 +283,20 @@ for lib in ${LIBS//,/ }; do
       set -e
     fi
   else
-    run_timeout "$SERVER_CPU" 60 server "$BIN" --library="$lib" --role=server --port="$PORT" \
-      --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup=2 --ramp-up-ms="$RAMP_UP_MS" --loss="$LOSS" \
+    TAIL_TIMEOUT_S=$(((TAIL_MS + 999) / 1000))
+    TIMEOUT_S=$((DURATION + 2 + TAIL_TIMEOUT_S + 10))
+    run_timeout "$SERVER_CPU" "$TIMEOUT_S" server "$BIN" --library="$lib" --role=server --port="$PORT" \
+      --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup=2 --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$LOSS" \
       --size="$SIZE" --conns="$CONNS" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \
       >"$S_STDOUT" 2>"$S_STDERR" &
     SPID=$!
     sleep 0.2
     set +e
     if [ "$CLIENT_PROCS" -eq 1 ]; then
-      run_timeout "$CLIENT_CPU" 60 client "$BIN" --library="$lib" --role=client \
+      run_timeout "$CLIENT_CPU" "$TIMEOUT_S" client "$BIN" --library="$lib" --role=client \
         --host=127.0.0.1 --port="$PORT" \
         --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS" \
-        --duration="$DURATION" --warmup=2 --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
+        --duration="$DURATION" --warmup=2 --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
         --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
       C_STATUS=$?
     else
@@ -265,10 +315,10 @@ for lib in ${LIBS//,/ }; do
         BINS_U_I="$RAW_DIR/c_${SCENARIO_ID}_p${i}_u.bin"
         C_STDOUT_I="$RAW_DIR/c_${SCENARIO_ID}_p${i}.stdout.log"
         C_STDERR_I="$RAW_DIR/c_${SCENARIO_ID}_p${i}.stderr.log"
-        run_timeout "$CLIENT_CPU" 60 client "$BIN" --library="$lib" --role=client \
+        run_timeout "$CLIENT_CPU" "$TIMEOUT_S" client "$BIN" --library="$lib" --role=client \
           --host=127.0.0.1 --port="$PORT" \
           --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS_I" \
-          --duration="$DURATION" --warmup=2 --ramp-up-ms="$RAMP_UP_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
+          --duration="$DURATION" --warmup=2 --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
           --out="$C_OUT_I" --bins-r-out="$BINS_R_I" --bins-u-out="$BINS_U_I" \
           >"$C_STDOUT_I" 2>"$C_STDERR_I" &
         CPIDS+=("$!")
@@ -306,7 +356,7 @@ for lib in ${LIBS//,/ }; do
     --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
     --library "$lib" --rate-r "$RATE_R" --rate-u "$RATE_U" \
     --size "$SIZE" --conns "$CONNS" --loss "$LOSS" --mode "$MODE" \
-    --duration "$DURATION" --warmup "$WARMUP_ARG" --idle "$IDLE" \
+    --duration "$DURATION" --warmup "$WARMUP_ARG" --ramp-up-ms "$RAMP_UP_MS" --tail-ms "$TAIL_MS" --idle "$IDLE" \
     --server-cpu-pin "$SERVER_CPU" --client-cpu-pin "$CLIENT_CPU"
 done
 

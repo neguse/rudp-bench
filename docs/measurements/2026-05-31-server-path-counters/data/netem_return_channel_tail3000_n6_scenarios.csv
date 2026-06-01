@@ -1,0 +1,13 @@
+run_id,scenario_id,library,rate_r,rate_u,size,conns,loss,mode,duration_s,warmup_s,ramp_up_ms,tail_ms,idle_policy,server_cpu_pin,client_cpu_pin,pinning_policy,flush_policy,supports_reliability,min_payload_bytes,max_payload_bytes,max_connections,transport_mode
+enet_return_channel_tail3000_n3_1,enet_r50_u50_64_1000_echo_1_adaptive,enet,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",poll_flush,1,17,65536,4095,enet_packet
+enet_return_channel_tail3000_n3_2,enet_r50_u50_64_1000_echo_1_adaptive,enet,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",poll_flush,1,17,65536,4095,enet_packet
+enet_return_channel_tail3000_n3_3,enet_r50_u50_64_1000_echo_1_adaptive,enet,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",poll_flush,1,17,65536,4095,enet_packet
+gns_return_channel_tail3000_n3_1,gns_r50_u50_64_1000_echo_1_adaptive,gns,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",no_nagle,1,17,65536,unbounded,gns_message
+gns_return_channel_tail3000_n3_2,gns_r50_u50_64_1000_echo_1_adaptive,gns,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",no_nagle,1,17,65536,unbounded,gns_message
+gns_return_channel_tail3000_n3_3,gns_r50_u50_64_1000_echo_1_adaptive,gns,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",no_nagle,1,17,65536,unbounded,gns_message
+enet_return_channel_tail3000_n3b_1,enet_r50_u50_64_1000_echo_1_adaptive,enet,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",poll_flush,1,17,65536,4095,enet_packet
+enet_return_channel_tail3000_n3b_2,enet_r50_u50_64_1000_echo_1_adaptive,enet,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",poll_flush,1,17,65536,4095,enet_packet
+enet_return_channel_tail3000_n3b_3,enet_r50_u50_64_1000_echo_1_adaptive,enet,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",poll_flush,1,17,65536,4095,enet_packet
+gns_return_channel_tail3000_n3b_1,gns_r50_u50_64_1000_echo_1_adaptive,gns,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",no_nagle,1,17,65536,unbounded,gns_message
+gns_return_channel_tail3000_n3b_2,gns_r50_u50_64_1000_echo_1_adaptive,gns,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",no_nagle,1,17,65536,unbounded,gns_message
+gns_return_channel_tail3000_n3b_3,gns_r50_u50_64_1000_echo_1_adaptive,gns,50,50,64,1000,1,echo,20,2,0,3000,adaptive,"7,15","5,6,13,14","server=7,15;client=5,6,13,14",no_nagle,1,17,65536,unbounded,gns_message

@@ -1,0 +1,7 @@
+run_id,scenario_id,library,valid,invalid_reason,delivery_ratio,forward_delivery_ratio,forward_delivery_ratio_r,forward_delivery_ratio_u,server_echo_accept_ratio,server_echo_accept_ratio_r,server_echo_accept_ratio_u,return_delivery_ratio,rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,server_cpu_pct,server_cpu_pct_peak
+netem_tail3000_n2,enet_r50_u50_64_1000_echo_1_adaptive,enet,1,ok,0.5702,0.5742,0.5944,0.5541,1.0000,1.0000,1.0000,0.9930,728600,811000,943600,725100,750300,763500,93.22,100.00
+netem_tail3000_n2,gns_r50_u50_64_1000_echo_1_adaptive,gns,1,ok,0.8684,0.8721,1.0000,0.7442,1.0000,1.0000,1.0000,0.9957,170500,359500,498600,95000,154100,172900,171.41,195.29
+netem_tail3000_n3,enet_r50_u50_64_1000_echo_1_adaptive,enet,1,ok,0.6020,0.6060,0.6197,0.5923,1.0000,1.0000,1.0000,0.9935,724400,793600,887000,723400,738700,746400,93.44,102.86
+netem_tail3000_n3,gns_r50_u50_64_1000_echo_1_adaptive,gns,1,ok,0.8604,0.8641,1.0000,0.7281,1.0000,1.0000,1.0000,0.9957,175400,387200,534000,99500,156700,175800,171.82,195.51
+netem_tail3000_n4,enet_r50_u50_64_1000_echo_1_adaptive,enet,1,ok,0.5521,0.5559,0.5748,0.5370,1.0000,1.0000,1.0000,0.9930,728200,805900,923800,725100,745000,752800,93.44,100.00
+netem_tail3000_n4,gns_r50_u50_64_1000_echo_1_adaptive,gns,1,ok,0.8683,0.8720,1.0000,0.7441,1.0000,1.0000,1.0000,0.9957,171800,361200,504300,96400,156100,179400,171.59,195.82

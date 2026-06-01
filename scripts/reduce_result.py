@@ -20,6 +20,15 @@ RESULT_FIELDS = [
     "valid",
     "invalid_reason",
     "delivery_ratio",
+    "forward_delivery_ratio",
+    "forward_delivery_ratio_r",
+    "forward_delivery_ratio_u",
+    "server_echo_accept_ratio",
+    "server_echo_accept_ratio_r",
+    "server_echo_accept_ratio_u",
+    "return_delivery_ratio",
+    "return_delivery_ratio_r",
+    "return_delivery_ratio_u",
     "rtt_r_p50_us",
     "rtt_r_p95_us",
     "rtt_r_p99_us",
@@ -27,6 +36,7 @@ RESULT_FIELDS = [
     "rtt_u_p95_us",
     "rtt_u_p99_us",
     "server_cpu_pct",
+    "server_cpu_pct_peak",
 ]
 
 DIAGNOSTIC_FIELDS = [
@@ -36,16 +46,36 @@ DIAGNOSTIC_FIELDS = [
     "exit_reason",
     "exit_status",
     "cpu_pct",
+    "cpu_pct_peak",
+    "close_ms",
     "rss_mb",
     "attempted",
     "accepted",
     "delivered",
+    "accepted_r",
+    "accepted_u",
+    "delivered_r",
+    "delivered_u",
     "accepted_ratio",
     "delivery_ratio",
+    "server_received",
+    "server_echo_accepted",
+    "server_received_r",
+    "server_received_u",
+    "server_echo_accepted_r",
+    "server_echo_accepted_u",
+    "server_recv_drained_p99",
+    "server_recv_drained_max",
     "client_tick_ok",
     "client_tick_ok_check",
     "client_tick_gap_p99_us",
     "client_pacing_lag_p99_us",
+    "client_recv_drained_p99",
+    "client_recv_drained_max",
+    "client_outstanding_max",
+    "conn_peak",
+    "conn_disc_transport",
+    "conn_disc_peer",
     "raw_result_path",
     "stdout_path",
     "stderr_path",
@@ -64,6 +94,8 @@ SCENARIO_FIELDS = [
     "mode",
     "duration_s",
     "warmup_s",
+    "ramp_up_ms",
+    "tail_ms",
     "idle_policy",
     "server_cpu_pin",
     "client_cpu_pin",
@@ -250,6 +282,102 @@ def canonical_delivery_ratio(client: Optional[Dict[str, str]]) -> str:
     return f"{delivered / accepted:.4f}"
 
 
+def expected_per_send(args: argparse.Namespace) -> int:
+    conns = int_or_none(args.conns) or 0
+    return conns if args.mode == "broadcast" else 1
+
+
+def client_outbound_messages(client: Optional[Dict[str, str]],
+                             args: argparse.Namespace) -> int:
+    accepted = accepted_count(client)
+    eps = max(1, expected_per_send(args))
+    return accepted // eps if accepted else 0
+
+
+def planned_channel_outbound_messages(args: argparse.Namespace, channel: str) -> int:
+    rate = int_or_zero(getattr(args, f"rate_{channel}"))
+    conns = int_or_none(args.conns) or 0
+    duration = int_or_none(args.duration) or 0
+    return rate * conns * duration
+
+
+def ratio_str(num: int, den: int) -> str:
+    if den <= 0:
+        return ""
+    return f"{num / den:.4f}"
+
+
+def forward_delivery_ratio(server: Optional[Dict[str, str]],
+                           client: Optional[Dict[str, str]],
+                           args: argparse.Namespace) -> str:
+    if server is None or client is None:
+        return ""
+    if "server_received" not in server:
+        return ""
+    return ratio_str(int_or_zero(server.get("server_received")),
+                     client_outbound_messages(client, args))
+
+
+def server_echo_accept_ratio(server: Optional[Dict[str, str]],
+                             args: argparse.Namespace) -> str:
+    if server is None:
+        return ""
+    if "server_received" not in server or "server_echo_accepted" not in server:
+        return ""
+    received = int_or_zero(server.get("server_received"))
+    echo_accepted = int_or_zero(server.get("server_echo_accepted"))
+    return ratio_str(echo_accepted, received * max(1, expected_per_send(args)))
+
+
+def forward_delivery_ratio_channel(server: Optional[Dict[str, str]],
+                                   args: argparse.Namespace,
+                                   channel: str) -> str:
+    if server is None:
+        return ""
+    col = f"server_received_{channel}"
+    if col not in server:
+        return ""
+    return ratio_str(int_or_zero(server.get(col)),
+                     planned_channel_outbound_messages(args, channel))
+
+
+def server_echo_accept_ratio_channel(server: Optional[Dict[str, str]],
+                                     args: argparse.Namespace,
+                                     channel: str) -> str:
+    if server is None:
+        return ""
+    received_col = f"server_received_{channel}"
+    accepted_col = f"server_echo_accepted_{channel}"
+    if received_col not in server or accepted_col not in server:
+        return ""
+    received = int_or_zero(server.get(received_col))
+    echo_accepted = int_or_zero(server.get(accepted_col))
+    return ratio_str(echo_accepted, received * max(1, expected_per_send(args)))
+
+
+def return_delivery_ratio(server: Optional[Dict[str, str]],
+                          client: Optional[Dict[str, str]]) -> str:
+    if server is None or client is None:
+        return ""
+    if "server_echo_accepted" not in server:
+        return ""
+    return ratio_str(int_or_none(client.get("delivered")) or 0,
+                     int_or_zero(server.get("server_echo_accepted")))
+
+
+def return_delivery_ratio_channel(server: Optional[Dict[str, str]],
+                                  client: Optional[Dict[str, str]],
+                                  channel: str) -> str:
+    if server is None or client is None:
+        return ""
+    server_col = f"server_echo_accepted_{channel}"
+    client_col = f"delivered_{channel}"
+    if server_col not in server or client_col not in client:
+        return ""
+    return ratio_str(int_or_zero(client.get(client_col)),
+                     int_or_zero(server.get(server_col)))
+
+
 def scenario_flush_policy(args: argparse.Namespace,
                           server: Optional[Dict[str, str]],
                           client: Optional[Dict[str, str]]) -> str:
@@ -333,16 +461,36 @@ def diagnostic_row(run_id: str, scenario_id: str, role: str,
         "exit_reason": exit_reason,
         "exit_status": status,
         "cpu_pct": raw.get("cpu_pct", ""),
+        "cpu_pct_peak": raw.get("cpu_pct_peak", ""),
+        "close_ms": raw.get("close_ms", ""),
         "rss_mb": raw.get("rss_mb", ""),
         "attempted": client_attempted(raw) if is_client else "",
         "accepted": client_accepted(raw) if is_client else "",
         "delivered": raw.get("delivered", "") if is_client else "",
+        "accepted_r": raw.get("accepted_r", "") if is_client else "",
+        "accepted_u": raw.get("accepted_u", "") if is_client else "",
+        "delivered_r": raw.get("delivered_r", "") if is_client else "",
+        "delivered_u": raw.get("delivered_u", "") if is_client else "",
+        "server_received": raw.get("server_received", "") if not is_client else "",
+        "server_echo_accepted": raw.get("server_echo_accepted", "") if not is_client else "",
+        "server_received_r": raw.get("server_received_r", "") if not is_client else "",
+        "server_received_u": raw.get("server_received_u", "") if not is_client else "",
+        "server_echo_accepted_r": raw.get("server_echo_accepted_r", "") if not is_client else "",
+        "server_echo_accepted_u": raw.get("server_echo_accepted_u", "") if not is_client else "",
+        "server_recv_drained_p99": raw.get("server_recv_drained_p99", "") if not is_client else "",
+        "server_recv_drained_max": raw.get("server_recv_drained_max", "") if not is_client else "",
         "accepted_ratio": client_accepted_ratio(raw) if is_client else "",
         "delivery_ratio": canonical_delivery_ratio(raw) if is_client else "",
         "client_tick_ok": raw.get("client_tick_ok", "") if is_client else "",
         "client_tick_ok_check": recomputed_tick_ok(raw) if is_client else "",
         "client_tick_gap_p99_us": raw.get("client_tick_gap_p99_us", "") if is_client else "",
         "client_pacing_lag_p99_us": raw.get("client_pacing_lag_p99_us", "") if is_client else "",
+        "client_recv_drained_p99": raw.get("client_recv_drained_p99", "") if is_client else "",
+        "client_recv_drained_max": raw.get("client_recv_drained_max", "") if is_client else "",
+        "client_outstanding_max": raw.get("client_outstanding_max", "") if is_client else "",
+        "conn_peak": raw.get("conn_peak", ""),
+        "conn_disc_transport": raw.get("conn_disc_transport", ""),
+        "conn_disc_peer": raw.get("conn_disc_peer", ""),
         "raw_result_path": raw_path,
         "stdout_path": stdout_path,
         "stderr_path": stderr_path,
@@ -370,6 +518,8 @@ def append(args: argparse.Namespace) -> int:
         "mode": args.mode,
         "duration_s": args.duration,
         "warmup_s": args.warmup,
+        "ramp_up_ms": args.ramp_up_ms,
+        "tail_ms": args.tail_ms,
         "idle_policy": args.idle,
         "server_cpu_pin": args.server_cpu_pin,
         "client_cpu_pin": args.client_cpu_pin,
@@ -394,6 +544,15 @@ def append(args: argparse.Namespace) -> int:
         "valid": valid,
         "invalid_reason": reason,
         "delivery_ratio": canonical_delivery_ratio(client),
+        "forward_delivery_ratio": forward_delivery_ratio(server, client, args),
+        "forward_delivery_ratio_r": forward_delivery_ratio_channel(server, args, "r"),
+        "forward_delivery_ratio_u": forward_delivery_ratio_channel(server, args, "u"),
+        "server_echo_accept_ratio": server_echo_accept_ratio(server, args),
+        "server_echo_accept_ratio_r": server_echo_accept_ratio_channel(server, args, "r"),
+        "server_echo_accept_ratio_u": server_echo_accept_ratio_channel(server, args, "u"),
+        "return_delivery_ratio": return_delivery_ratio(server, client),
+        "return_delivery_ratio_r": return_delivery_ratio_channel(server, client, "r"),
+        "return_delivery_ratio_u": return_delivery_ratio_channel(server, client, "u"),
         "rtt_r_p50_us": client.get("rtt_r_p50_us", "") if client else "",
         "rtt_r_p95_us": client.get("rtt_r_p95_us", "") if client else "",
         "rtt_r_p99_us": client.get("rtt_r_p99_us", "") if client else "",
@@ -401,6 +560,7 @@ def append(args: argparse.Namespace) -> int:
         "rtt_u_p95_us": client.get("rtt_u_p95_us", "") if client else "",
         "rtt_u_p99_us": client.get("rtt_u_p99_us", "") if client else "",
         "server_cpu_pct": server.get("cpu_pct", "") if server else "",
+        "server_cpu_pct_peak": server.get("cpu_pct_peak", "") if server else "",
     })
     return 0
 
@@ -451,6 +611,8 @@ def main() -> int:
     append_p.add_argument("--mode", required=True)
     append_p.add_argument("--duration", required=True)
     append_p.add_argument("--warmup", required=True)
+    append_p.add_argument("--ramp-up-ms", dest="ramp_up_ms", default="0")
+    append_p.add_argument("--tail-ms", dest="tail_ms", default="500")
     append_p.add_argument("--idle", default="spin", choices=["spin", "adaptive"])
     append_p.add_argument("--server-cpu-pin", default="")
     append_p.add_argument("--client-cpu-pin", default="")

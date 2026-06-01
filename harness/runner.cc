@@ -1,9 +1,12 @@
 #include "harness/runner.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -103,9 +106,11 @@ uint64_t pacing_budget_us(uint32_t rate_per_conn) {
 
 constexpr std::chrono::microseconds kAdaptiveIdleCap{20};
 constexpr std::chrono::milliseconds kRssSampleInterval{100};
-constexpr size_t kServerRecvDrainLimit = 1024;
+constexpr size_t kServerRecvDrainLimit = std::numeric_limits<size_t>::max();
 constexpr size_t kReliableFlagOffset = 16;
 constexpr size_t kHeaderBytes = kReliableFlagOffset + 1;
+constexpr uint8_t kPayloadFlagReliable = 0x01;
+constexpr uint8_t kPayloadFlagMeasured = 0x02;
 
 void adaptive_idle_for(std::chrono::microseconds d) {
   if (d.count() > 0) std::this_thread::sleep_for(d);
@@ -118,6 +123,22 @@ void sample_proc_if_due(ProcSampler& ps,
   ps.sample_rss();
   ps.sample_cpu();  // M1: per-interval CPU so spikes surface as cpu_pct_peak
   next_sample = now + kRssSampleInterval;
+}
+
+size_t server_recv_drain_limit() {
+  const char* v = std::getenv("RUDP_SERVER_RECV_DRAIN_LIMIT");
+  if (!v || !*v) return kServerRecvDrainLimit;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE) {
+    return kServerRecvDrainLimit;
+  }
+  if (parsed == 0) return std::numeric_limits<size_t>::max();
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
 }
 
 struct ChannelSched {
@@ -149,12 +170,22 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   std::vector<uint8_t> buf(65536);
   std::unordered_set<uint32_t> known_conns;  // broadcast 配信先
   auto start = std::chrono::steady_clock::now();
-  auto deadline = start + std::chrono::seconds(cfg.duration_s + cfg.warmup_s + 2);
+  auto server_tail_ms = std::max<uint32_t>(2000, cfg.tail_ms + 500);
+  auto deadline = start + std::chrono::seconds(cfg.duration_s + cfg.warmup_s) +
+                  std::chrono::milliseconds(server_tail_ms);
   // M2: exclude warmup from the server CPU window too. The server has no
   // explicit warmup gate (it just reacts), so re-baseline once warmup elapses.
   auto measure_begin = start + std::chrono::seconds(cfg.warmup_s);
   bool measure_started = (cfg.warmup_s == 0);
   auto next_rss_sample = start + kRssSampleInterval;
+  uint64_t server_received = 0;
+  uint64_t server_echo_accepted = 0;
+  uint64_t server_received_r = 0;
+  uint64_t server_received_u = 0;
+  uint64_t server_echo_accepted_r = 0;
+  uint64_t server_echo_accepted_u = 0;
+  BoundedHistogram server_recv_drained{100'000};
+  size_t recv_drain_limit = server_recv_drain_limit();
   while (std::chrono::steady_clock::now() < deadline) {
     auto loop_now = std::chrono::steady_clock::now();
     if (!measure_started && loop_now >= measure_begin) {
@@ -164,30 +195,57 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
     sample_proc_if_due(ps, loop_now, next_rss_sample);
     a.poll();
     bool did_work = false;
-    for (size_t drained = 0; drained < kServerRecvDrainLimit; ++drained) {
+    size_t drained_this_tick = 0;
+    for (size_t drained = 0; drained < recv_drain_limit; ++drained) {
       size_t n;
       uint32_t cid;
       int r = a.recv(buf.data(), buf.size(), &n, &cid);
       if (r != 1) break;
+      ++drained_this_tick;
       did_work = true;
       known_conns.insert(cid);
       if (n < kHeaderBytes) continue;
       // Echo back on the same channel the message arrived on (client tags
       // each outbound payload with the reliable flag at kReliableFlagOffset).
-      bool reliable = buf[kReliableFlagOffset] != 0;
+      bool reliable = (buf[kReliableFlagOffset] & kPayloadFlagReliable) != 0;
+      bool measured = (buf[kReliableFlagOffset] & kPayloadFlagMeasured) != 0;
+      if (measured) {
+        ++server_received;
+        if (reliable) {
+          ++server_received_r;
+        } else {
+          ++server_received_u;
+        }
+      }
       if (cfg.mode == ServerMode::Echo) {
-        a.send(cid, buf.data(), n, reliable);
+        if (a.send(cid, buf.data(), n, reliable) == 0 && measured) {
+          ++server_echo_accepted;
+          if (reliable) {
+            ++server_echo_accepted_r;
+          } else {
+            ++server_echo_accepted_u;
+          }
+        }
       } else {
         for (uint32_t target : known_conns) {
-          a.send(target, buf.data(), n, reliable);
+          if (a.send(target, buf.data(), n, reliable) == 0 && measured) {
+            ++server_echo_accepted;
+            if (reliable) {
+              ++server_echo_accepted_r;
+            } else {
+              ++server_echo_accepted_u;
+            }
+          }
         }
       }
     }
+    if (drained_this_tick > 0) server_recv_drained.record(drained_this_tick);
     if (!did_work && cfg.idle_policy == IdlePolicy::Adaptive) {
       adaptive_idle_for(kAdaptiveIdleCap);
     }
   }
   ps.end();
+  ConnectionStats cs = a.connection_stats();
   auto t_close0 = std::chrono::steady_clock::now();
   a.close();
   uint64_t close_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -206,6 +264,14 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   row.size = cfg.size_bytes;
   row.conns = cfg.conns;
   row.loss = cfg.loss_pct;
+  row.server_received = server_received;
+  row.server_echo_accepted = server_echo_accepted;
+  row.server_received_r = server_received_r;
+  row.server_received_u = server_received_u;
+  row.server_echo_accepted_r = server_echo_accepted_r;
+  row.server_echo_accepted_u = server_echo_accepted_u;
+  row.server_recv_drained_p99 = server_recv_drained.percentile_per_mille(990);
+  row.server_recv_drained_max = server_recv_drained.max();
   row.cpu_pct = ps.cpu_pct();
   row.cpu_pct_peak = ps.cpu_pct_peak();
   row.rss_mb = ps.rss_max_mb();
@@ -214,6 +280,9 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   row.mode = (cfg.mode == ServerMode::Broadcast) ? "broadcast" : "echo";
   row.idle_policy = idle_policy_name(cfg.idle_policy);
   row.flush_policy = a.flush_policy(reliable_active);
+  row.conn_peak = cs.connected_peak;
+  row.conn_disc_transport = cs.shutdown_by_transport;
+  row.conn_disc_peer = cs.shutdown_by_peer;
   return row;
 }
 
@@ -271,6 +340,10 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   std::vector<uint64_t> seq_counter(cfg.conns, 1);
   std::vector<uint8_t> rxbuf(65536);
   uint64_t outstanding = 0;
+  uint64_t accepted_r = 0;
+  uint64_t accepted_u = 0;
+  uint64_t delivered_r = 0;
+  uint64_t delivered_u = 0;
   uint32_t expected_per_send = (cfg.mode == ServerMode::Broadcast) ? cfg.conns : 1;
   uint64_t combined_rate = static_cast<uint64_t>(cfg.rate_r) + cfg.rate_u;
   uint64_t target_attempted =
@@ -281,7 +354,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
 
   auto in_measure = [&](clock::time_point t) { return t >= warmup_end; };
 
-  auto tail_until = run_end + std::chrono::milliseconds(500);
+  auto tail_until = run_end + std::chrono::milliseconds(cfg.tail_ms);
   auto next_rss_sample = clock::now() + kRssSampleInterval;
   bool measure_started = (cfg.warmup_s == 0);  // M2: re-baseline CPU at warmup_end
 
@@ -305,7 +378,9 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
                       now.time_since_epoch()).count();
     std::memcpy(payload.data(), &global_seq, 8);
     std::memcpy(payload.data() + 8, &ts, 8);
-    payload[kReliableFlagOffset] = sched.reliable ? 1 : 0;
+    payload[kReliableFlagOffset] =
+        (sched.reliable ? kPayloadFlagReliable : 0) |
+        (in_active ? kPayloadFlagMeasured : 0);
     if (a.send(ids[i], payload.data(), payload.size(), sched.reliable) == 0) {
       // M4: gate accepted on the SAME bounded window as attempted (in_active).
       // try_send_on only runs while now < run_end so this matches in_measure in
@@ -317,6 +392,11 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
         tick.record_accepted(expected_per_send);
         for (uint32_t k = 0; k < expected_per_send; ++k) {
           dt.mark_accepted(global_seq, ids[i]);
+        }
+        if (sched.reliable) {
+          accepted_r += expected_per_send;
+        } else {
+          accepted_u += expected_per_send;
         }
         outstanding += expected_per_send;
         tick.record_outstanding(outstanding);
@@ -367,15 +447,23 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
       uint64_t seq, ts;
       std::memcpy(&seq, rxbuf.data(), 8);
       std::memcpy(&ts, rxbuf.data() + 8, 8);
-      bool reliable_msg = rxbuf[kReliableFlagOffset] != 0;
+      bool reliable_msg = (rxbuf[kReliableFlagOffset] & kPayloadFlagReliable) != 0;
+      bool measured_msg = (rxbuf[kReliableFlagOffset] & kPayloadFlagMeasured) != 0;
       auto t_recv = clock::now();
       uint64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                             t_recv.time_since_epoch()).count();
       uint64_t rtt_us = (now_ns - ts) / 1000;
-      if (in_measure(t_recv)) {
+      if (in_measure(t_recv) && measured_msg) {
         (reliable_msg ? rtt_r : rtt_u).record_us(rtt_us);
         th.record(n);
-        if (dt.mark_received(seq, cid) && outstanding > 0) --outstanding;
+        if (dt.mark_received(seq, cid)) {
+          if (reliable_msg) {
+            ++delivered_r;
+          } else {
+            ++delivered_u;
+          }
+          if (outstanding > 0) --outstanding;
+        }
       }
     }
     if (in_diag && drained_this_tick > 0) tick.record_recv_drained(drained_this_tick);
@@ -430,6 +518,10 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   }
   row.delivered = dt.received();
   row.accepted = dt.accepted();
+  row.delivered_r = delivered_r;
+  row.delivered_u = delivered_u;
+  row.accepted_r = accepted_r;
+  row.accepted_u = accepted_u;
   row.delivery_ratio = dt.delivery_ratio();
   row.cpu_pct = ps.cpu_pct();
   row.cpu_pct_peak = ps.cpu_pct_peak();

@@ -24,6 +24,8 @@ SUMMARY_FIELDS = [
     "loss",
     "mode",
     "idle_policy",
+    "ramp_up_ms",
+    "tail_ms",
     "server_cpu_pin",
     "client_cpu_pin",
     "pinning_policy",
@@ -33,6 +35,7 @@ SUMMARY_FIELDS = [
     "delivery_ratio",
     "accepted_ratio",
     "server_cpu_pct",
+    "server_cpu_pct_peak",
     "stop_reason",
     "results_path",
     "diagnostics_path",
@@ -170,6 +173,8 @@ def run_phase1(args: argparse.Namespace, lib: str, rate: str, run_dir: Path) -> 
         f"--modes={args.mode}",
         f"--duration={args.duration}",
         f"--warmup={args.warmup}",
+        f"--ramp-up-ms={args.ramp_up_ms}",
+        f"--tail-ms={args.tail_ms}",
     ]
     if args.loss_injection:
         cmd.append("--loss-injection")
@@ -201,6 +206,8 @@ def run_phase1(args: argparse.Namespace, lib: str, rate: str, run_dir: Path) -> 
         "loss": args.loss,
         "mode": args.mode,
         "idle_policy": args.idle,
+        "ramp_up_ms": scenario.get("ramp_up_ms", "") if scenario else args.ramp_up_ms,
+        "tail_ms": scenario.get("tail_ms", "") if scenario else args.tail_ms,
         "server_cpu_pin": scenario.get("server_cpu_pin", "") if scenario else args.server_cpu,
         "client_cpu_pin": scenario.get("client_cpu_pin", "") if scenario else args.client_cpu,
         "pinning_policy": scenario.get("pinning_policy", "") if scenario else format_pinning_policy(
@@ -212,6 +219,7 @@ def run_phase1(args: argparse.Namespace, lib: str, rate: str, run_dir: Path) -> 
         "delivery_ratio": result.get("delivery_ratio", "") if result else "",
         "accepted_ratio": diagnostics.get("accepted_ratio", "") if diagnostics else "",
         "server_cpu_pct": result.get("server_cpu_pct", "") if result else "",
+        "server_cpu_pct_peak": result.get("server_cpu_pct_peak", "") if result else "",
         "stop_reason": stop_reason,
         "results_path": results_path,
         "diagnostics_path": diagnostics_path,
@@ -257,6 +265,8 @@ def main() -> int:
     p.add_argument("--mode", default="echo")
     p.add_argument("--duration", default="10")
     p.add_argument("--warmup", default="2")
+    p.add_argument("--ramp-up-ms", default="0")
+    p.add_argument("--tail-ms", default="500")
     p.add_argument("--idle", default="adaptive", choices=["spin", "adaptive"])
     p.add_argument("--server-cpu", default="")
     p.add_argument("--client-cpu", default="")

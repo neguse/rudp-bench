@@ -4,11 +4,13 @@
 
 #include <enet/enet.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -77,6 +79,120 @@ inline bool enet_pool_enabled() {
   return on;
 }
 
+inline bool enet_no_throttle_enabled() {
+  static const bool on = []() {
+    const char* v = std::getenv("ENET_NO_THROTTLE");
+    return v ? std::atoi(v) != 0 : false;  // default OFF; benchmark A/B knob
+  }();
+  return on;
+}
+
+inline bool enet_unsequenced_unreliable_enabled() {
+  static const bool on = []() {
+    const char* mode = std::getenv("ENET_UNRELIABLE_MODE");
+    if (mode && std::strcmp(mode, "sequenced") == 0) return false;
+    const char* legacy = std::getenv("ENET_UNSEQUENCED");
+    return legacy ? std::atoi(legacy) != 0 : true;  // default: legacy behavior
+  }();
+  return on;
+}
+
+enum class EnetBatchPollMode { Off, Both, Server, Client };
+
+inline EnetBatchPollMode enet_batch_poll_mode() {
+  static const EnetBatchPollMode mode = []() {
+    const char* v = std::getenv("ENET_BATCH_POLL");
+    if (!v || !*v || std::strcmp(v, "0") == 0) return EnetBatchPollMode::Off;
+    if (std::strcmp(v, "server") == 0) return EnetBatchPollMode::Server;
+    if (std::strcmp(v, "client") == 0) return EnetBatchPollMode::Client;
+    return std::atoi(v) != 0 ? EnetBatchPollMode::Both : EnetBatchPollMode::Off;
+  }();
+  return mode;
+}
+
+inline bool enet_batch_poll_enabled(bool is_server) {
+  switch (enet_batch_poll_mode()) {
+    case EnetBatchPollMode::Both:
+      return true;
+    case EnetBatchPollMode::Server:
+      return is_server;
+    case EnetBatchPollMode::Client:
+      return !is_server;
+    case EnetBatchPollMode::Off:
+      return false;
+  }
+  return false;
+}
+
+inline uint32_t env_u32(const char* name, uint32_t def) {
+  const char* v = std::getenv(name);
+  if (!v || !*v) return def;
+  int parsed = std::atoi(v);
+  return parsed > 0 ? static_cast<uint32_t>(parsed) : def;
+}
+
+inline void enet_configure_peer(ENetPeer* peer) {
+  if (!peer) return;
+  if (const char* rtt = std::getenv("ENET_INITIAL_RTT_MS"); rtt && *rtt) {
+    uint32_t rtt_ms = env_u32("ENET_INITIAL_RTT_MS", ENET_PEER_DEFAULT_ROUND_TRIP_TIME);
+    peer->roundTripTime = rtt_ms;
+    peer->roundTripTimeVariance = env_u32("ENET_INITIAL_RTT_VAR_MS", std::max<uint32_t>(1, rtt_ms / 4));
+  }
+  if (const char* ping = std::getenv("ENET_PING_MS"); ping && *ping) {
+    enet_peer_ping_interval(peer, env_u32("ENET_PING_MS", ENET_PEER_PING_INTERVAL));
+  }
+  if (std::getenv("ENET_TIMEOUT_LIMIT") || std::getenv("ENET_TIMEOUT_MIN_MS") ||
+      std::getenv("ENET_TIMEOUT_MAX_MS")) {
+    enet_peer_timeout(peer,
+                      env_u32("ENET_TIMEOUT_LIMIT", ENET_PEER_TIMEOUT_LIMIT),
+                      env_u32("ENET_TIMEOUT_MIN_MS", ENET_PEER_TIMEOUT_MINIMUM),
+                      env_u32("ENET_TIMEOUT_MAX_MS", ENET_PEER_TIMEOUT_MAXIMUM));
+  }
+  if (enet_no_throttle_enabled()) {
+    // ENet's packet throttle probabilistically drops unreliable packets when
+    // measured RTT worsens. Keep the local throttle full for A/B runs that want
+    // raw fire-and-forget behavior; call the public API after CONNECT so the
+    // handshake's throttle parameters still match.
+    peer->packetThrottle = ENET_PEER_PACKET_THROTTLE_SCALE;
+    peer->packetThrottleLimit = ENET_PEER_PACKET_THROTTLE_SCALE;
+    peer->packetThrottleCounter = 0;
+    enet_peer_throttle_configure(peer, ENET_PEER_PACKET_THROTTLE_INTERVAL, 0, 0);
+  }
+}
+
+std::string enet_flush_policy_name() {
+  std::string name;
+  switch (enet_batch_poll_mode()) {
+    case EnetBatchPollMode::Off:
+      name = "poll_flush";
+      break;
+    case EnetBatchPollMode::Both:
+      name = "poll_service_batch_flush";
+      break;
+    case EnetBatchPollMode::Server:
+      name = "poll_service_batch_server";
+      break;
+    case EnetBatchPollMode::Client:
+      name = "poll_service_batch_client";
+      break;
+  }
+  if (enet_no_throttle_enabled()) name += "_no_throttle";
+  if (const char* rtt = std::getenv("ENET_INITIAL_RTT_MS"); rtt && *rtt) {
+    name += "_rtt";
+    name += rtt;
+  }
+  if (const char* ping = std::getenv("ENET_PING_MS"); ping && *ping) {
+    name += "_ping";
+    name += ping;
+  }
+  if (const char* timeout = std::getenv("ENET_TIMEOUT_MAX_MS"); timeout && *timeout) {
+    name += "_timeout";
+    name += timeout;
+  }
+  if (!enet_unsequenced_unreliable_enabled()) name += "_sequenced_u";
+  return name;
+}
+
 // Socket SO_RCVBUF/SO_SNDBUF = 256KB, matching enet's own internal default and
 // the other UDP adapters (L17). A 2026-05-31 clean A/B found a bigger buffer does
 // NOT help enet at the 1000conn saturation knee (0.589 vs 0.588 at 1MB — the
@@ -125,6 +241,7 @@ class EnetAdapter : public rudp_bench::Adapter {
   void hint_connections(uint32_t n) override { hint_conns_ = n; }
 
   void server_listen(uint16_t port) override {
+    is_server_ = true;
     ENetAddress addr{};
     addr.host = ENET_HOST_ANY;
     addr.port = port;
@@ -138,6 +255,7 @@ class EnetAdapter : public rudp_bench::Adapter {
   }
 
   uint32_t client_connect(const char* host, uint16_t port) override {
+    is_server_ = false;
     if (!host_) {
       host_ = enet_host_create(nullptr, peer_count(), 2, 0, 0);
       if (!host_) std::abort();
@@ -173,7 +291,7 @@ class EnetAdapter : public rudp_bench::Adapter {
       flags = ENET_PACKET_FLAG_RELIABLE;
     } else {
       channel = 1;
-      flags = ENET_PACKET_FLAG_UNSEQUENCED;
+      flags = enet_unsequenced_unreliable_enabled() ? ENET_PACKET_FLAG_UNSEQUENCED : 0;
     }
     ENetPacket* pkt = enet_packet_create(data, len, flags);
     if (!pkt) return -1;
@@ -192,46 +310,20 @@ class EnetAdapter : public rudp_bench::Adapter {
   void poll() override {
     if (!host_) return;
     ENetEvent ev;
-    while (enet_host_service(host_, &ev, 0) > 0) {
-      switch (ev.type) {
-        case ENET_EVENT_TYPE_CONNECT: {
-          uint32_t id;
-          auto it = id_by_peer_.find(ev.peer);
-          if (it == id_by_peer_.end()) {
-            id = next_id_++;
-            id_by_peer_[ev.peer] = id;
-            peer_by_id_[id] = ev.peer;
-          } else {
-            id = it->second;
-          }
-          connected_ids_.insert(id);
-          break;
-        }
-        case ENET_EVENT_TYPE_RECEIVE: {
-          auto it = id_by_peer_.find(ev.peer);
-          uint32_t id;
-          if (it == id_by_peer_.end()) {
-            id = next_id_++;
-            id_by_peer_[ev.peer] = id;
-            peer_by_id_[id] = ev.peer;
-          } else {
-            id = it->second;
-          }
-          inbox_.enqueue(id, ev.packet->data, ev.packet->dataLength);
-          enet_packet_destroy(ev.packet);
-          break;
-        }
-        case ENET_EVENT_TYPE_DISCONNECT: {
-          auto it = id_by_peer_.find(ev.peer);
-          if (it != id_by_peer_.end()) {
-            uint32_t id = it->second;
-            connected_ids_.erase(id);
-            peer_by_id_.erase(id);
-            id_by_peer_.erase(it);
-          }
-          break;
-        }
-        default: break;
+    if (enet_batch_poll_enabled(is_server_)) {
+      // enet_host_service(event!=NULL) returns after a single dispatched event
+      // and scans all peers for outgoing commands before/after receiving. At
+      // 1000 conns that becomes O(events * peers). Pump socket IO once with no
+      // event delivery, then drain the queued events without extra peer scans.
+      // This looked promising but under load it can under-service the client
+      // side and reduce accepted_ratio, so it remains an explicit A/B knob.
+      enet_host_service(host_, nullptr, 0);
+      while (enet_host_check_events(host_, &ev) > 0) {
+        handle_event(ev);
+      }
+    } else {
+      while (enet_host_service(host_, &ev, 0) > 0) {
+        handle_event(ev);
       }
     }
     enet_host_flush(host_);
@@ -260,10 +352,60 @@ class EnetAdapter : public rudp_bench::Adapter {
   bool supports(bool /*reliable*/) const override { return true; }
   size_t max_payload_bytes(bool /*reliable*/) const override { return 65536; }
   uint32_t max_connections() const override { return 4095; }
-  const char* flush_policy(bool /*reliable*/) const override { return "poll_flush"; }
+  const char* flush_policy(bool /*reliable*/) const override {
+    static const std::string policy = enet_flush_policy_name();
+    return policy.c_str();
+  }
   bool encryption_on() const override { return false; }
+  rudp_bench::ConnectionStats connection_stats() const override { return stats_; }
 
  private:
+  uint32_t peer_id(ENetPeer* peer) {
+    auto it = id_by_peer_.find(peer);
+    if (it != id_by_peer_.end()) return it->second;
+    uint32_t id = next_id_++;
+    id_by_peer_[peer] = id;
+    peer_by_id_[id] = peer;
+    return id;
+  }
+
+  void handle_event(ENetEvent& ev) {
+    switch (ev.type) {
+      case ENET_EVENT_TYPE_CONNECT: {
+        enet_configure_peer(ev.peer);
+        uint32_t id = peer_id(ev.peer);
+        if (connected_ids_.insert(id).second) {
+          ++connected_current_;
+          if (connected_current_ > stats_.connected_peak) {
+            stats_.connected_peak = connected_current_;
+          }
+        }
+        break;
+      }
+      case ENET_EVENT_TYPE_RECEIVE: {
+        uint32_t id = peer_id(ev.peer);
+        inbox_.enqueue(id, ev.packet->data, ev.packet->dataLength);
+        enet_packet_destroy(ev.packet);
+        break;
+      }
+      case ENET_EVENT_TYPE_DISCONNECT: {
+        auto it = id_by_peer_.find(ev.peer);
+        if (it != id_by_peer_.end()) {
+          uint32_t id = it->second;
+          if (connected_ids_.erase(id) > 0) {
+            if (connected_current_ > 0) --connected_current_;
+            ++stats_.shutdown_by_transport;
+          }
+          peer_by_id_.erase(id);
+          id_by_peer_.erase(it);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
   // 実 conn 数 + 余裕(12.5% + 8)を ENet 上限 4095 でクランプ。hint 無し(0)なら
   // 従来どおり 4095。client/server とも同じ計算。ENET_PEERCOUNT で固定上書き可
   // (A/B 用: 4095 を強制して sized と比較)。
@@ -279,12 +421,15 @@ class EnetAdapter : public rudp_bench::Adapter {
 
   uint32_t hint_conns_ = 0;
   ENetHost* host_ = nullptr;
+  bool is_server_ = false;
 
   // peer ↔ conn_id マッピング(双方向)
   std::unordered_map<ENetPeer*, uint32_t> id_by_peer_;
   std::unordered_map<uint32_t, ENetPeer*> peer_by_id_;
   std::unordered_set<uint32_t> connected_ids_;
   uint32_t next_id_ = 1;
+  uint32_t connected_current_ = 0;
+  rudp_bench::ConnectionStats stats_;
 
   // 受信メッセージのキュー
   rudp_bench::ReusableInboundQueue inbox_;

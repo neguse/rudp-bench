@@ -14,14 +14,23 @@ RAW_HEADER = (
     "throughput_mbps,msg_per_sec,"
     "rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,"
     "rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,"
-    "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
+    "delivered,accepted,delivered_r,delivered_u,accepted_r,accepted_u,"
+    "delivery_ratio,"
+    "server_received,server_echo_accepted,"
+    "server_received_r,server_received_u,"
+    "server_echo_accepted_r,server_echo_accepted_u,"
+    "server_recv_drained_p99,server_recv_drained_max,"
+    "cpu_pct,rss_mb,connect_ms,duration_s,"
     "mode,idle_policy,flush_policy,client_tick_gap_p99_us,"
     "client_tick_gap_max_us,"
     "client_pacing_lag_p99_us,client_pacing_lag_max_us,"
     "client_missed_pacing,client_attempted,client_accepted,"
     "client_attempted_ratio,client_accepted_ratio,"
     "client_recv_drained_p99,client_recv_drained_max,"
-    "client_outstanding_max,client_tick_ok,delivery_dedup_policy\n"
+    "client_outstanding_max,client_tick_ok,"
+    "conn_peak,conn_disc_transport,conn_disc_peer,"
+    "delivery_dedup_policy,"
+    "cpu_pct_peak,close_ms\n"
 )
 RAW_FIELDS = RAW_HEADER.strip().split(",")
 
@@ -44,10 +53,24 @@ BASE_RAW_ROW = {
     "rtt_u_p99_us": "30",
     "delivered": "200",
     "accepted": "200",
+    "delivered_r": "0",
+    "delivered_u": "200",
+    "accepted_r": "0",
+    "accepted_u": "200",
     "delivery_ratio": "1.0000",
+    "server_received": "0",
+    "server_echo_accepted": "0",
+    "server_received_r": "0",
+    "server_received_u": "0",
+    "server_echo_accepted_r": "0",
+    "server_echo_accepted_u": "0",
+    "server_recv_drained_p99": "0",
+    "server_recv_drained_max": "0",
     "cpu_pct": "99.00",
+    "cpu_pct_peak": "100.00",
     "rss_mb": "12",
     "connect_ms": "0",
+    "close_ms": "1",
     "duration_s": "2",
     "mode": "echo",
     "idle_policy": "spin",
@@ -65,6 +88,9 @@ BASE_RAW_ROW = {
     "client_recv_drained_max": "1",
     "client_outstanding_max": "1",
     "client_tick_ok": "1",
+    "conn_peak": "1",
+    "conn_disc_transport": "0",
+    "conn_disc_peer": "0",
     "delivery_dedup_policy": "sliding_window_65536_per_conn",
 }
 
@@ -106,6 +132,8 @@ def append_case(
     client_overrides=None,
     server_cpu_pin: str = "",
     client_cpu_pin: str = "",
+    ramp_up_ms: str = "0",
+    tail_ms: str = "500",
 ):
     # Legacy `reliable="r"|"u"` test-side shorthand maps to the new dual-rate
     # CLI: r => rate_r=100/rate_u=0, u => rate_r=0/rate_u=100. Mixed-mode tests
@@ -140,7 +168,17 @@ def append_case(
                 "delivered": "0",
                 "accepted": "0",
                 "delivery_ratio": "0.0000",
+                "server_received": "200",
+                "server_echo_accepted": "200",
+                "server_received_r": "0",
+                "server_received_u": "200",
+                "server_echo_accepted_r": "0",
+                "server_echo_accepted_u": "200",
+                "server_recv_drained_p99": "16",
+                "server_recv_drained_max": "32",
                 "cpu_pct": "7.50",
+                "cpu_pct_peak": "8.00",
+                "close_ms": "2",
                 "rss_mb": "11",
                 "client_attempted": "0",
                 "client_accepted": "0",
@@ -205,6 +243,10 @@ def append_case(
             "2",
             "--warmup",
             "0",
+            "--ramp-up-ms",
+            ramp_up_ms,
+            "--tail-ms",
+            tail_ms,
             "--idle",
             "spin",
             "--server-cpu-pin",
@@ -455,9 +497,19 @@ def main() -> int:
         assert canonical["ok"]["valid"] == "1"
         assert canonical["ok"]["invalid_reason"] == "ok"
         assert canonical["ok"]["delivery_ratio"] == "1.0000"
+        assert canonical["ok"]["forward_delivery_ratio"] == "1.0000"
+        assert canonical["ok"]["forward_delivery_ratio_r"] == ""
+        assert canonical["ok"]["forward_delivery_ratio_u"] == "1.0000"
+        assert canonical["ok"]["server_echo_accept_ratio"] == "1.0000"
+        assert canonical["ok"]["server_echo_accept_ratio_r"] == ""
+        assert canonical["ok"]["server_echo_accept_ratio_u"] == "1.0000"
+        assert canonical["ok"]["return_delivery_ratio"] == "1.0000"
+        assert canonical["ok"]["return_delivery_ratio_r"] == ""
+        assert canonical["ok"]["return_delivery_ratio_u"] == "1.0000"
         assert canonical["ok"]["rtt_u_p95_us"] == "20"
         assert canonical["ok"]["rtt_r_p95_us"] == "0"
         assert canonical["ok"]["server_cpu_pct"] == "7.50"
+        assert canonical["ok"]["server_cpu_pct_peak"] == "8.00"
         assert canonical["pinned"]["valid"] == "1"
 
         assert canonical["unsupported_reliable"]["invalid_reason"] == "unsupported_reliable"
@@ -481,6 +533,8 @@ def main() -> int:
         assert canonical["low_delivery_is_valid"]["invalid_reason"] == "ok"
         assert canonical["ratio_recomputed"]["delivery_ratio"] == "0.5000"
         assert scenario_rows["ok"]["idle_policy"] == "spin"
+        assert scenario_rows["ok"]["ramp_up_ms"] == "0"
+        assert scenario_rows["ok"]["tail_ms"] == "500"
         assert scenario_rows["ok"]["pinning_policy"] == "none"
         assert scenario_rows["ok"]["flush_policy"] == "immediate"
         assert scenario_rows["ok"]["supports_reliability"] == "1"
@@ -505,10 +559,32 @@ def main() -> int:
         # 20 scenarios * 2 roles (server, client) = 40
         assert len(diag) == 40
         client_diag = [r for r in diag if r["scenario_id"] == "ok" and r["role"] == "client"][0]
+        server_diag = [r for r in diag if r["scenario_id"] == "ok" and r["role"] == "server"][0]
+        assert server_diag["server_received"] == "200"
+        assert server_diag["server_echo_accepted"] == "200"
+        assert server_diag["server_received_u"] == "200"
+        assert server_diag["server_echo_accepted_u"] == "200"
+        assert server_diag["server_recv_drained_p99"] == "16"
+        assert server_diag["server_recv_drained_max"] == "32"
+        assert server_diag["cpu_pct_peak"] == "8.00"
+        assert server_diag["close_ms"] == "2"
+        assert server_diag["conn_peak"] == "1"
+        assert server_diag["conn_disc_transport"] == "0"
+        assert server_diag["conn_disc_peer"] == "0"
         assert client_diag["attempted"] == "200"
         assert client_diag["accepted"] == "200"
+        assert client_diag["accepted_r"] == "0"
+        assert client_diag["accepted_u"] == "200"
+        assert client_diag["delivered_r"] == "0"
+        assert client_diag["delivered_u"] == "200"
         assert client_diag["accepted_ratio"] == "1.0000"
         assert client_diag["delivery_ratio"] == "1.0000"
+        assert client_diag["client_recv_drained_p99"] == "1"
+        assert client_diag["client_recv_drained_max"] == "1"
+        assert client_diag["client_outstanding_max"] == "1"
+        assert client_diag["conn_peak"] == "1"
+        assert client_diag["conn_disc_transport"] == "0"
+        assert client_diag["conn_disc_peer"] == "0"
         assert client_diag["exit_status"] == "0"
         assert client_diag["client_tick_ok"] == "1"
         assert client_diag["delivery_dedup_policy"] == "sliding_window_65536_per_conn"

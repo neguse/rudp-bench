@@ -28,14 +28,23 @@ RAW_FIELDS = (
     "throughput_mbps,msg_per_sec,"
     "rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,"
     "rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,"
-    "delivered,accepted,delivery_ratio,cpu_pct,rss_mb,connect_ms,duration_s,"
+    "delivered,accepted,delivered_r,delivered_u,accepted_r,accepted_u,"
+    "delivery_ratio,"
+    "server_received,server_echo_accepted,"
+    "server_received_r,server_received_u,"
+    "server_echo_accepted_r,server_echo_accepted_u,"
+    "server_recv_drained_p99,server_recv_drained_max,"
+    "cpu_pct,rss_mb,connect_ms,duration_s,"
     "mode,idle_policy,flush_policy,client_tick_gap_p99_us,"
     "client_tick_gap_max_us,"
     "client_pacing_lag_p99_us,client_pacing_lag_max_us,"
     "client_missed_pacing,client_attempted,client_accepted,"
     "client_attempted_ratio,client_accepted_ratio,"
     "client_recv_drained_p99,client_recv_drained_max,"
-    "client_outstanding_max,client_tick_ok,delivery_dedup_policy"
+    "client_outstanding_max,client_tick_ok,"
+    "conn_peak,conn_disc_transport,conn_disc_peer,"
+    "delivery_dedup_policy,"
+    "cpu_pct_peak,close_ms"
 ).split(",")
 
 BASE_ROW = {
@@ -57,10 +66,24 @@ BASE_ROW = {
     "rtt_u_p99_us": "0",
     "delivered": "0",
     "accepted": "0",
+    "delivered_r": "0",
+    "delivered_u": "0",
+    "accepted_r": "0",
+    "accepted_u": "0",
     "delivery_ratio": "0.0000",
+    "server_received": "0",
+    "server_echo_accepted": "0",
+    "server_received_r": "0",
+    "server_received_u": "0",
+    "server_echo_accepted_r": "0",
+    "server_echo_accepted_u": "0",
+    "server_recv_drained_p99": "0",
+    "server_recv_drained_max": "0",
     "cpu_pct": "1.00",
+    "cpu_pct_peak": "2.00",
     "rss_mb": "10",
     "connect_ms": "0",
+    "close_ms": "1",
     "duration_s": "10",
     "mode": "echo",
     "idle_policy": "spin",
@@ -78,6 +101,9 @@ BASE_ROW = {
     "client_recv_drained_max": "0",
     "client_outstanding_max": "0",
     "client_tick_ok": "1",
+    "conn_peak": "1",
+    "conn_disc_transport": "0",
+    "conn_disc_peer": "0",
     "delivery_dedup_policy": "sliding_window_65536_per_conn",
 }
 
@@ -132,6 +158,10 @@ def run_synthetic_combine(tmp: Path) -> None:
         conns="1",
         delivered="35",
         accepted="70",
+        delivered_r="30",
+        delivered_u="5",
+        accepted_r="60",
+        accepted_u="10",
         client_attempted="80",
         client_accepted="70",
         client_attempted_ratio="0.8000",
@@ -143,6 +173,10 @@ def run_synthetic_combine(tmp: Path) -> None:
         conns="1",
         delivered="10",
         accepted="20",
+        delivered_r="8",
+        delivered_u="2",
+        accepted_r="16",
+        accepted_u="4",
         client_attempted="40",
         client_accepted="20",
         client_attempted_ratio="0.5000",
@@ -170,9 +204,16 @@ def run_synthetic_combine(tmp: Path) -> None:
     assert combined["client_attempted"] == "120"
     assert combined["client_accepted"] == "90"
     assert combined["delivered"] == "45"
+    assert combined["delivered_r"] == "38"
+    assert combined["delivered_u"] == "7"
+    assert combined["accepted_r"] == "76"
+    assert combined["accepted_u"] == "14"
     assert combined["client_attempted_ratio"] == "0.6667"
     assert combined["client_accepted_ratio"] == "0.7500"
     assert combined["delivery_ratio"] == "0.5000"
+    assert combined["conn_peak"] == "2"
+    assert combined["conn_disc_transport"] == "0"
+    assert combined["conn_disc_peer"] == "0"
 
 
 def run_smoke(args: argparse.Namespace, tmp: Path) -> None:

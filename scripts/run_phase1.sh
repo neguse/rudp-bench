@@ -3,6 +3,7 @@
 # Usage:
 #   scripts/run_phase1.sh --libraries=raw_udp,mini_rudp [--build-dir=build] [--results=results/phase1.csv]
 #   scripts/run_phase1.sh --sizes=64,1000 --conns=1,50 --rates-r=0,50 --rates-u=0,50 --losses=0 --modes=echo,broadcast
+#   scripts/run_phase1.sh --libraries=msquic --ramp-up-ms=10000
 #
 # --rates-r / --rates-u は per-conn 送信レート(Hz)。両方 0 の組合せはスキップ。
 # 両方 > 0 にすると HoL blocking 検証用の mixed トラフィックランになる。
@@ -31,6 +32,8 @@ LOSSES="0"
 MODES="echo,broadcast"
 DURATION=20
 WARMUP=2
+RAMP_UP_MS=0
+TAIL_MS=500
 LOSS_INJECT="0"   # 0=skip, 1=apply via sudo
 
 for arg in "$@"; do
@@ -54,6 +57,8 @@ for arg in "$@"; do
     --modes=*) MODES="${arg#*=}" ;;
     --duration=*) DURATION="${arg#*=}" ;;
     --warmup=*) WARMUP="${arg#*=}" ;;
+    --ramp-up-ms=*) RAMP_UP_MS="${arg#*=}" ;;
+    --tail-ms=*) TAIL_MS="${arg#*=}" ;;
     --loss-injection) LOSS_INJECT=1 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
@@ -134,7 +139,8 @@ for lib in ${LIBS//,/ }; do
               # LiteNetLib は独立 .NET バイナリに dispatch。
               if [ "$lib" = "litenetlib" ]; then
                 WARMUP_ARG="$LITENETLIB_WARMUP"
-                TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + 10))
+                TAIL_TIMEOUT_S=$(((TAIL_MS + 999) / 1000))
+                TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + TAIL_TIMEOUT_S + 10))
                 if [ ! -x "$LITENETLIB_BIN" ]; then
                   : >"$S_STDOUT"
                   : >"$C_STDOUT"
@@ -144,7 +150,7 @@ for lib in ${LIBS//,/ }; do
                   C_STATUS=127
                 else
                   run_timeout "$SERVER_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=server --port="$PORT" \
-                    --rate-r="$rate_r" --rate-u="$rate_u" --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" \
+                    --rate-r="$rate_r" --rate-u="$rate_u" --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$loss" \
                     --size="$size" --conns="$conns" --mode="$mode" --idle="$IDLE" \
                     --out="$S_OUT" >"$S_STDOUT" 2>"$S_STDERR" &
                   SPID=$!
@@ -153,7 +159,7 @@ for lib in ${LIBS//,/ }; do
                   run_timeout "$CLIENT_CPU" "$TIMEOUT_S" "$LITENETLIB_BIN" --library="$lib" --role=client \
                     --host=127.0.0.1 --port="$PORT" \
                     --rate-r="$rate_r" --rate-u="$rate_u" --size="$size" --conns="$conns" \
-                    --duration="$DURATION" --warmup="$WARMUP_ARG" --loss="$loss" --mode="$mode" --idle="$IDLE" \
+                    --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$loss" --mode="$mode" --idle="$IDLE" \
                     --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
                   C_STATUS=$?
                   wait "$SPID" 2>/dev/null
@@ -161,9 +167,10 @@ for lib in ${LIBS//,/ }; do
                   set -e
                 fi
               else
-                TIMEOUT_S=$((DURATION + WARMUP + 10))
+                TAIL_TIMEOUT_S=$(((TAIL_MS + 999) / 1000))
+                TIMEOUT_S=$((DURATION + WARMUP + TAIL_TIMEOUT_S + 10))
                 run_timeout "$SERVER_CPU" "$TIMEOUT_S" "$BIN" --library="$lib" --role=server --port="$PORT" \
-                  --rate-r="$rate_r" --rate-u="$rate_u" --duration="$DURATION" --warmup="$WARMUP" --loss="$loss" \
+                  --rate-r="$rate_r" --rate-u="$rate_u" --duration="$DURATION" --warmup="$WARMUP" --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$loss" \
                   --size="$size" --conns="$conns" --mode="$mode" --idle="$IDLE" \
                   --out="$S_OUT" >"$S_STDOUT" 2>"$S_STDERR" &
                 SPID=$!
@@ -172,7 +179,7 @@ for lib in ${LIBS//,/ }; do
                 run_timeout "$CLIENT_CPU" "$TIMEOUT_S" "$BIN" --library="$lib" --role=client \
                   --host=127.0.0.1 --port="$PORT" \
                   --rate-r="$rate_r" --rate-u="$rate_u" --size="$size" --conns="$conns" \
-                  --duration="$DURATION" --warmup="$WARMUP" --loss="$loss" --mode="$mode" --idle="$IDLE" \
+                  --duration="$DURATION" --warmup="$WARMUP" --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$loss" --mode="$mode" --idle="$IDLE" \
                   --out="$C_OUT" >"$C_STDOUT" 2>"$C_STDERR"
                 C_STATUS=$?
                 wait "$SPID" 2>/dev/null
@@ -189,7 +196,7 @@ for lib in ${LIBS//,/ }; do
                 --run-id "$RUN_ID" --scenario-id "$SCENARIO_ID" \
                 --library "$lib" --rate-r "$rate_r" --rate-u "$rate_u" \
                 --size "$size" --conns "$conns" --loss "$loss" --mode "$mode" \
-                --duration "$DURATION" --warmup "$WARMUP_ARG" --idle "$IDLE" \
+                --duration "$DURATION" --warmup "$WARMUP_ARG" --ramp-up-ms "$RAMP_UP_MS" --tail-ms "$TAIL_MS" --idle "$IDLE" \
                 --server-cpu-pin "$SERVER_CPU" --client-cpu-pin "$CLIENT_CPU"
 
               if [ "$LOSS_INJECT" = "1" ]; then

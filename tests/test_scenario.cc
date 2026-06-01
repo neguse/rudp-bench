@@ -22,7 +22,7 @@ TEST(Scenario, ParsesAllFlags) {
       "--host=127.0.0.1", "--port=9000",
       "--rate-r=10", "--rate-u=100",
       "--size=64", "--conns=4",
-      "--duration=30", "--warmup=2", "--loss=0",
+      "--duration=30", "--warmup=2", "--ramp-up-ms=100", "--tail-ms=1500", "--loss=0",
       "--idle=adaptive", "--out=/tmp/out.csv",
   };
   int argc = sizeof(argv) / sizeof(argv[0]);
@@ -38,6 +38,8 @@ TEST(Scenario, ParsesAllFlags) {
   EXPECT_EQ(cfg->conns, 4u);
   EXPECT_EQ(cfg->duration_s, 30u);
   EXPECT_EQ(cfg->warmup_s, 2u);
+  EXPECT_EQ(cfg->ramp_up_ms, 100u);
+  EXPECT_EQ(cfg->tail_ms, 1500u);
   EXPECT_DOUBLE_EQ(cfg->loss_pct, 0.0);
   EXPECT_EQ(cfg->idle_policy, rudp_bench::IdlePolicy::Adaptive);
   EXPECT_STREQ(rudp_bench::idle_policy_name(cfg->idle_policy), "adaptive");

@@ -12,8 +12,10 @@ AGG = ROOT / "scripts" / "aggregate_runs.py"
 
 RESULT_FIELDS = [
     "run_id", "scenario_id", "library", "valid", "invalid_reason",
-    "delivery_ratio", "rtt_r_p50_us", "rtt_r_p95_us", "rtt_r_p99_us",
+    "delivery_ratio", "return_delivery_ratio_r", "return_delivery_ratio_u",
+    "rtt_r_p50_us", "rtt_r_p95_us", "rtt_r_p99_us",
     "rtt_u_p50_us", "rtt_u_p95_us", "rtt_u_p99_us", "server_cpu_pct",
+    "server_cpu_pct_peak",
 ]
 
 
@@ -50,13 +52,15 @@ def main() -> int:
         write_results(results, [
             {"run_id": "r1", "scenario_id": "s200", "library": "enet", "valid": "1",
              "invalid_reason": "ok", "delivery_ratio": "0.990", "server_cpu_pct": "60.0",
-             "rtt_u_p99_us": "1000"},
+             "return_delivery_ratio_r": "0.998", "return_delivery_ratio_u": "0.970",
+             "server_cpu_pct_peak": "80.0", "rtt_u_p99_us": "1000"},
             {"run_id": "r2", "scenario_id": "s200", "library": "enet", "valid": "1",
              "invalid_reason": "ok", "delivery_ratio": "0.991", "server_cpu_pct": "62.0",
-             "rtt_u_p99_us": "1100"},
+             "return_delivery_ratio_r": "1.000", "return_delivery_ratio_u": "0.950",
+             "server_cpu_pct_peak": "82.0", "rtt_u_p99_us": "1100"},
             {"run_id": "r3", "scenario_id": "s200", "library": "enet", "valid": "0",
              "invalid_reason": "client_tick", "delivery_ratio": "0.100", "server_cpu_pct": "99.0",
-             "rtt_u_p99_us": "9000"},
+             "server_cpu_pct_peak": "100.0", "rtt_u_p99_us": "9000"},
             {"run_id": "r1", "scenario_id": "s1000", "library": "kcp", "valid": "0",
              "invalid_reason": "client_tick", "delivery_ratio": "", "server_cpu_pct": ""},
             {"run_id": "r2", "scenario_id": "s1000", "library": "kcp", "valid": "0",
@@ -85,7 +89,10 @@ def main() -> int:
         assert enet["conns"] == "200", enet
         # median of [0.990, 0.991] = 0.9905; invalid 3rd run (0.100) excluded
         assert enet["delivery_ratio_median"] == "0.9905", enet
+        assert enet["return_delivery_ratio_r_median"] == "0.9990", enet
+        assert enet["return_delivery_ratio_u_median"] == "0.9600", enet
         assert enet["server_cpu_pct_median"] == "61.00", enet
+        assert enet["server_cpu_pct_peak_median"] == "81.00", enet
         assert enet["rtt_u_p99_us_median"] == "1050", enet
         assert set(enet["included_run_ids"].split(";")) == {"r1", "r2"}, enet
         assert enet["note"] == "", enet

@@ -26,6 +26,10 @@ struct ScenarioConfig {
   // 全 conn 同時 handshake が listener / TLS スタックで詰まるため、200conn では
   // ~10s 程度確保した方が安定する。
   uint32_t ramp_up_ms = 0;
+  // Active send window が終わった後、client が poll/recv を続ける時間。
+  // loss 下の reliable retransmit は 500ms を超えて戻ることがあるため、
+  // scenario metadata として残し、必要に応じて延ばせるようにする。
+  uint32_t tail_ms = 500;
   double loss_pct = 0.0;          // メタデータ(tc は外側で設定済み前提)
   ServerMode mode = ServerMode::Echo;  // echo: 1:1 / broadcast: 1:N (全 conn)
   IdlePolicy idle_policy = IdlePolicy::Spin;

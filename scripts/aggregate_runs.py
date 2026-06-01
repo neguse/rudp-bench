@@ -27,7 +27,17 @@ from typing import Dict, List, Optional
 # column -> decimal places in the emitted median ("" = round to int)
 METRIC_FORMAT = {
     "delivery_ratio": 4,
+    "forward_delivery_ratio": 4,
+    "forward_delivery_ratio_r": 4,
+    "forward_delivery_ratio_u": 4,
+    "server_echo_accept_ratio": 4,
+    "server_echo_accept_ratio_r": 4,
+    "server_echo_accept_ratio_u": 4,
+    "return_delivery_ratio": 4,
+    "return_delivery_ratio_r": 4,
+    "return_delivery_ratio_u": 4,
     "server_cpu_pct": 2,
+    "server_cpu_pct_peak": 2,
     "rtt_r_p50_us": 0,
     "rtt_r_p95_us": 0,
     "rtt_r_p99_us": 0,

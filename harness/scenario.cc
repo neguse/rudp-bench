@@ -106,6 +106,9 @@ std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]) {
     else if (starts_with(a, "--ramp-up-ms=")) {
       if (!parse_u32(value(a, "--ramp-up-ms="), &c.ramp_up_ms)) return std::nullopt;
     }
+    else if (starts_with(a, "--tail-ms=")) {
+      if (!parse_u32(value(a, "--tail-ms="), &c.tail_ms)) return std::nullopt;
+    }
     else if (starts_with(a, "--loss=")) {
       if (!parse_loss_pct(value(a, "--loss="), &c.loss_pct)) return std::nullopt;
     }
