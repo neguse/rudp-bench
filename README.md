@@ -7,6 +7,15 @@ See `docs/superpowers/specs/2026-04-28-rudp-bench-design.md` for the full design
 
 Plan 3-9 complete plus custom apex adapter (all 11 adapters): harness + `raw_udp` + `mini_rudp` baselines + `apex_rudp` + ENet + KCP + SLikeNet + UDT4 + yojimbo + GNS + LiteNetLib + msquic adapters.
 
+## Final Output
+
+本プロジェクトの最終評価は合成 `echo` baseline ではなく、本番想定の production profiles で見る:
+
+- `media_relay`: media SFU / relay 想定の unreliable fanout。
+- `game_server`: authoritative game server 想定の state/input + reliable event fanout。
+
+測定レポート: [`docs/measurements/2026-06-02-production-profiles/report.md`](docs/measurements/2026-06-02-production-profiles/report.md)
+
 | ライブラリ | 暗号 | 状態 |
 |---|---|---|
 | raw_udp | off | ✅ |

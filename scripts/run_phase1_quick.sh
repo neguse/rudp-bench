@@ -7,7 +7,7 @@
 # 少なくとも一方は >0 必須。
 #
 # Usage:
-#   scripts/run_phase1_quick.sh [--libraries=raw_udp,...] [--rate-r=50] [--rate-u=0]
+#   scripts/run_phase1_quick.sh [--libraries=raw_udp,...] [--rate-r=50] [--rate-u=0] [--mode=echo|broadcast]
 
 set -euo pipefail
 
@@ -30,6 +30,8 @@ RATE_U=0
 LOSS=0
 TAIL_MS=500
 CLIENT_PROCS=1
+DURATION=20
+MODE=echo
 # Per-lib ramp: msquic alone needs spread-out connects (its workers race when
 # all 200 conns handshake at once). Other libs degrade when ramp_up_ms > 0
 # because they busy-poll the adapter for the ramp duration, which floods
@@ -57,6 +59,8 @@ for arg in "$@"; do
     --rate-u=*) RATE_U="${arg#*=}" ;;
     --loss=*) LOSS="${arg#*=}" ;;
     --tail-ms=*) TAIL_MS="${arg#*=}" ;;
+    --duration=*) DURATION="${arg#*=}" ;;
+    --mode=*) MODE="${arg#*=}" ;;
     --client-procs=*) CLIENT_PROCS="${arg#*=}" ;;
     --ramp-up-ms=*) RAMP_UP_MS_DEFAULT="${arg#*=}"; RAMP_UP_MS_MSQUIC="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
@@ -78,6 +82,10 @@ fi
 
 if [ "$IDLE" != "spin" ] && [ "$IDLE" != "adaptive" ]; then
   echo "invalid --idle: $IDLE" >&2
+  exit 2
+fi
+if [ "$MODE" != "echo" ] && [ "$MODE" != "broadcast" ]; then
+  echo "invalid --mode: $MODE (echo|broadcast)" >&2
   exit 2
 fi
 if [ "$ISOLATE" != "taskset" ] && [ "$ISOLATE" != "systemd" ]; then
@@ -207,10 +215,6 @@ run_timeout() {
     timeout "${timeout_s}s" "$@"
   fi
 }
-
-# 軸固定 (size, conns, rate-r, rate-u は CLI で上書き可能)
-MODE=echo
-DURATION=20
 
 PORT_BASE=30000
 PORT=$PORT_BASE
