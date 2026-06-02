@@ -14,6 +14,7 @@
 namespace rudp_bench {
 void register_raw_udp_adapter();
 void register_mini_rudp_adapter();
+void register_apex_rudp_adapter();
 void register_enet_adapter();
 void register_kcp_adapter();
 void register_slikenet_adapter();
@@ -26,6 +27,7 @@ void register_msquic_adapter();
 int main(int argc, const char* argv[]) {
   rudp_bench::register_raw_udp_adapter();
   rudp_bench::register_mini_rudp_adapter();
+  rudp_bench::register_apex_rudp_adapter();
   rudp_bench::register_enet_adapter();
   rudp_bench::register_kcp_adapter();
   rudp_bench::register_slikenet_adapter();

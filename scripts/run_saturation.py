@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 
-DEFAULT_LIBS = "mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,litenetlib,msquic"
+DEFAULT_LIBS = "mini_rudp,apex_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,litenetlib,msquic"
 DEFAULT_RATES = "100,1000,10000,100000"
 
 SUMMARY_FIELDS = [

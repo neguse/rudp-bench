@@ -1,0 +1,7 @@
+run_id,scenario_id,library,valid,invalid_reason,delivery_ratio,forward_delivery_ratio,forward_delivery_ratio_r,forward_delivery_ratio_u,server_echo_accept_ratio,server_echo_accept_ratio_r,server_echo_accept_ratio_u,return_delivery_ratio,return_delivery_ratio_r,return_delivery_ratio_u,rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,server_cpu_pct,server_cpu_pct_peak
+final_asyncu_200_r1,apex_rudp_r50_u50_64_200_echo_0_adaptive,apex_rudp,1,ok,0.9899,0.9949,1.0000,0.9898,1.0000,1.0000,1.0000,0.9950,1.0000,0.9899,50600,63700,151200,50500,62100,66900,45.32,66.00
+final_asyncu_200_r2,apex_rudp_r50_u50_64_200_echo_0_adaptive,apex_rudp,1,ok,0.9900,0.9949,1.0000,0.9899,1.0000,1.0000,1.0000,0.9951,1.0000,0.9901,50700,63700,150400,50500,62100,66900,45.01,49.84
+final_asyncu_200_r3,apex_rudp_r50_u50_64_200_echo_0_adaptive,apex_rudp,1,ok,0.9899,0.9951,1.0000,0.9902,1.0000,1.0000,1.0000,0.9948,1.0000,0.9895,50700,63600,151000,50500,62100,66800,44.90,50.32
+final_asyncu_600_r1,apex_rudp_r50_u50_64_600_echo_0_adaptive,apex_rudp,1,ok,0.9901,0.9950,1.0000,0.9900,1.0000,1.0000,1.0000,0.9951,1.0000,0.9902,51700,65100,152300,51500,63700,68700,97.15,126.64
+final_asyncu_600_r2,apex_rudp_r50_u50_64_600_echo_0_adaptive,apex_rudp,1,ok,0.9900,0.9950,1.0000,0.9899,1.0000,1.0000,1.0000,0.9950,1.0000,0.9900,51600,64800,152300,51500,63500,68000,97.16,132.33
+final_asyncu_600_r3,apex_rudp_r50_u50_64_600_echo_0_adaptive,apex_rudp,1,ok,0.9901,0.9950,1.0000,0.9901,1.0000,1.0000,1.0000,0.9951,1.0000,0.9901,51600,65000,152300,51500,63600,68800,97.96,113.31

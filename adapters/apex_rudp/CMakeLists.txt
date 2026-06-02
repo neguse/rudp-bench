@@ -1,0 +1,4 @@
+add_library(adapter_apex_rudp STATIC apex_rudp_adapter.cc)
+find_package(Threads REQUIRED)
+target_link_libraries(adapter_apex_rudp PUBLIC rudp_bench_harness Threads::Threads)
+target_compile_definitions(adapter_apex_rudp PRIVATE _GNU_SOURCE)

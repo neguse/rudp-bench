@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-LIBS="raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,litenetlib,msquic"
+LIBS="raw_udp,mini_rudp,apex_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,litenetlib,msquic"
 BUILD_DIR="build"
 RESULTS="results/phase1.csv"
 DIAGNOSTICS=""

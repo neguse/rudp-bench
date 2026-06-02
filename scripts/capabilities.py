@@ -29,6 +29,22 @@ CAPABILITIES: Dict[str, Dict[str, object]] = {
             "u": {"max_payload": 65497, "flush_policy": "immediate", "transport": "udp_datagram"},
         },
     },
+    "apex_rudp": {
+        "encryption": "off",
+        "max_conns": None,
+        "modes": {
+            "r": {
+                "max_payload": 65486,
+                "flush_policy": "piggyback_sack_retransmit",
+                "transport": "udp_datagram_sack",
+            },
+            "u": {
+                "max_payload": 65486,
+                "flush_policy": "server_async_unreliable_piggyback_ack",
+                "transport": "udp_datagram",
+            },
+        },
+    },
     "enet": {
         "encryption": "off",
         "max_conns": 4095,

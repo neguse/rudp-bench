@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 1 quick smoke sweep — axis を 1 シナリオに固定して 10 lib 一巡(~5min)。
+# Phase 1 quick smoke sweep — axis を 1 シナリオに固定して 11 lib 一巡(~5min)。
 # 軸: size=100, conns=10, mode=echo, rate-r=50 rate-u=0 (reliable のみ既定),
 #     loss=0, duration=20, warmup=2 (litenetlib のみ 5)
 #
@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-LIBS="raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,litenetlib,msquic"
+LIBS="raw_udp,mini_rudp,apex_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,litenetlib,msquic"
 BUILD_DIR="build"
 RESULTS="results/phase1_quick.csv"
 DIAGNOSTICS=""
@@ -161,6 +161,30 @@ run_timeout() {
     fi
     if [ "${RUDP_SERVER_RECV_DRAIN_LIMIT+x}" = x ]; then
       SYSTEMD_ENV_ARGS+=("-E" "RUDP_SERVER_RECV_DRAIN_LIMIT=$RUDP_SERVER_RECV_DRAIN_LIMIT")
+    fi
+    if [ "${APEX_RCVBUF_KB+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "APEX_RCVBUF_KB=$APEX_RCVBUF_KB")
+    fi
+    if [ "${APEX_ASYNC_SEND+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "APEX_ASYNC_SEND=$APEX_ASYNC_SEND")
+    fi
+    if [ "${APEX_ASYNC_UNRELIABLE_SERVER+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "APEX_ASYNC_UNRELIABLE_SERVER=$APEX_ASYNC_UNRELIABLE_SERVER")
+    fi
+    if [ "${APEX_ACK_DELAY_MS+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "APEX_ACK_DELAY_MS=$APEX_ACK_DELAY_MS")
+    fi
+    if [ "${APEX_RX_WORKER+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "APEX_RX_WORKER=$APEX_RX_WORKER")
+    fi
+    if [ "${APEX_SPLIT_ACK+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "APEX_SPLIT_ACK=$APEX_SPLIT_ACK")
+    fi
+    if [ "${APEX_RECV_DRAIN_ON_EMPTY+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "APEX_RECV_DRAIN_ON_EMPTY=$APEX_RECV_DRAIN_ON_EMPTY")
+    fi
+    if [ "${APEX_RECV_EMPTY_DRAINS+x}" = x ]; then
+      SYSTEMD_ENV_ARGS+=("-E" "APEX_RECV_EMPTY_DRAINS=$APEX_RECV_EMPTY_DRAINS")
     fi
     # Unit is killed by systemd after RuntimeMaxSec; also wrap with timeout
     # as a belt-and-suspenders against systemd-run hanging.

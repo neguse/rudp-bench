@@ -5,12 +5,13 @@ See `docs/superpowers/specs/2026-04-28-rudp-bench-design.md` for the full design
 
 ## Status
 
-Plan 3-9 complete (all 10 adapters): harness + `raw_udp` + `mini_rudp` baselines + ENet + KCP + SLikeNet + UDT4 + yojimbo + GNS + LiteNetLib + msquic adapters.
+Plan 3-9 complete plus custom apex adapter (all 11 adapters): harness + `raw_udp` + `mini_rudp` baselines + `apex_rudp` + ENet + KCP + SLikeNet + UDT4 + yojimbo + GNS + LiteNetLib + msquic adapters.
 
 | ライブラリ | 暗号 | 状態 |
 |---|---|---|
 | raw_udp | off | ✅ |
 | mini_rudp | off | ✅ |
+| apex_rudp | off | ✅ |
 | enet | off | ✅ |
 | kcp | off | ✅ |
 | slikenet | off | ✅ |
@@ -28,6 +29,7 @@ Plan 3-9 complete (all 10 adapters): harness + `raw_udp` + `mini_rudp` baselines
 |---|---:|---:|---:|---:|---|---|
 | raw_udp | no | yes | - / 65507 | unbounded | - / udp_datagram | unsupported / immediate |
 | mini_rudp | yes | yes | 65501 / 65501 | unbounded | udp_datagram_ack / udp_datagram | immediate_retransmit_poll / immediate |
+| apex_rudp | yes | yes | 65486 / 65486 | unbounded | udp_datagram_sack / udp_datagram | piggyback_sack_retransmit / server_async_unreliable_piggyback_ack |
 | enet | yes | yes | 65536 / 65536 | 4095 | enet_packet / enet_packet | poll_flush / poll_flush |
 | kcp | yes | yes | 65536 / 65502 | unbounded | kcp_arq / udp_datagram | poll_update / immediate |
 | slikenet | yes | yes | 65536 / 65536 | 1 | slikenet_message / slikenet_message | library_internal / library_internal |
@@ -80,13 +82,13 @@ dotnet が見つからない場合 LiteNetLib ビルドはスキップされ、�
 ## Phase 1 sweep
 
 ```
-scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib --results=results/phase1.csv
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,apex_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib --results=results/phase1.csv
 
 # conservative default matrix:
 #   reliable=r,u size=64,1000 conns=1,50 rate=50 msg/sec/conn loss=0 mode=echo,broadcast
 
 # high-rate/high-conn matrix without invalid payload sizes:
-scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib \
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,apex_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib \
     --sizes=64,1000 --conns=1,1000 --rates-r=0,100,100000 --rates-u=0,100,100000 \
     --losses=0,5 --modes=echo,broadcast --results=results/phase1_stress.csv
 
@@ -94,9 +96,9 @@ scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojim
 scripts/run_phase1.sh --libraries=raw_udp,mini_rudp --server-cpu=0 --client-cpu=1 --results=results/phase1_pinned.csv
 
 # with tc loss injection (requires sudo)
-scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib --results=results/phase1.csv --loss-injection
+scripts/run_phase1.sh --libraries=raw_udp,mini_rudp,apex_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib --results=results/phase1.csv --loss-injection
 
-python3 scripts/run_saturation.py --libraries=mini_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib \
+python3 scripts/run_saturation.py --libraries=mini_rudp,apex_rudp,enet,kcp,slikenet,udt4,yojimbo,gns,msquic,litenetlib \
     --channel=r --size=64 --conns=1 --rates=100,1000,10000,100000 --summary=results/saturation.csv
 
 python3 scripts/plot.py phase1-table --in results/phase1.csv --out results/phase1_table.md
