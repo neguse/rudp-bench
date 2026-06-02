@@ -1,5 +1,9 @@
 # Final saturation profiles benchmark
 
+> Superseded for the canonical final output by the apex batch remeasure:
+> [`../2026-06-03-apex-batch-final/report.md`](../2026-06-03-apex-batch-final/report.md).
+> This report remains the baseline multi-library run used for comparison.
+
 **測定日:** 2026-06-02
 
 **位置づけ:** 本プロジェクトの最終アウトプット。固定 conn の比較ではなく、各 workload の traffic shape を固定し、connection count を壊れるまで上げる。

@@ -12,9 +12,9 @@ Reliable UDP / RUDP / QUIC implementations を同じ workload で比較する be
 
 | profile | workload | strongest result |
 |---|---|---|
-| `media_relay` | media SFU / relay fanout | `litenetlib` / `apex_rudp`: 50 OK, 75 break |
-| `game_server` | authoritative game state/event fanout | `litenetlib`: 96 OK, 128 break |
-| `echo` | mixed 50/50 synthetic baseline | `litenetlib`: 2000 OK, 3000 break |
+| `media_relay` | media SFU / relay fanout | `apex_rudp`: 125 OK, 150 break |
+| `game_server` | authoritative game state/event fanout | `apex_rudp`: 128 OK, 192 break |
+| `echo` | mixed 50/50 synthetic baseline | `apex_rudp`: 3000 OK, not broken |
 
 古い `docs/measurements/*` は tuning log / intermediate report。最終結論は final saturation を見る。
 
@@ -35,12 +35,12 @@ ctest --test-dir build --output-on-failure
 scripts/run_final_saturation_profiles.py --out results/final_saturation_profiles
 ```
 
-Raw outputs are written under `results/`. Published final data lives in `docs/measurements/2026-06-02-final-saturation/data/`.
+Raw outputs are written under `results/`. Published final data lives in `docs/measurements/2026-06-03-apex-batch-final/data/`.
 
 ## Docs
 
 - Final output summary: [`docs/FINAL_OUTPUT.md`](docs/FINAL_OUTPUT.md)
-- Full final report: [`docs/measurements/2026-06-02-final-saturation/report.md`](docs/measurements/2026-06-02-final-saturation/report.md)
-- Capacity table: [`docs/measurements/2026-06-02-final-saturation/data/capacity.csv`](docs/measurements/2026-06-02-final-saturation/data/capacity.csv)
+- Full final report: [`docs/measurements/2026-06-03-apex-batch-final/report.md`](docs/measurements/2026-06-03-apex-batch-final/report.md)
+- Capacity table: [`docs/measurements/2026-06-03-apex-batch-final/data/capacity.csv`](docs/measurements/2026-06-03-apex-batch-final/data/capacity.csv)
 - Design spec: [`docs/superpowers/specs/2026-04-28-rudp-bench-design.md`](docs/superpowers/specs/2026-04-28-rudp-bench-design.md)
 - Development / measurement notes: [`docs/dev-notes.md`](docs/dev-notes.md)

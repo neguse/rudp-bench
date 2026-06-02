@@ -35,6 +35,16 @@ struct Adapter {
   // both sides
   // send: 成功時 0、リソース不足等で送信不可なら -1
   virtual int send(uint32_t conn_id, const void* data, size_t len, bool reliable) = 0;
+  // Server-side broadcast helper. Default preserves the one-send-per-target
+  // behavior; high-fanout adapters can override to batch queueing/copies.
+  virtual size_t send_many(const uint32_t* conn_ids, size_t count,
+                           const void* data, size_t len, bool reliable) {
+    size_t accepted = 0;
+    for (size_t i = 0; i < count; ++i) {
+      if (send(conn_ids[i], data, len, reliable) == 0) ++accepted;
+    }
+    return accepted;
+  }
   // recv: メッセージ取得時 1、なければ 0、エラー -1。out_* に書き込み。
   virtual int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) = 0;
 

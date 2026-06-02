@@ -2,7 +2,7 @@
 
 このプロジェクトの最終アウトプットは、固定 traffic shape で connection count を壊れるまで上げる 3 つの saturation profiles。
 
-詳細レポート: [`measurements/2026-06-02-final-saturation/report.md`](measurements/2026-06-02-final-saturation/report.md)
+詳細レポート: [`measurements/2026-06-03-apex-batch-final/report.md`](measurements/2026-06-03-apex-batch-final/report.md)
 
 ## Profiles
 
@@ -20,14 +20,14 @@
 
 | profile | winner / strongest | max OK | break | notes |
 |---|---|---:|---:|---|
-| `media_relay` | `litenetlib` / `apex_rudp` | 50 | 75 | 50 conn は両者 delivery 0.98 前後。75 conn で両者 break。 |
-| `game_server` | `litenetlib` | 96 | 128 | apex / GNS は 64 OK、96 で break。ENet は 64 で threshold 未満。 |
-| `echo` | `litenetlib` | 2000 | 3000 | apex は 1000 OK、1500 で break。ENet / GNS は 600 OK、1000 で break。 |
+| `media_relay` | `apex_rudp` | 125 | 150 | packet coalescing 後、旧 strongest の 50 OK / 75 break を超えた。 |
+| `game_server` | `apex_rudp` | 128 | 192 | 旧 LiteNetLib 96 OK / 128 break を超えた。 |
+| `echo` | `apex_rudp` | 3000 | not broken | final schedule 上限の 3000 conn まで OK。 |
 
 ## Data
 
-- capacity table: [`measurements/2026-06-02-final-saturation/data/capacity.csv`](measurements/2026-06-02-final-saturation/data/capacity.csv)
-- all medians: [`measurements/2026-06-02-final-saturation/data/summary.csv`](measurements/2026-06-02-final-saturation/data/summary.csv)
-- run-level results: [`measurements/2026-06-02-final-saturation/data/results_all.csv`](measurements/2026-06-02-final-saturation/data/results_all.csv)
+- capacity table: [`measurements/2026-06-03-apex-batch-final/data/capacity.csv`](measurements/2026-06-03-apex-batch-final/data/capacity.csv)
+- all medians: [`measurements/2026-06-03-apex-batch-final/data/summary.csv`](measurements/2026-06-03-apex-batch-final/data/summary.csv)
+- run-level results: [`measurements/2026-06-03-apex-batch-final/data/results_all.csv`](measurements/2026-06-03-apex-batch-final/data/results_all.csv)
 
-Older measurement directories are tuning logs, fixed-conn probes, or intermediate reports. Treat this file and the linked final saturation report as the canonical final output.
+Older measurement directories are tuning logs, fixed-conn probes, baseline runs, or intermediate reports. Treat this file and the linked apex batch final report as the canonical final output.

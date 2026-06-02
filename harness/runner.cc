@@ -169,6 +169,19 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
 
   std::vector<uint8_t> buf(65536);
   std::unordered_set<uint32_t> known_conns;  // broadcast 配信先
+  std::vector<uint32_t> known_conn_ids;
+  std::vector<uint8_t> known_conn_seen(static_cast<size_t>(cfg.conns) + 1, 0);
+  auto remember_conn = [&](uint32_t cid) {
+    if (cid < known_conn_seen.size()) {
+      if (known_conn_seen[cid]) return;
+      known_conn_seen[cid] = 1;
+      known_conn_ids.push_back(cid);
+      return;
+    }
+    if (known_conns.insert(cid).second) {
+      known_conn_ids.push_back(cid);
+    }
+  };
   auto start = std::chrono::steady_clock::now();
   auto server_tail_ms = std::max<uint32_t>(2000, cfg.tail_ms + 500);
   auto deadline = start + std::chrono::seconds(cfg.duration_s + cfg.warmup_s) +
@@ -203,7 +216,7 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
       if (r != 1) break;
       ++drained_this_tick;
       did_work = true;
-      known_conns.insert(cid);
+      remember_conn(cid);
       if (n < kHeaderBytes) continue;
       // Echo back on the same channel the message arrived on (client tags
       // each outbound payload with the reliable flag at kReliableFlagOffset).
@@ -227,14 +240,14 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
           }
         }
       } else {
-        for (uint32_t target : known_conns) {
-          if (a.send(target, buf.data(), n, reliable) == 0 && measured) {
-            ++server_echo_accepted;
-            if (reliable) {
-              ++server_echo_accepted_r;
-            } else {
-              ++server_echo_accepted_u;
-            }
+        size_t accepted = a.send_many(known_conn_ids.data(), known_conn_ids.size(),
+                                      buf.data(), n, reliable);
+        if (measured) {
+          server_echo_accepted += accepted;
+          if (reliable) {
+            server_echo_accepted_r += accepted;
+          } else {
+            server_echo_accepted_u += accepted;
           }
         }
       }

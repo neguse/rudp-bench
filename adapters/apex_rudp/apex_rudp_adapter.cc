@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -47,9 +48,11 @@ using clock_type = std::chrono::steady_clock;
 constexpr uint8_t FLAG_REL = 0x01;
 constexpr uint8_t FLAG_ACK_ONLY = 0x02;
 constexpr uint8_t FLAG_HAS_ACK = 0x04;
+constexpr uint8_t FLAG_BATCH = 0x08;
 
 constexpr size_t MAX_UDP_PAYLOAD = 65507;
 constexpr size_t HEADER_BYTES = 1 + 4 + 4 + 4 + 8;  // flags, conv, seq, ack, ack_bits
+constexpr size_t BATCH_FRAME_LEN_BYTES = 2;
 constexpr size_t MAX_PAYLOAD = MAX_UDP_PAYLOAD - HEADER_BYTES;
 constexpr size_t MAX_PENDING_RELIABLE_PER_CONN = 4096;
 constexpr size_t INBOX_LIMIT = 1u << 20;
@@ -57,10 +60,11 @@ constexpr int DEFAULT_SOCKET_BUFFER_KB = 4096;
 constexpr auto RETX_TIMEOUT = std::chrono::milliseconds(100);
 constexpr int DEFAULT_ACK_DELAY_MS = 2;
 constexpr size_t RECV_BATCH = 64;
-constexpr size_t TX_BATCH = 64;
+constexpr size_t TX_BATCH = 256;
 constexpr size_t MAX_DRAIN_PACKETS = 4096;
 constexpr size_t MAX_TX_QUEUE = 1u << 20;
 constexpr size_t MAX_RX_QUEUE = 1u << 20;
+constexpr size_t DEFAULT_CLIENT_RECV_BUDGET = 64;
 
 struct PacketHeader {
   uint8_t flags = 0;
@@ -76,10 +80,20 @@ uint32_t load_u32(const uint8_t* p) {
   return v;
 }
 
+uint16_t load_u16(const uint8_t* p) {
+  uint16_t v;
+  std::memcpy(&v, p, sizeof(v));
+  return v;
+}
+
 uint64_t load_u64(const uint8_t* p) {
   uint64_t v;
   std::memcpy(&v, p, sizeof(v));
   return v;
+}
+
+void store_u16(uint8_t* p, uint16_t v) {
+  std::memcpy(p, &v, sizeof(v));
 }
 
 void store_u32(uint8_t* p, uint32_t v) {
@@ -111,6 +125,10 @@ void write_header(uint8_t* p, const PacketHeader& h) {
 uint64_t addr_key(const sockaddr_in& a) {
   return (static_cast<uint64_t>(a.sin_addr.s_addr) << 32) |
          static_cast<uint64_t>(a.sin_port);
+}
+
+bool same_endpoint(const sockaddr_in& a, const sockaddr_in& b) {
+  return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
 }
 
 void set_nonblock(int fd) {
@@ -157,6 +175,32 @@ bool rx_worker_enabled_for(bool is_server) {
   return is_server && enabled;
 }
 
+size_t tx_worker_count_for(bool is_server) {
+  static const size_t configured = []() {
+    const char* v = std::getenv("APEX_TX_WORKERS");
+    if (!v || !*v) return size_t{1};
+    int parsed = std::atoi(v);
+    if (parsed <= 0) return size_t{1};
+    return static_cast<size_t>(std::min(parsed, 8));
+  }();
+  return is_server ? configured : size_t{1};
+}
+
+size_t client_shard_count_for(uint32_t hinted_connections) {
+  static const int configured = []() {
+    const char* v = std::getenv("APEX_CLIENT_SHARDS");
+    if (!v || !*v) return 1;
+    if (std::strcmp(v, "conn") == 0 || std::strcmp(v, "per_conn") == 0 ||
+        std::strcmp(v, "auto") == 0) {
+      return 0;
+    }
+    int parsed = std::atoi(v);
+    return parsed > 0 ? parsed : 1;
+  }();
+  if (configured == 0) return std::max<uint32_t>(1, hinted_connections);
+  return static_cast<size_t>(configured);
+}
+
 size_t recv_empty_drain_budget() {
   static const size_t budget = []() {
     const char* enabled = std::getenv("APEX_RECV_DRAIN_ON_EMPTY");
@@ -176,6 +220,17 @@ bool recv_drain_on_empty_enabled() {
     return !v || std::atoi(v) != 0;
   }();
   return enabled;
+}
+
+size_t client_recv_budget_per_poll() {
+  static const size_t budget = []() {
+    const char* v = std::getenv("APEX_CLIENT_RECV_BUDGET");
+    if (!v || !*v) return DEFAULT_CLIENT_RECV_BUDGET;
+    int parsed = std::atoi(v);
+    if (parsed <= 0) return std::numeric_limits<size_t>::max();
+    return static_cast<size_t>(parsed);
+  }();
+  return budget;
 }
 
 bool split_ack_enabled() {
@@ -238,6 +293,7 @@ struct PendingSend {
 
 struct Conn {
   sockaddr_in peer{};
+  int fd = -1;
   uint32_t conv = 0;
   uint32_t next_seq = 1;
   bool active = false;
@@ -253,6 +309,7 @@ struct Peer {
 
 struct TxDatagram {
   sockaddr_in peer{};
+  int fd = -1;
   std::vector<uint8_t> owned;
   const uint8_t* external = nullptr;
   size_t len = 0;
@@ -271,6 +328,12 @@ struct RxDatagram {
   std::vector<uint8_t> bytes;
 };
 
+struct FanoutJob {
+  std::vector<uint8_t> bytes;
+  std::vector<sockaddr_in> peers;
+  size_t stride = 0;
+};
+
 bool ack_covers(uint32_t ack, uint64_t ack_bits, uint32_t seq) {
   if (ack == 0 || seq > ack) return false;
   uint32_t delta = ack - seq;
@@ -283,12 +346,17 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   ApexRudpAdapter() {
     inbox_.set_limit(INBOX_LIMIT);
     direct_batch_.reserve(TX_BATCH);
+    fanout_conns_.reserve(TX_BATCH);
+    fanout_headers_.reserve(TX_BATCH);
   }
   ~ApexRudpAdapter() override { close(); }
 
   void hint_connections(uint32_t n) override {
+    hinted_connections_ = n;
     conns_.reserve(n);
     peers_.reserve(8);
+    fanout_conns_.reserve(n);
+    fanout_headers_.reserve(n);
   }
 
   void server_listen(uint16_t port) override {
@@ -327,11 +395,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
 
   uint32_t client_connect(const char* host, uint16_t port) override {
     is_server_ = false;
-    if (client_fd_ < 0) {
-      client_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
-      if (client_fd_ < 0) std::abort();
-      tune_socket_buffers(client_fd_);
-      set_nonblock(client_fd_);
+    if (client_fds_.empty()) {
       sockaddr_in srv{};
       srv.sin_family = AF_INET;
       srv.sin_port = htons(port);
@@ -339,6 +403,21 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
       server_peer_ = srv;
       server_ack_peer_ = srv;
       server_ack_peer_.sin_port = htons(static_cast<uint16_t>(port + 1));
+
+      size_t shards = client_shard_count_for(hinted_connections_);
+      if (hinted_connections_ > 0) {
+        shards = std::min<size_t>(shards, hinted_connections_);
+      }
+      shards = std::max<size_t>(1, shards);
+      client_fds_.reserve(shards);
+      for (size_t i = 0; i < shards; ++i) {
+        int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) std::abort();
+        tune_socket_buffers(fd);
+        set_nonblock(fd);
+        client_fds_.push_back(fd);
+      }
+      client_fd_ = client_fds_.front();
       if (async_send_enabled_for(false)) start_tx_worker();
     }
 
@@ -346,6 +425,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     Conn c;
     c.active = true;
     c.conv = id;
+    c.fd = client_fds_[(id - 1) % client_fds_.size()];
     c.peer = server_peer_;
     conns_.push_back(std::move(c));
     connected_peak_ = std::max<uint32_t>(connected_peak_, conns_.size());
@@ -397,17 +477,66 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     return 0;
   }
 
+  size_t send_many(const uint32_t* conn_ids, size_t count,
+                   const void* data, size_t len, bool reliable) override {
+    if (len > max_payload_bytes(reliable)) return 0;
+    if (reliable || !is_server_ || !async_unreliable_server_enabled()) {
+      return Adapter::send_many(conn_ids, count, data, len, reliable);
+    }
+
+    fanout_conns_.clear();
+    fanout_headers_.clear();
+    FanoutJob job;
+    job.stride = HEADER_BYTES + len;
+    job.peers.reserve(count);
+    job.bytes.reserve(job.stride * count);
+
+    for (size_t i = 0; i < count; ++i) {
+      Conn* c = find_conn(conn_ids[i]);
+      if (!c) continue;
+
+      size_t offset = job.bytes.size();
+      job.bytes.resize(offset + job.stride);
+      uint8_t* pkt = job.bytes.data() + offset;
+
+      PacketHeader h;
+      h.conv = c->conv;
+      attach_ack(*c, &h, false);
+      write_header(pkt, h);
+      if (len > 0) {
+        std::memcpy(pkt + HEADER_BYTES, data, len);
+      }
+
+      job.peers.push_back(c->peer);
+      fanout_conns_.push_back(c);
+      fanout_headers_.push_back(h);
+    }
+
+    size_t accepted = queue_fanout_job_async(std::move(job));
+    for (size_t i = 0; i < accepted; ++i) {
+      note_ack_sent(*fanout_conns_[i], fanout_headers_[i]);
+    }
+    return accepted;
+  }
+
   int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
-    if (recv_drain_on_empty_enabled() && inbox_.empty() &&
+    if (!is_server_ && batch_recv_seen_ && client_recv_budget_left_ == 0) return 0;
+    if (!is_server_ && recv_drain_on_empty_enabled() && inbox_.empty() &&
         recv_empty_drains_left_ > 0) {
       flush_direct_batch();
       drain_socket(MAX_DRAIN_PACKETS / 4);
       --recv_empty_drains_left_;
     }
-    return inbox_.recv(buf, cap, out_len, out_conn_id);
+    int r = inbox_.recv(buf, cap, out_len, out_conn_id);
+    if (r == 1 && !is_server_ && batch_recv_seen_ &&
+        client_recv_budget_left_ != std::numeric_limits<size_t>::max()) {
+      --client_recv_budget_left_;
+    }
+    return r;
   }
 
   void poll() override {
+    if (!is_server_) client_recv_budget_left_ = client_recv_budget_per_poll();
     flush_direct_batch();
     drain_socket(MAX_DRAIN_PACKETS);
     recv_empty_drains_left_ = recv_empty_drain_budget();
@@ -428,10 +557,11 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
       ::close(server_fd_);
       server_fd_ = -1;
     }
-    if (client_fd_ >= 0) {
-      ::close(client_fd_);
-      client_fd_ = -1;
+    for (int fd : client_fds_) {
+      if (fd >= 0) ::close(fd);
     }
+    client_fds_.clear();
+    client_fd_ = -1;
     if (server_ack_fd_ >= 0) {
       ::close(server_ack_fd_);
       server_ack_fd_ = -1;
@@ -439,11 +569,18 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     conns_.clear();
     peers_.clear();
     free_buffers_.clear();
+    {
+      std::lock_guard<std::mutex> lock(recycled_mu_);
+      recycled_buffers_.clear();
+    }
     inbox_.clear();
+    batch_recv_seen_ = false;
     next_id_ = 1;
     connected_peak_ = 0;
+    hinted_connections_ = 0;
     earliest_ack_ = clock_type::time_point::max();
     earliest_retx_ = clock_type::time_point::max();
+    client_recv_budget_left_ = std::numeric_limits<size_t>::max();
   }
 
   const char* name() const override { return "apex_rudp"; }
@@ -465,6 +602,31 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     if (id == 0 || id > conns_.size()) return nullptr;
     Conn& c = conns_[id - 1];
     return c.active ? &c : nullptr;
+  }
+
+  int send_fd_for(const Conn& c) const {
+    if (is_server_) return server_fd_;
+    return c.fd >= 0 ? c.fd : client_fd_;
+  }
+
+  int send_fd_for(const TxDatagram& d) const {
+    if (d.fd >= 0) return d.fd;
+    return is_server_ ? server_fd_ : client_fd_;
+  }
+
+  bool client_sharding_enabled() const {
+    return !is_server_ && client_fds_.size() > 1;
+  }
+
+  bool send_one(int fd, const sockaddr_in& peer, const uint8_t* data, size_t len) {
+    if (fd < 0) return false;
+    while (true) {
+      ssize_t n = ::sendto(fd, data, len, MSG_DONTWAIT,
+                           reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
+      if (n == static_cast<ssize_t>(len)) return true;
+      if (n < 0 && errno == EINTR) continue;
+      return false;
+    }
   }
 
   Conn* server_conn_for(const sockaddr_in& src, uint32_t conv, bool create) {
@@ -489,6 +651,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     Conn c;
     c.active = true;
     c.conv = conv;
+    c.fd = server_fd_;
     c.peer = src;
     conns_.push_back(std::move(c));
     connected_peak_ = std::max<uint32_t>(connected_peak_, conns_.size());
@@ -496,11 +659,16 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   }
 
   bool queue_send_ref(const Conn& c, const uint8_t* data, size_t len) {
-    if ((is_server_ ? server_fd_ : client_fd_) < 0) return false;
+    int fd = send_fd_for(c);
+    if (fd < 0) return false;
     if (!async_send_enabled_for(is_server_)) {
+      if (client_sharding_enabled()) {
+        return send_one(fd, c.peer, data, len);
+      }
       if (direct_batch_.size() >= MAX_TX_QUEUE) return false;
       TxDatagram d;
       d.peer = c.peer;
+      d.fd = fd;
       d.external = data;
       d.len = len;
       direct_batch_.push_back(std::move(d));
@@ -510,23 +678,32 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
 
     TxDatagram d;
     d.peer = c.peer;
+    d.fd = fd;
     d.owned.resize(len);
     std::memcpy(d.owned.data(), data, len);
     {
       std::lock_guard<std::mutex> lock(tx_mu_);
-      if (tx_queue_.size() >= MAX_TX_QUEUE) return false;
+      if (tx_pending_datagrams_ >= MAX_TX_QUEUE) return false;
       tx_queue_.push_back(std::move(d));
+      ++tx_pending_datagrams_;
     }
     tx_cv_.notify_one();
     return true;
   }
 
   bool queue_send_owned(const Conn& c, std::vector<uint8_t>&& bytes) {
-    if ((is_server_ ? server_fd_ : client_fd_) < 0) return false;
+    int fd = send_fd_for(c);
+    if (fd < 0) return false;
     if (!async_send_enabled_for(is_server_)) {
+      if (client_sharding_enabled()) {
+        bool sent = send_one(fd, c.peer, bytes.data(), bytes.size());
+        if (sent) recycle_buffer(std::move(bytes));
+        return sent;
+      }
       if (direct_batch_.size() >= MAX_TX_QUEUE) return false;
       TxDatagram d;
       d.peer = c.peer;
+      d.fd = fd;
       d.owned = std::move(bytes);
       direct_batch_.push_back(std::move(d));
       if (direct_batch_.size() >= TX_BATCH) flush_direct_batch();
@@ -535,49 +712,108 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
 
     TxDatagram d;
     d.peer = c.peer;
+    d.fd = fd;
     d.owned = std::move(bytes);
     {
       std::lock_guard<std::mutex> lock(tx_mu_);
-      if (tx_queue_.size() >= MAX_TX_QUEUE) return false;
+      if (tx_pending_datagrams_ >= MAX_TX_QUEUE) return false;
       tx_queue_.push_back(std::move(d));
+      ++tx_pending_datagrams_;
     }
     tx_cv_.notify_one();
     return true;
   }
 
   bool queue_send_owned_async(const Conn& c, std::vector<uint8_t>&& bytes) {
-    if ((is_server_ ? server_fd_ : client_fd_) < 0) return false;
+    int fd = send_fd_for(c);
+    if (fd < 0) return false;
     {
       std::lock_guard<std::mutex> lock(tx_mu_);
-      if (tx_queue_.size() >= MAX_TX_QUEUE) return false;
+      if (tx_pending_datagrams_ >= MAX_TX_QUEUE) return false;
       TxDatagram d;
       d.peer = c.peer;
+      d.fd = fd;
       d.owned = std::move(bytes);
       tx_queue_.push_back(std::move(d));
+      ++tx_pending_datagrams_;
     }
     tx_cv_.notify_one();
     return true;
   }
 
-  bool queue_send_copy(const Conn& c, const uint8_t* data, size_t len) {
-    return queue_send_copy_to(c.peer, data, len);
+  size_t queue_send_owned_async_batch(std::vector<TxDatagram>& batch) {
+    if ((is_server_ ? server_fd_ : client_fd_) < 0 || batch.empty()) return 0;
+    size_t accepted = 0;
+    {
+      std::lock_guard<std::mutex> lock(tx_mu_);
+      size_t room = tx_pending_datagrams_ >= MAX_TX_QUEUE
+                        ? 0
+                        : MAX_TX_QUEUE - tx_pending_datagrams_;
+      accepted = std::min(batch.size(), room);
+      for (size_t i = 0; i < accepted; ++i) {
+        tx_queue_.push_back(std::move(batch[i]));
+      }
+      tx_pending_datagrams_ += accepted;
+    }
+    if (accepted > 0) {
+      if (tx_workers_.size() > 1) {
+        tx_cv_.notify_all();
+      } else {
+        tx_cv_.notify_one();
+      }
+    }
+    return accepted;
   }
 
-  bool queue_send_copy_to(const sockaddr_in& peer, const uint8_t* data, size_t len) {
+  size_t queue_fanout_job_async(FanoutJob&& job) {
+    if ((is_server_ ? server_fd_ : client_fd_) < 0 || job.peers.empty()) return 0;
+    size_t accepted = 0;
+    {
+      std::lock_guard<std::mutex> lock(tx_mu_);
+      size_t room = tx_pending_datagrams_ >= MAX_TX_QUEUE
+                        ? 0
+                        : MAX_TX_QUEUE - tx_pending_datagrams_;
+      accepted = std::min(job.peers.size(), room);
+      if (accepted == 0) return 0;
+      if (accepted < job.peers.size()) {
+        job.peers.resize(accepted);
+        job.bytes.resize(job.stride * accepted);
+      }
+      tx_pending_datagrams_ += accepted;
+      tx_fanout_queue_.push_back(std::move(job));
+    }
+    if (tx_workers_.size() > 1) {
+      tx_cv_.notify_all();
+    } else {
+      tx_cv_.notify_one();
+    }
+    return accepted;
+  }
+
+  bool queue_send_copy(const Conn& c, const uint8_t* data, size_t len) {
+    return queue_send_copy_to(c, c.peer, data, len);
+  }
+
+  bool queue_send_copy_to(const Conn& c, const sockaddr_in& peer,
+                          const uint8_t* data, size_t len) {
     std::vector<uint8_t> bytes = take_buffer();
     bytes.resize(len);
     std::memcpy(bytes.data(), data, len);
-    Conn c;
-    c.peer = peer;
-    if (queue_send_owned(c, std::move(bytes))) return true;
+    Conn send_conn = c;
+    send_conn.peer = peer;
+    if (queue_send_owned(send_conn, std::move(bytes))) return true;
     recycle_buffer(std::move(bytes));
     return false;
   }
 
   void start_tx_worker() {
-    if (tx_worker_.joinable()) return;
+    if (!tx_workers_.empty()) return;
     tx_stop_ = false;
-    tx_worker_ = std::thread([this]() { tx_loop(); });
+    size_t n = tx_worker_count_for(is_server_);
+    tx_workers_.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+      tx_workers_.emplace_back([this]() { tx_loop(); });
+    }
   }
 
   void stop_tx_worker() {
@@ -585,26 +821,45 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
       std::lock_guard<std::mutex> lock(tx_mu_);
       tx_stop_ = true;
       tx_queue_.clear();
+      tx_fanout_queue_.clear();
+      tx_pending_datagrams_ = 0;
     }
-    tx_cv_.notify_one();
-    if (tx_worker_.joinable()) tx_worker_.join();
+    tx_cv_.notify_all();
+    for (std::thread& t : tx_workers_) {
+      if (t.joinable()) t.join();
+    }
+    tx_workers_.clear();
   }
 
   void tx_loop() {
     std::vector<TxDatagram> batch;
     batch.reserve(TX_BATCH);
     while (true) {
+      FanoutJob fanout;
       {
         std::unique_lock<std::mutex> lock(tx_mu_);
-        tx_cv_.wait(lock, [&]() { return tx_stop_ || !tx_queue_.empty(); });
+        tx_cv_.wait(lock, [&]() {
+          return tx_stop_ || !tx_queue_.empty() || !tx_fanout_queue_.empty();
+        });
         if (tx_stop_) return;
-        while (!tx_queue_.empty() && batch.size() < TX_BATCH) {
+        if (!tx_fanout_queue_.empty()) {
+          fanout = std::move(tx_fanout_queue_.front());
+          tx_fanout_queue_.pop_front();
+          tx_pending_datagrams_ -= fanout.peers.size();
+        }
+        while (fanout.peers.empty() && !tx_queue_.empty() && batch.size() < TX_BATCH) {
           batch.push_back(std::move(tx_queue_.front()));
           tx_queue_.pop_front();
+          --tx_pending_datagrams_;
         }
       }
-      send_batch(batch);
-      batch.clear();
+      if (!fanout.peers.empty()) {
+        send_fanout_job(fanout);
+      } else {
+        send_batch(batch);
+        recycle_worker_batch(batch);
+        batch.clear();
+      }
     }
   }
 
@@ -672,11 +927,74 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   }
 
   size_t send_batch(std::vector<TxDatagram>& batch) {
-    int fd = is_server_ ? server_fd_ : client_fd_;
+    if (batch.empty()) return 0;
+    std::vector<TxDatagram> physical;
+    std::vector<size_t> logical_counts;
+    physical.reserve(std::min(batch.size(), TX_BATCH));
+    logical_counts.reserve(std::min(batch.size(), TX_BATCH));
+
+    size_t idx = 0;
+    while (idx < batch.size() && physical.size() < TX_BATCH) {
+      int fd = send_fd_for(batch[idx]);
+      const sockaddr_in peer = batch[idx].peer;
+      size_t first_size = batch[idx].size();
+      if (fd < 0) break;
+      if (HEADER_BYTES + BATCH_FRAME_LEN_BYTES + first_size > MAX_UDP_PAYLOAD) {
+        TxDatagram d;
+        d.peer = peer;
+        d.fd = fd;
+        d.external = batch[idx].data();
+        d.len = first_size;
+        physical.push_back(std::move(d));
+        logical_counts.push_back(1);
+        ++idx;
+        continue;
+      }
+
+      TxDatagram d;
+      d.peer = peer;
+      d.fd = fd;
+      d.owned.resize(HEADER_BYTES);
+      PacketHeader h;
+      h.flags = FLAG_BATCH;
+      write_header(d.owned.data(), h);
+
+      size_t frames = 0;
+      while (idx < batch.size() && send_fd_for(batch[idx]) == fd &&
+             same_endpoint(batch[idx].peer, peer) &&
+             d.owned.size() + BATCH_FRAME_LEN_BYTES + batch[idx].size() <=
+                 MAX_UDP_PAYLOAD) {
+        size_t offset = d.owned.size();
+        size_t frame_len = batch[idx].size();
+        d.owned.resize(offset + BATCH_FRAME_LEN_BYTES + frame_len);
+        store_u16(d.owned.data() + offset, static_cast<uint16_t>(frame_len));
+        std::memcpy(d.owned.data() + offset + BATCH_FRAME_LEN_BYTES,
+                    batch[idx].data(), frame_len);
+        ++idx;
+        ++frames;
+      }
+      physical.push_back(std::move(d));
+      logical_counts.push_back(frames);
+    }
+
+    size_t physical_sent = send_raw_batch(physical);
+    size_t logical_sent = 0;
+    for (size_t i = 0; i < physical_sent && i < logical_counts.size(); ++i) {
+      logical_sent += logical_counts[i];
+    }
+    return logical_sent;
+  }
+
+  size_t send_raw_batch(std::vector<TxDatagram>& batch) {
+    int fd = batch.empty() ? -1 : send_fd_for(batch.front());
     if (fd < 0 || batch.empty()) return 0;
     std::array<mmsghdr, TX_BATCH> msgs{};
     std::array<iovec, TX_BATCH> iov{};
-    size_t n_msgs = std::min(batch.size(), TX_BATCH);
+    size_t n_msgs = 0;
+    while (n_msgs < batch.size() && n_msgs < TX_BATCH &&
+           send_fd_for(batch[n_msgs]) == fd) {
+      ++n_msgs;
+    }
     for (size_t i = 0; i < n_msgs; ++i) {
       iov[i].iov_base = const_cast<uint8_t*>(batch[i].data());
       iov[i].iov_len = batch[i].size();
@@ -698,6 +1016,68 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
       break;
     }
     return offset;
+  }
+
+  size_t send_fanout_job(FanoutJob& job) {
+    int fd = is_server_ ? server_fd_ : client_fd_;
+    if (fd < 0 || job.peers.empty() || job.stride == 0) return 0;
+
+    std::vector<TxDatagram> datagrams;
+    datagrams.reserve(std::min(job.peers.size(), TX_BATCH));
+    auto flush_datagrams = [&]() {
+      while (!datagrams.empty()) {
+        size_t sent = send_batch(datagrams);
+        if (sent >= datagrams.size()) {
+          datagrams.clear();
+          return true;
+        }
+        if (sent == 0) return false;
+        datagrams.erase(datagrams.begin(), datagrams.begin() + sent);
+      }
+      return true;
+    };
+
+    size_t idx = 0;
+    size_t logical_sent = 0;
+    while (idx < job.peers.size()) {
+      const sockaddr_in peer = job.peers[idx];
+      if (HEADER_BYTES + BATCH_FRAME_LEN_BYTES + job.stride > MAX_UDP_PAYLOAD) {
+        TxDatagram d;
+        d.peer = peer;
+        d.fd = fd;
+        d.external = job.bytes.data() + idx * job.stride;
+        d.len = job.stride;
+        datagrams.push_back(std::move(d));
+        ++idx;
+        ++logical_sent;
+      } else {
+        TxDatagram d;
+        d.peer = peer;
+        d.fd = fd;
+        d.owned.resize(HEADER_BYTES);
+        PacketHeader h;
+        h.flags = FLAG_BATCH;
+        write_header(d.owned.data(), h);
+
+        size_t frames = 0;
+        while (idx < job.peers.size() && same_endpoint(job.peers[idx], peer) &&
+               d.owned.size() + BATCH_FRAME_LEN_BYTES + job.stride <= MAX_UDP_PAYLOAD) {
+          size_t offset = d.owned.size();
+          d.owned.resize(offset + BATCH_FRAME_LEN_BYTES + job.stride);
+          store_u16(d.owned.data() + offset, static_cast<uint16_t>(job.stride));
+          std::memcpy(d.owned.data() + offset + BATCH_FRAME_LEN_BYTES,
+                      job.bytes.data() + idx * job.stride, job.stride);
+          ++idx;
+          ++frames;
+        }
+        datagrams.push_back(std::move(d));
+        logical_sent += frames;
+      }
+
+      if (datagrams.size() >= TX_BATCH && !flush_datagrams()) return logical_sent;
+    }
+    flush_datagrams();
+    return logical_sent;
   }
 
   void flush_direct_batch() {
@@ -763,6 +1143,10 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
                       clock_type::time_point now) {
     if (len < HEADER_BYTES) return;
     PacketHeader h = parse_header(pkt);
+    if ((h.flags & FLAG_BATCH) != 0) {
+      process_batch_packet(pkt + HEADER_BYTES, len - HEADER_BYTES, src, now);
+      return;
+    }
 
     Conn* c = nullptr;
     uint32_t out_id = 0;
@@ -793,11 +1177,31 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     inbox_.enqueue(out_id, payload, payload_len);
   }
 
+  void process_batch_packet(const uint8_t* body, size_t len,
+                            const sockaddr_in& src, clock_type::time_point now) {
+    if (!is_server_) batch_recv_seen_ = true;
+    size_t offset = 0;
+    while (offset + BATCH_FRAME_LEN_BYTES <= len) {
+      uint16_t frame_len = load_u16(body + offset);
+      offset += BATCH_FRAME_LEN_BYTES;
+      if (frame_len < HEADER_BYTES || offset + frame_len > len) return;
+      process_packet(body + offset, frame_len, src, now);
+      offset += frame_len;
+    }
+  }
+
   void drain_socket(size_t max_packets) {
     int fd = is_server_ ? server_fd_ : client_fd_;
     if (fd < 0 || max_packets == 0) return;
     if (rx_worker_.joinable()) {
       drain_rx_queue(max_packets);
+      return;
+    }
+    if (!is_server_ && !client_fds_.empty()) {
+      size_t per_fd = std::max<size_t>(1, max_packets / client_fds_.size());
+      for (int client_fd : client_fds_) {
+        drain_fd_packets(client_fd, per_fd);
+      }
       return;
     }
     drain_fd_packets(fd, max_packets);
@@ -910,7 +1314,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
       write_header(pkt.data(), h);
       const sockaddr_in& ack_peer =
           (!is_server_ && split_ack_enabled()) ? server_ack_peer_ : c.peer;
-      if (queue_send_copy_to(ack_peer, pkt.data(), pkt.size())) {
+      if (queue_send_copy_to(c, ack_peer, pkt.data(), pkt.size())) {
         note_ack_sent(c, h);
       } else {
         c.ack_due = now + ack_delay();
@@ -921,6 +1325,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   }
 
   std::vector<uint8_t> take_buffer() {
+    if (free_buffers_.empty()) collect_recycled_buffers();
     if (free_buffers_.empty()) return std::vector<uint8_t>();
     std::vector<uint8_t> b = std::move(free_buffers_.back());
     free_buffers_.pop_back();
@@ -933,6 +1338,30 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     free_buffers_.push_back(std::move(b));
   }
 
+  void recycle_worker_batch(std::vector<TxDatagram>& batch) {
+    std::vector<std::vector<uint8_t>> recycled;
+    recycled.reserve(batch.size());
+    for (TxDatagram& d : batch) {
+      if (!d.owned.empty()) {
+        d.owned.clear();
+        recycled.push_back(std::move(d.owned));
+      }
+    }
+    if (recycled.empty()) return;
+    std::lock_guard<std::mutex> lock(recycled_mu_);
+    for (auto& b : recycled) {
+      recycled_buffers_.push_back(std::move(b));
+    }
+  }
+
+  void collect_recycled_buffers() {
+    std::lock_guard<std::mutex> lock(recycled_mu_);
+    while (!recycled_buffers_.empty()) {
+      free_buffers_.push_back(std::move(recycled_buffers_.back()));
+      recycled_buffers_.pop_back();
+    }
+  }
+
   void schedule_retx(clock_type::time_point due) {
     if (due < earliest_retx_) earliest_retx_ = due;
   }
@@ -940,18 +1369,26 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   int server_fd_ = -1;
   int server_ack_fd_ = -1;
   int client_fd_ = -1;
+  std::vector<int> client_fds_;
   bool is_server_ = false;
+  bool batch_recv_seen_ = false;
   sockaddr_in server_peer_{};
   sockaddr_in server_ack_peer_{};
   std::vector<Conn> conns_;
   std::unordered_map<uint64_t, Peer> peers_;
   rudp_bench::ReusableInboundQueue inbox_;
   std::vector<std::vector<uint8_t>> free_buffers_;
+  std::mutex recycled_mu_;
+  std::vector<std::vector<uint8_t>> recycled_buffers_;
   std::vector<TxDatagram> direct_batch_;
+  std::vector<Conn*> fanout_conns_;
+  std::vector<PacketHeader> fanout_headers_;
   std::mutex tx_mu_;
   std::condition_variable tx_cv_;
   std::deque<TxDatagram> tx_queue_;
-  std::thread tx_worker_;
+  std::deque<FanoutJob> tx_fanout_queue_;
+  size_t tx_pending_datagrams_ = 0;
+  std::vector<std::thread> tx_workers_;
   bool tx_stop_ = false;
   std::mutex rx_mu_;
   std::deque<RxDatagram> rx_queue_;
@@ -960,9 +1397,11 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   std::atomic<bool> rx_stop_{false};
   uint32_t next_id_ = 1;
   uint32_t connected_peak_ = 0;
+  uint32_t hinted_connections_ = 0;
   clock_type::time_point earliest_ack_ = clock_type::time_point::max();
   clock_type::time_point earliest_retx_ = clock_type::time_point::max();
   size_t recv_empty_drains_left_ = 0;
+  size_t client_recv_budget_left_ = std::numeric_limits<size_t>::max();
 
   std::array<std::array<uint8_t, MAX_UDP_PAYLOAD>, RECV_BATCH> recv_bufs_{};
   std::array<sockaddr_in, RECV_BATCH> srcs_{};
