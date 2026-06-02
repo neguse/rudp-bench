@@ -18,6 +18,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 // インバリアントカルチャを強制（小数点がコンマになる環境での誤動作防止）
@@ -58,6 +59,16 @@ static void SampleProcIfDue(ProcSampler ps, ref long nextSampleTicks)
     ps.SampleRss();
     ps.SampleCpu();  // M1
     nextSampleTicks = nowTicks + ProcSampler.RssSampleIntervalTicks;
+}
+
+static void AdaptiveIdle()
+{
+    if (OperatingSystem.IsLinux())
+    {
+        Libc.NanosleepUs(20);
+        return;
+    }
+    Thread.Sleep(0);
 }
 
 static CsvRow UnsupportedPayloadRow(Config cfg) => new()
@@ -184,18 +195,80 @@ static CsvRow RunServer(Config cfg)
     var manager = new NetManager(listener) { AutoRecycle = true };
     LnlTune.Apply(manager, (int)cfg.Conns);  // server stays threaded; pool sized to all conns
 
-    // 受信メッセージキュー（PollEvents()内で同期的にpushされる）
-    var inbox = new PooledInbox<NetPeer>();
+    var ps = new ProcSampler();
+    var connectedPeers = new List<NetPeer>((int)Math.Min(cfg.Conns, int.MaxValue));
+    bool broadcast = cfg.Mode == "broadcast";
+    ulong serverReceived = 0;
+    ulong serverEchoAccepted = 0;
+    ulong serverReceivedR = 0;
+    ulong serverReceivedU = 0;
+    ulong serverEchoAcceptedR = 0;
+    ulong serverEchoAcceptedU = 0;
+    var serverRecvDrained = new BoundedHistogram(100_000);
+    uint connPeak = 0;
+    bool didWork = false;
+    ulong drainedThisTick = 0;
+
+    void CountEchoAccepted(bool reliable, ulong count)
+    {
+        serverEchoAccepted += count;
+        if (reliable) serverEchoAcceptedR += count;
+        else serverEchoAcceptedU += count;
+    }
 
     listener.ConnectionRequestEvent += req => req.AcceptIfKey("rudpbench");
+    listener.PeerConnectedEvent += peer =>
+    {
+        connectedPeers.Add(peer);
+        if ((uint)connectedPeers.Count > connPeak) connPeak = (uint)connectedPeers.Count;
+    };
+    listener.PeerDisconnectedEvent += (peer, _) =>
+    {
+        int idx = connectedPeers.IndexOf(peer);
+        if (idx < 0) return;
+        int last = connectedPeers.Count - 1;
+        connectedPeers[idx] = connectedPeers[last];
+        connectedPeers.RemoveAt(last);
+    };
     listener.NetworkReceiveEvent += (peer, reader, _, _) =>
     {
-        inbox.Add(peer, reader);
+        didWork = true;
+        drainedThisTick++;
+
+        int len = reader.UserDataSize;
+        if (len < Config.MinPayloadBytes) return;
+
+        byte[] raw = reader.RawData;
+        int off = reader.UserDataOffset;
+        bool reliable = (raw[off + 16] & 0x01) != 0;
+        bool measured = (raw[off + 16] & 0x02) != 0;
+        if (measured)
+        {
+            serverReceived++;
+            if (reliable) serverReceivedR++;
+            else serverReceivedU++;
+        }
+        var deliveryMethod = reliable
+            ? DeliveryMethod.ReliableOrdered
+            : DeliveryMethod.Unreliable;
+        var payload = new ReadOnlySpan<byte>(raw, off, len);
+        if (broadcast)
+        {
+            ulong targetCount = (ulong)connectedPeers.Count;
+            if (targetCount == 0) return;
+            manager.SendToAll(payload, deliveryMethod);
+            if (measured) CountEchoAccepted(reliable, targetCount);
+        }
+        else
+        {
+            peer.Send(payload, 0, deliveryMethod);
+            if (measured && peer.ConnectionState == ConnectionState.Connected)
+                CountEchoAccepted(reliable, 1);
+        }
     };
 
     manager.Start(cfg.Port);
 
-    var ps = new ProcSampler();
     ps.Begin();
     long nextRssSampleTicks = Stopwatch.GetTimestamp() + ProcSampler.RssSampleIntervalTicks;
     // M2: exclude warmup from the server CPU window (mirrors run_server in
@@ -210,23 +283,6 @@ static CsvRow RunServer(Config cfg)
     long deadlineTicks = Stopwatch.GetTimestamp() +
         (long)((cfg.WarmupS + cfg.DurationS) * Stopwatch.Frequency) + serverTailTicks;
 
-    var knownPeers = new HashSet<NetPeer>();
-    bool broadcast = cfg.Mode == "broadcast";
-    ulong serverReceived = 0;
-    ulong serverEchoAccepted = 0;
-    ulong serverReceivedR = 0;
-    ulong serverReceivedU = 0;
-    ulong serverEchoAcceptedR = 0;
-    ulong serverEchoAcceptedU = 0;
-    var serverRecvDrained = new BoundedHistogram(100_000);
-
-    void CountEchoAccepted(bool reliable)
-    {
-        serverEchoAccepted++;
-        if (reliable) serverEchoAcceptedR++;
-        else serverEchoAcceptedU++;
-    }
-
     while (Stopwatch.GetTimestamp() < deadlineTicks)
     {
         if (!measureStarted && Stopwatch.GetTimestamp() >= serverMeasureBeginTicks)
@@ -235,48 +291,12 @@ static CsvRow RunServer(Config cfg)
             measureStarted = true;
         }
         SampleProcIfDue(ps, ref nextRssSampleTicks);
+        didWork = false;
+        drainedThisTick = 0;
         manager.PollEvents();
-        bool didWork = inbox.Count > 0;
-        ulong drainedThisTick = 0;
-
-        foreach (var msg in inbox.Entries)
-        {
-            drainedThisTick++;
-            knownPeers.Add(msg.Conn);
-            if (msg.Length < Config.MinPayloadBytes) continue;
-            // Echo on the same channel the message arrived on; client tagged
-            // byte 16 with the reliable/measurement flags.
-            bool reliable = (msg.Buffer[16] & 0x01) != 0;
-            bool measured = (msg.Buffer[16] & 0x02) != 0;
-            if (measured)
-            {
-                serverReceived++;
-                if (reliable) serverReceivedR++;
-                else serverReceivedU++;
-            }
-            var deliveryMethod = reliable
-                ? DeliveryMethod.ReliableOrdered
-                : DeliveryMethod.Unreliable;
-            if (broadcast)
-            {
-                foreach (var target in knownPeers)
-                {
-                    target.Send(new ReadOnlySpan<byte>(msg.Buffer, 0, msg.Length), 0, deliveryMethod);
-                    if (measured && target.ConnectionState == ConnectionState.Connected)
-                        CountEchoAccepted(reliable);
-                }
-            }
-            else
-            {
-                msg.Conn.Send(new ReadOnlySpan<byte>(msg.Buffer, 0, msg.Length), 0, deliveryMethod);
-                if (measured && msg.Conn.ConnectionState == ConnectionState.Connected)
-                    CountEchoAccepted(reliable);
-            }
-        }
         if (drainedThisTick > 0) serverRecvDrained.Record(drainedThisTick);
-        inbox.Clear();
 
-        if (!didWork && cfg.IdlePolicy == "adaptive") Thread.Sleep(0);
+        if (!didWork && cfg.IdlePolicy == "adaptive") AdaptiveIdle();
     }
 
     ps.End();
@@ -310,7 +330,7 @@ static CsvRow RunServer(Config cfg)
         Mode = cfg.Mode,
         IdlePolicy = cfg.IdlePolicy,
         FlushPolicy = FlushPolicy(cfg),
-        ConnPeak = (uint)knownPeers.Count,
+        ConnPeak = connPeak,
         ConnDiscTransport = 0,
         ConnDiscPeer = 0,
     };
@@ -525,7 +545,7 @@ static CsvRow RunClient(Config cfg)
         if (drainedThisTick > 0) didWork = true;
         inbox.Clear();
         if (!didWork && outstanding == 0 && cfg.IdlePolicy == "adaptive")
-            Thread.Sleep(0);
+            AdaptiveIdle();
     }
 
     ps.End();
@@ -1121,6 +1141,25 @@ static class LnlTune
         if (dtMs < ManualUpdateMs) return;
         s_lastManualTicks = now;
         for (uint i = 0; i < count; i++) managers[i].ManualUpdate(dtMs);
+    }
+}
+
+static class Libc
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Timespec
+    {
+        public long tv_sec;
+        public long tv_nsec;
+    }
+
+    [DllImport("libc", EntryPoint = "nanosleep", SetLastError = true)]
+    private static extern int Nanosleep(ref Timespec req, IntPtr rem);
+
+    public static void NanosleepUs(int us)
+    {
+        var req = new Timespec { tv_sec = 0, tv_nsec = us * 1000L };
+        _ = Nanosleep(ref req, IntPtr.Zero);
     }
 }
 
