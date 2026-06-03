@@ -1,0 +1,4 @@
+add_library(adapter_coop_rudp STATIC coop_rudp_adapter.cc)
+target_include_directories(adapter_coop_rudp PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(adapter_coop_rudp PUBLIC rudp_bench_harness coop_rudp)
+target_compile_definitions(adapter_coop_rudp PRIVATE _GNU_SOURCE)

@@ -1,0 +1,4 @@
+profile,library,status,last_ok_conns,last_ok_delivery,last_ok_server_cpu,break_conns,break_reason,break_delivery,break_server_cpu
+echo,coop_rudp,not_broken,3000,0.9901,52.58,,,,
+game_server,coop_rudp,broken,128,0.9837,23.44,192,aggregate_invalid:client_tick,,
+media_relay,coop_rudp,broken,125,0.9682,39.54,150,delivery<0.95,0.7830,52.88

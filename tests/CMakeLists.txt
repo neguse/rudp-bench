@@ -22,6 +22,14 @@ add_executable(test_inbound_queue test_inbound_queue.cc)
 target_link_libraries(test_inbound_queue PRIVATE rudp_bench_harness GTest::gtest_main)
 add_test(NAME test_inbound_queue COMMAND test_inbound_queue)
 
+add_executable(test_coop_rudp test_coop_rudp.cc)
+target_link_libraries(test_coop_rudp PRIVATE coop_rudp GTest::gtest_main)
+add_test(NAME test_coop_rudp COMMAND test_coop_rudp)
+
+add_executable(test_coop_rudp_adapter_smoke test_coop_rudp_adapter_smoke.cc)
+target_link_libraries(test_coop_rudp_adapter_smoke PRIVATE adapter_coop_rudp GTest::gtest_main)
+add_test(NAME test_coop_rudp_adapter_smoke COMMAND test_coop_rudp_adapter_smoke)
+
 find_program(PYTHON3_EXECUTABLE python3)
 if(PYTHON3_EXECUTABLE)
     add_test(

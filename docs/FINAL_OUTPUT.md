@@ -2,7 +2,7 @@
 
 このプロジェクトの最終アウトプットは、固定 traffic shape で connection count を壊れるまで上げる 3 つの saturation profiles。
 
-詳細レポート: [`measurements/2026-06-03-apex-batch-final/report.md`](measurements/2026-06-03-apex-batch-final/report.md)
+詳細レポート: [`measurements/2026-06-03-coop-rudp-final/report.md`](measurements/2026-06-03-coop-rudp-final/report.md)
 
 ## Profiles
 
@@ -20,14 +20,14 @@
 
 | profile | winner / strongest | max OK | break | notes |
 |---|---|---:|---:|---|
-| `media_relay` | `apex_rudp` | 125 | 150 | packet coalescing 後、旧 strongest の 50 OK / 75 break を超えた。 |
-| `game_server` | `apex_rudp` | 128 | 192 | 旧 LiteNetLib 96 OK / 128 break を超えた。 |
-| `echo` | `apex_rudp` | 3000 | not broken | final schedule 上限の 3000 conn まで OK。 |
+| `media_relay` | `coop_rudp` | 125 | 150 | apex と同じ max OK。delivery は apex が高いが、coop は OK 条件内で server CPU が 39.54% vs apex 59.84%。 |
+| `game_server` | `coop_rudp` | 128 | 192 | apex と同じ max OK。coop は delivery 0.9837 / CPU 23.44% で apex の 0.9717 / 26.71% を上回る。 |
+| `echo` | `coop_rudp` | 3000 | not broken | final schedule 上限の 3000 conn まで OK。CPU 52.58% で apex 58.32% を下回る。 |
 
 ## Data
 
-- capacity table: [`measurements/2026-06-03-apex-batch-final/data/capacity.csv`](measurements/2026-06-03-apex-batch-final/data/capacity.csv)
-- all medians: [`measurements/2026-06-03-apex-batch-final/data/summary.csv`](measurements/2026-06-03-apex-batch-final/data/summary.csv)
-- run-level results: [`measurements/2026-06-03-apex-batch-final/data/results_all.csv`](measurements/2026-06-03-apex-batch-final/data/results_all.csv)
+- capacity table: [`measurements/2026-06-03-coop-rudp-final/data/capacity.csv`](measurements/2026-06-03-coop-rudp-final/data/capacity.csv)
+- all medians: [`measurements/2026-06-03-coop-rudp-final/data/summary.csv`](measurements/2026-06-03-coop-rudp-final/data/summary.csv)
+- run-level results: [`measurements/2026-06-03-coop-rudp-final/data/results_all.csv`](measurements/2026-06-03-coop-rudp-final/data/results_all.csv)
 
-Older measurement directories are tuning logs, fixed-conn probes, baseline runs, or intermediate reports. Treat this file and the linked apex batch final report as the canonical final output.
+Older measurement directories are tuning logs, fixed-conn probes, baseline runs, or intermediate reports. Treat this file and the linked coop RUDP final report as the canonical final output.
