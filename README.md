@@ -11,6 +11,5 @@ Reliable UDP / RUDP / QUIC implementations を同じ workload で比較する be
 ## Docs
 
 - Canonical benchmark: [`docs/CANONICAL.md`](docs/CANONICAL.md)
-- Measurements index: [`docs/measurements/README.md`](docs/measurements/README.md)
 - Design spec: [`docs/superpowers/specs/2026-04-28-rudp-bench-design.md`](docs/superpowers/specs/2026-04-28-rudp-bench-design.md)
 - Development / measurement notes: [`docs/dev-notes.md`](docs/dev-notes.md)

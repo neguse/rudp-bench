@@ -38,4 +38,4 @@ Break rule: each point is N=3. A point is OK when aggregate `valid >= 2/3` and m
 - Per-run report generation: [`../scripts/render_canonical_report.py`](../scripts/render_canonical_report.py)
 - Stable published result: [`measurements/current/report.md`](measurements/current/report.md)
 - Dated measurement reports under `docs/measurements/` are archived run outputs.
-- `README.md`, `docs/FINAL_OUTPUT.md`, `docs/measurements/CURRENT.md`, and `docs/measurements/README.md` are pointers only. Do not duplicate result tables there.
+- `README.md` and `docs/FINAL_OUTPUT.md` are compatibility pointers only. Do not duplicate result tables there.
