@@ -170,6 +170,9 @@ typedef struct rudp_recv_info {
   rudp_reliability reliability;
 } rudp_recv_info;
 
+// Returns 1 when an event is copied, 0 when no event is queued, and -1 for
+// invalid arguments or a too-small destination buffer. On a too-small buffer,
+// the event is preserved and out_len/out_info describe the queued event.
 int rudp_recv(
     rudp_endpoint* ep,
     void* data,
@@ -177,12 +180,16 @@ int rudp_recv(
     size_t* out_len,
     rudp_recv_info* out_info);
 
+// Returns 1 when an event is borrowed, 0 when no event is queued, and -1 for
+// invalid required arguments. The borrowed pointer remains valid until the next
+// receive/borrow call on the endpoint.
 int rudp_recv_borrow(
     rudp_endpoint* ep,
     const void** data,
     size_t* out_len,
     rudp_recv_info* out_info);
 
+// Compatibility helper for callers that only need conn_id and reliability.
 int rudp_recv_borrow_meta(
     rudp_endpoint* ep,
     const void** data,
