@@ -131,7 +131,7 @@ per-channel histogram 採用後の実測(2026-05-27、netem 25ms+5ms+5% loss、c
 **その他:**
 - **コメント言語:** 日本語コメント OK(プラン・コード両方)。レビュアーが「英語に揃えるべき」と指摘しても従わなくてよい(意図的選択)
 - **ファイル粒度:** 1 adapter = 1 cc(ヘッダ無し、static class を内部 namespace に隠す)。harness の各機能(metrics/csv/scenario/runner/proc_sampler)は h+cc の対。テストは smoke 1本
-- **Canonical benchmark test:** 人間向け入口は [`docs/CANONICAL.md`](CANONICAL.md)。`scripts/run_canonical_tests.sh` を標準の再測定入口にする。ここでの test は unit test ではなく、build 後に latest final saturation profiles (`media_relay`, `game_server`, `echo`) を current canonical target set で N=3 全実行する benchmark test。測定後に `scripts/render_canonical_report.py` が `$OUT/report.md` と `$OUT/plots/*.png` を生成する。各 adapter は STATIC lib(`adapter_<name>` 命名)
+- **Canonical benchmark test:** 人間向け入口は [`docs/CANONICAL.md`](CANONICAL.md)。`scripts/run_canonical_tests.sh` を標準の再測定入口にする。ここでの test は unit test ではなく、build 後に latest final saturation profiles (`media_relay`, `game_server`, `echo`) を current canonical target set で N=3 全実行する benchmark test。測定後に `scripts/render_canonical_report.py` が `$OUT/report.md` と `$OUT/plots/*.png` を生成し、`scripts/publish_canonical_result.py` が `docs/measurements/current/` を更新する。各 adapter は STATIC lib(`adapter_<name>` 命名)
 
 ---
 

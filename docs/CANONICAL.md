@@ -14,17 +14,11 @@ scripts/run_canonical_tests.sh
 
 ## Current Published Result
 
-**published report:** [`measurements/2026-06-08-raknet-final/report.md`](measurements/2026-06-08-raknet-final/report.md)
+**open this:** [`measurements/current/report.md`](measurements/current/report.md)
 
-**published data:** [`measurements/2026-06-08-raknet-final/data/capacity.csv`](measurements/2026-06-08-raknet-final/data/capacity.csv)
+**capacity data:** [`measurements/current/capacity.csv`](measurements/current/capacity.csv)
 
-**measurement time:** 2026-06-08 15:31-16:35 UTC / 2026-06-09 00:31-01:35 JST
-
-| profile | strongest | max OK | break |
-|---|---|---:|---|
-| `media_relay` | `apex_rudp` | 125 | 150 (`delivery<0.95`) |
-| `game_server` | `apex_rudp` | 128 | 192 (`delivery<0.95`) |
-| `echo` | `apex_rudp` | 3000 | not broken |
+`scripts/run_canonical_tests.sh` updates `docs/measurements/current/` after each canonical run. Review and commit that directory when publishing a new current result.
 
 ## Canonical Sweep
 
@@ -42,5 +36,6 @@ Break rule: each point is N=3. A point is OK when aggregate `valid >= 2/3` and m
 
 - Benchmark execution: [`../scripts/run_canonical_tests.sh`](../scripts/run_canonical_tests.sh)
 - Per-run report generation: [`../scripts/render_canonical_report.py`](../scripts/render_canonical_report.py)
+- Stable published result: [`measurements/current/report.md`](measurements/current/report.md)
 - Dated measurement reports under `docs/measurements/` are archived run outputs.
 - `README.md`, `docs/FINAL_OUTPUT.md`, `docs/measurements/CURRENT.md`, and `docs/measurements/README.md` are pointers only. Do not duplicate result tables there.

@@ -15,6 +15,7 @@ BUILD_DIR="${BUILD_DIR:-build}"
 OUT="${OUT:-results/canonical_final_benchmark_$(date -u +%Y%m%dT%H%M%SZ)}"
 UPDATE_SUBMODULES="${UPDATE_SUBMODULES:-1}"
 DRY_RUN="${DRY_RUN:-0}"
+PUBLISH_DOCS="${PUBLISH_DOCS:-1}"
 
 CANONICAL_LIBS="coop_rudp,apex_rudp,litenetlib,enet,gns,raknet"
 CANONICAL_RUNS="1 2 3"
@@ -33,6 +34,7 @@ Options:
   --out PATH               Output directory (default: $OUT)
   --build-dir PATH         CMake build directory (default: $BUILD_DIR)
   --no-submodule-update    Skip git submodule update
+  --no-publish-docs        Do not update docs/measurements/current
   --dry-run                Print commands without executing them
   -h, --help               Show this help
 
@@ -63,6 +65,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-submodule-update)
       UPDATE_SUBMODULES=0
+      shift
+      ;;
+    --no-publish-docs)
+      PUBLISH_DOCS=0
       shift
       ;;
     --dry-run)
@@ -156,12 +162,24 @@ REPORT_CMD=(
 )
 run_cmd "${REPORT_CMD[@]}"
 
+if [ "$PUBLISH_DOCS" != "0" ]; then
+  PUBLISH_CMD=(
+    "$PYTHON" scripts/publish_canonical_result.py
+    --run-dir "$OUT"
+    --dest "$ROOT/docs/measurements/current"
+  )
+  run_cmd "${PUBLISH_CMD[@]}"
+fi
+
 if [ "$DRY_RUN" != "1" ]; then
   if command -v tc >/dev/null 2>&1; then
     tc qdisc show dev lo | tee "$OUT/qdisc_after.txt"
   fi
   echo "==> canonical benchmark complete"
   echo "==> report: $OUT/report.md"
+  if [ "$PUBLISH_DOCS" != "0" ]; then
+    echo "==> current docs report: $ROOT/docs/measurements/current/report.md"
+  fi
   echo "==> capacity: $OUT/capacity.csv"
   echo "==> summary: $OUT/summary.csv"
 fi
