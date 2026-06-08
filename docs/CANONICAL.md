@@ -14,11 +14,9 @@ scripts/run_canonical_tests.sh
 
 ## Current Published Result
 
-**open this:** [`measurements/current/report.md`](measurements/current/report.md)
+**open this:** [`measurements/current.md`](measurements/current.md)
 
-**capacity data:** [`measurements/current/capacity.csv`](measurements/current/capacity.csv)
-
-`scripts/run_canonical_tests.sh` updates `docs/measurements/current/` after each canonical run. Review and commit that directory when publishing a new current result.
+`scripts/run_canonical_tests.sh` publishes each run to a dated directory under `docs/measurements/` and updates `docs/measurements/current.md` to point at that latest report. Review and commit both the dated directory and `current.md` when publishing a new current result.
 
 ## Canonical Sweep
 
@@ -36,6 +34,6 @@ Break rule: each point is N=3. A point is OK when aggregate `valid >= 2/3` and m
 
 - Benchmark execution: [`../scripts/run_canonical_tests.sh`](../scripts/run_canonical_tests.sh)
 - Per-run report generation: [`../scripts/render_canonical_report.py`](../scripts/render_canonical_report.py)
-- Stable published result: [`measurements/current/report.md`](measurements/current/report.md)
+- Stable published pointer: [`measurements/current.md`](measurements/current.md)
 - Dated measurement reports under `docs/measurements/` are archived run outputs.
 - `README.md` and `docs/FINAL_OUTPUT.md` are compatibility pointers only. Do not duplicate result tables there.

@@ -16,6 +16,7 @@ OUT="${OUT:-results/canonical_final_benchmark_$(date -u +%Y%m%dT%H%M%SZ)}"
 UPDATE_SUBMODULES="${UPDATE_SUBMODULES:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 PUBLISH_DOCS="${PUBLISH_DOCS:-1}"
+PUBLISH_ID="${PUBLISH_ID:-$(date -u +%Y-%m-%d-canonical-%H%M%SZ)}"
 
 CANONICAL_LIBS="coop_rudp,apex_rudp,litenetlib,enet,gns,raknet"
 CANONICAL_RUNS="1 2 3"
@@ -34,7 +35,7 @@ Options:
   --out PATH               Output directory (default: $OUT)
   --build-dir PATH         CMake build directory (default: $BUILD_DIR)
   --no-submodule-update    Skip git submodule update
-  --no-publish-docs        Do not update docs/measurements/current
+  --no-publish-docs        Do not publish docs/measurements/<id> or update current.md
   --dry-run                Print commands without executing them
   -h, --help               Show this help
 
@@ -166,7 +167,8 @@ if [ "$PUBLISH_DOCS" != "0" ]; then
   PUBLISH_CMD=(
     "$PYTHON" scripts/publish_canonical_result.py
     --run-dir "$OUT"
-    --dest "$ROOT/docs/measurements/current"
+    --dest "$ROOT/docs/measurements/$PUBLISH_ID"
+    --current "$ROOT/docs/measurements/current.md"
   )
   run_cmd "${PUBLISH_CMD[@]}"
 fi
@@ -178,7 +180,8 @@ if [ "$DRY_RUN" != "1" ]; then
   echo "==> canonical benchmark complete"
   echo "==> report: $OUT/report.md"
   if [ "$PUBLISH_DOCS" != "0" ]; then
-    echo "==> current docs report: $ROOT/docs/measurements/current/report.md"
+    echo "==> published docs report: $ROOT/docs/measurements/$PUBLISH_ID/report.md"
+    echo "==> current docs pointer: $ROOT/docs/measurements/current.md"
   fi
   echo "==> capacity: $OUT/capacity.csv"
   echo "==> summary: $OUT/summary.csv"
