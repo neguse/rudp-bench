@@ -29,6 +29,22 @@ CAPABILITIES: Dict[str, Dict[str, object]] = {
             "u": {"max_payload": 65497, "flush_policy": "immediate", "transport": "udp_datagram"},
         },
     },
+    "coop_rudp": {
+        "encryption": "off",
+        "max_conns": 4096,
+        "modes": {
+            "r": {
+                "max_payload": 1148,
+                "flush_policy": "coop_flush_sack_retransmit",
+                "transport": "udp_datagram_sack",
+            },
+            "u": {
+                "max_payload": 1148,
+                "flush_policy": "coop_flush_unreliable",
+                "transport": "udp_datagram",
+            },
+        },
+    },
     "apex_rudp": {
         "encryption": "off",
         "max_conns": None,
@@ -74,6 +90,22 @@ CAPABILITIES: Dict[str, Dict[str, object]] = {
                 "max_payload": 65536,
                 "flush_policy": "library_internal",
                 "transport": "slikenet_message",
+            },
+        },
+    },
+    "raknet": {
+        "encryption": "off",
+        "max_conns": 4096,
+        "modes": {
+            "r": {
+                "max_payload": 65536,
+                "flush_policy": "library_internal",
+                "transport": "raknet_message",
+            },
+            "u": {
+                "max_payload": 65536,
+                "flush_policy": "library_internal",
+                "transport": "raknet_message",
             },
         },
     },

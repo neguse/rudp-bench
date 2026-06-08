@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 
-DEFAULT_LIBS = "apex_rudp,litenetlib,enet,gns"
+DEFAULT_LIBS = "coop_rudp,apex_rudp,litenetlib,enet,gns,raknet"
 DEFAULT_RUNS = "1 2 3"
 DEFAULT_NETEM_ARGS = "25 5 1 100000"
 

@@ -19,6 +19,7 @@ void register_apex_rudp_adapter();
 void register_enet_adapter();
 void register_kcp_adapter();
 void register_slikenet_adapter();
+void register_raknet_adapter();
 void register_udt4_adapter();
 void register_yojimbo_adapter();
 void register_gns_adapter();
@@ -33,6 +34,7 @@ int main(int argc, const char* argv[]) {
   rudp_bench::register_enet_adapter();
   rudp_bench::register_kcp_adapter();
   rudp_bench::register_slikenet_adapter();
+  rudp_bench::register_raknet_adapter();
   rudp_bench::register_udt4_adapter();
   rudp_bench::register_yojimbo_adapter();
   rudp_bench::register_gns_adapter();

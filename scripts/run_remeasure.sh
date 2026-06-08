@@ -2,14 +2,14 @@
 # Re-measurement sweep after the 2026-05-30 measurement-validity changes.
 # v2-comparable config: mixed 50/50, size=64, 20s, warmup=2, idle=adaptive,
 # netem 25/5/1 (limit=100000), isolation server=7,15 client=5,6,13,14 procs=4.
-# Grid: conns {200,600,1000} x N=3 x {apex_rudp,enet,kcp,mini_rudp,gns,msquic,litenetlib}.
+# Grid: conns {200,600,1000} x N=3 x {apex_rudp,enet,kcp,mini_rudp,coop_rudp,gns,msquic,litenetlib,raknet}.
 # Aggregated with scripts/aggregate_runs.py (median over valid runs, S1).
 set -uo pipefail
 cd /home/neguse/ghq/github.com/neguse/rudp-bench
 
 OUT=results/remeasure_v3
 mkdir -p "$OUT"
-LIBS="apex_rudp,enet,kcp,mini_rudp,gns,msquic,litenetlib"
+LIBS="apex_rudp,enet,kcp,mini_rudp,coop_rudp,gns,msquic,litenetlib,raknet"
 CONNS_LIST="200 600 1000"
 RUNS="1 2 3"
 

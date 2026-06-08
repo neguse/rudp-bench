@@ -35,12 +35,12 @@ ctest --test-dir build --output-on-failure
 scripts/run_final_saturation_profiles.py --out results/final_saturation_profiles
 ```
 
-Raw outputs are written under `results/`. Published final data lives in `docs/measurements/2026-06-03-apex-batch-final/data/`.
+Raw outputs are written under `results/`. Published final data lives in `docs/measurements/2026-06-08-raknet-final/data/`.
 
 ## Docs
 
 - Final output summary: [`docs/FINAL_OUTPUT.md`](docs/FINAL_OUTPUT.md)
-- Full final report: [`docs/measurements/2026-06-03-apex-batch-final/report.md`](docs/measurements/2026-06-03-apex-batch-final/report.md)
-- Capacity table: [`docs/measurements/2026-06-03-apex-batch-final/data/capacity.csv`](docs/measurements/2026-06-03-apex-batch-final/data/capacity.csv)
+- Full final report: [`docs/measurements/2026-06-08-raknet-final/report.md`](docs/measurements/2026-06-08-raknet-final/report.md)
+- Capacity table: [`docs/measurements/2026-06-08-raknet-final/data/capacity.csv`](docs/measurements/2026-06-08-raknet-final/data/capacity.csv)
 - Design spec: [`docs/superpowers/specs/2026-04-28-rudp-bench-design.md`](docs/superpowers/specs/2026-04-28-rudp-bench-design.md)
 - Development / measurement notes: [`docs/dev-notes.md`](docs/dev-notes.md)

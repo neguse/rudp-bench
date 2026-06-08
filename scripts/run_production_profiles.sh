@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 OUT="${OUT:-results/production_profiles_$(date -u +%Y%m%dT%H%M%SZ)}"
-LIBS="${LIBS:-apex_rudp,litenetlib,enet,gns}"
+LIBS="${LIBS:-coop_rudp,apex_rudp,litenetlib,enet,gns,raknet}"
 RUNS="${RUNS:-1 2 3}"
 NETEM="${NETEM:-1}"
 SERVER_CPU="${SERVER_CPU:-7,15}"

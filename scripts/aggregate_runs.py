@@ -114,7 +114,7 @@ def aggregate(results_path: str, scenarios_path: str, out_path: str,
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
+        w = csv.DictWriter(f, fieldnames=fields, lineterminator="\n")
         w.writeheader()
         for r in out_rows:
             w.writerow({k: r.get(k, "") for k in fields})

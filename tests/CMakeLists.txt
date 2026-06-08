@@ -82,6 +82,10 @@ add_executable(test_slikenet_smoke test_slikenet_smoke.cc)
 target_link_libraries(test_slikenet_smoke PRIVATE adapter_slikenet GTest::gtest_main)
 add_test(NAME test_slikenet_smoke COMMAND test_slikenet_smoke)
 
+add_executable(test_raknet_smoke test_raknet_smoke.cc)
+target_link_libraries(test_raknet_smoke PRIVATE adapter_raknet GTest::gtest_main)
+add_test(NAME test_raknet_smoke COMMAND test_raknet_smoke)
+
 add_executable(test_udt4_smoke test_udt4_smoke.cc)
 target_link_libraries(test_udt4_smoke PRIVATE adapter_udt4 GTest::gtest_main)
 add_test(NAME test_udt4_smoke COMMAND test_udt4_smoke)
