@@ -1,6 +1,6 @@
-# 最新 / Current RakNet Full Final Remeasure
+# RakNet Full Final Remeasure
 
-**これが最新版 / canonical report:** RakNet 追加後の full-target final saturation remeasure。
+Canonical entrypoint: [`../../CANONICAL.md`](../../CANONICAL.md)
 
 **測定日時:** 2026-06-08 15:31-16:35 UTC (2026-06-09 00:31-01:35 JST)
 
