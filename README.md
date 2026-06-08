@@ -18,21 +18,22 @@ Reliable UDP / RUDP / QUIC implementations を同じ workload で比較する be
 | `game_server` | authoritative game state/event fanout | `apex_rudp`: 128 OK, 192 break |
 | `echo` | mixed 50/50 synthetic baseline | `apex_rudp`: 3000 OK, not broken |
 
-## Build
+## Canonical Benchmark Test
 
 ```sh
-git submodule update --init --recursive
-cmake -S . -B build
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+scripts/run_canonical_tests.sh
 ```
+
+この repo で「canonical test」と言うときは、unit test ではなく最新の final saturation benchmark 一式を指す。手元でも再測定でも、基本は個別の benchmark script 直打ちではなくこの入口を使う。
+
+この script は build 後に、`coop_rudp,apex_rudp,litenetlib,enet,gns,raknet` で `media_relay` / `game_server` / `echo` の canonical profiles を N=3 で全実行する。
 
 ## Re-run Final Benchmark
 
 最終 benchmark を再実行する:
 
 ```sh
-scripts/run_final_saturation_profiles.py --out results/final_saturation_profiles
+scripts/run_canonical_tests.sh --out results/final_saturation_profiles
 ```
 
 Raw outputs are written under `results/`. Published final data lives in `docs/measurements/2026-06-08-raknet-final/data/`.
