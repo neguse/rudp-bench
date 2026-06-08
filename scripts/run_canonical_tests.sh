@@ -150,11 +150,18 @@ BENCH_CMD=(
 
 run_cmd "${BENCH_CMD[@]}"
 
+REPORT_CMD=(
+  "$PYTHON" scripts/render_canonical_report.py
+  --run-dir "$OUT"
+)
+run_cmd "${REPORT_CMD[@]}"
+
 if [ "$DRY_RUN" != "1" ]; then
   if command -v tc >/dev/null 2>&1; then
     tc qdisc show dev lo | tee "$OUT/qdisc_after.txt"
   fi
   echo "==> canonical benchmark complete"
+  echo "==> report: $OUT/report.md"
   echo "==> capacity: $OUT/capacity.csv"
   echo "==> summary: $OUT/summary.csv"
 fi

@@ -28,6 +28,8 @@ scripts/run_canonical_tests.sh
 
 この script は build 後に、`coop_rudp,apex_rudp,litenetlib,enet,gns,raknet` で `media_relay` / `game_server` / `echo` の canonical profiles を N=3 で全実行する。
 
+実行後は `$OUT/report.md` を見る。Markdown 内に `plots/*.png` が埋め込まれ、capacity / delivery / CPU / RTT p95 をそのまま確認できる。
+
 ## Re-run Final Benchmark
 
 最終 benchmark を再実行する:
@@ -37,6 +39,7 @@ scripts/run_canonical_tests.sh --out results/final_saturation_profiles
 ```
 
 Raw outputs are written under `results/`. Published final data lives in `docs/measurements/2026-06-08-raknet-final/data/`.
+The generated report lives at `results/final_saturation_profiles/report.md` when using the command above.
 
 ## Docs
 
