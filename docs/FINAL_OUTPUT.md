@@ -1,8 +1,12 @@
-# Final Output
+# 最新 Final Output
+
+**これが最新版 / canonical:** 2026-06-08 UTC / 2026-06-09 JST の RakNet 追加後 full-target final saturation remeasure。
+
+**詳細レポート:** [`measurements/2026-06-08-raknet-final/report.md`](measurements/2026-06-08-raknet-final/report.md)
+
+**capacity table:** [`measurements/2026-06-08-raknet-final/data/capacity.csv`](measurements/2026-06-08-raknet-final/data/capacity.csv)
 
 このプロジェクトの最終アウトプットは、固定 traffic shape で connection count を壊れるまで上げる 3 つの saturation profiles。
-
-詳細レポート: [`measurements/2026-06-08-raknet-final/report.md`](measurements/2026-06-08-raknet-final/report.md)
 
 ## Profiles
 
@@ -30,4 +34,4 @@
 - all medians: [`measurements/2026-06-08-raknet-final/data/summary.csv`](measurements/2026-06-08-raknet-final/data/summary.csv)
 - run-level results: [`measurements/2026-06-08-raknet-final/data/results_all.csv`](measurements/2026-06-08-raknet-final/data/results_all.csv)
 
-Older measurement directories are tuning logs, fixed-conn probes, baseline runs, or intermediate reports. Treat this file and the linked RakNet full remeasure report as the canonical final output.
+このファイルと linked RakNet full remeasure report を canonical final output とする。
