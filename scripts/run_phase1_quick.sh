@@ -271,6 +271,7 @@ for lib in ${LIBS//,/ }; do
         # into $C_OUT just like the C++ multi-proc path.
         CPIDS=()
         COMBINE_ARGS=()
+        CONN_OFFSET=0
         for i in $(seq 0 $((CLIENT_PROCS - 1))); do
           CONNS_I=$((CONNS / CLIENT_PROCS))
           if [ "$i" -lt $((CONNS % CLIENT_PROCS)) ]; then
@@ -284,11 +285,13 @@ for lib in ${LIBS//,/ }; do
           run_timeout "$CLIENT_CPU" "$TIMEOUT_S" client "$LITENETLIB_BIN" --library="$lib" --role=client \
             --host=127.0.0.1 --port="$PORT" \
             --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS_I" \
+            --fanout-conns="$CONNS" --conn-id-offset="$CONN_OFFSET" \
             --duration="$DURATION" --warmup="$WARMUP_ARG" --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
             --out="$C_OUT_I" --bins-r-out="$BINS_R_I" --bins-u-out="$BINS_U_I" \
             >"$C_STDOUT_I" 2>"$C_STDERR_I" &
           CPIDS+=("$!")
           COMBINE_ARGS+=(--client-csv="$C_OUT_I" --bins-r="$BINS_R_I" --bins-u="$BINS_U_I")
+          CONN_OFFSET=$((CONN_OFFSET + CONNS_I))
         done
         C_STATUS=0
         for pid in "${CPIDS[@]}"; do
@@ -333,6 +336,7 @@ for lib in ${LIBS//,/ }; do
       # canonical $C_OUT consumed by reduce_result.py.
       CPIDS=()
       COMBINE_ARGS=()
+      CONN_OFFSET=0
       for i in $(seq 0 $((CLIENT_PROCS - 1))); do
         CONNS_I=$((CONNS / CLIENT_PROCS))
         if [ "$i" -lt $((CONNS % CLIENT_PROCS)) ]; then
@@ -346,11 +350,13 @@ for lib in ${LIBS//,/ }; do
         run_timeout "$CLIENT_CPU" "$TIMEOUT_S" client "$BIN" --library="$lib" --role=client \
           --host=127.0.0.1 --port="$PORT" \
           --rate-r="$RATE_R" --rate-u="$RATE_U" --size="$SIZE" --conns="$CONNS_I" \
+          --fanout-conns="$CONNS" --conn-id-offset="$CONN_OFFSET" \
           --duration="$DURATION" --warmup=2 --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$LOSS" --mode="$MODE" --idle="$IDLE" \
           --out="$C_OUT_I" --bins-r-out="$BINS_R_I" --bins-u-out="$BINS_U_I" \
           >"$C_STDOUT_I" 2>"$C_STDERR_I" &
         CPIDS+=("$!")
         COMBINE_ARGS+=(--client-csv="$C_OUT_I" --bins-r="$BINS_R_I" --bins-u="$BINS_U_I")
+        CONN_OFFSET=$((CONN_OFFSET + CONNS_I))
       done
       C_STATUS=0
       for pid in "${CPIDS[@]}"; do

@@ -19,10 +19,9 @@ RUNS="${RUNS:-1 2 3}"
 NETEM="${NETEM:-1}"
 SERVER_CPU="${SERVER_CPU:-7,15}"
 CLIENT_CPU="${CLIENT_CPU:-5,6,13,14}"
-# Broadcast accounting is defined for one client process. Multi-process clients
-# split the local connection count and make the canonical fanout denominator
-# ambiguous, so production profiles keep CLIENT_PROCS=1 by default.
-CLIENT_PROCS="${CLIENT_PROCS:-1}"
+# Broadcast client farms preserve the full-room fanout denominator while
+# splitting local connection load across processes.
+CLIENT_PROCS="${CLIENT_PROCS:-4}"
 IDLE="${IDLE:-adaptive}"
 ISOLATE="${ISOLATE:-systemd}"
 DURATION="${DURATION:-20}"

@@ -97,6 +97,12 @@ std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]) {
     else if (starts_with(a, "--conns=")) {
       if (!parse_u32(value(a, "--conns="), &c.conns)) return std::nullopt;
     }
+    else if (starts_with(a, "--fanout-conns=")) {
+      if (!parse_u32(value(a, "--fanout-conns="), &c.fanout_conns)) return std::nullopt;
+    }
+    else if (starts_with(a, "--conn-id-offset=")) {
+      if (!parse_u32(value(a, "--conn-id-offset="), &c.conn_id_offset)) return std::nullopt;
+    }
     else if (starts_with(a, "--duration=")) {
       if (!parse_u32(value(a, "--duration="), &c.duration_s)) return std::nullopt;
     }
@@ -140,6 +146,9 @@ std::optional<ScenarioConfig> parse_scenario(int argc, const char* argv[]) {
   if (c.conns == 0) {
     std::cerr << "--conns must be > 0\n";
     return std::nullopt;
+  }
+  if (c.fanout_conns == 0) {
+    c.fanout_conns = c.conns;
   }
   return c;
 }

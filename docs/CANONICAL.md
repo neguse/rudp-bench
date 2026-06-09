@@ -31,6 +31,10 @@ Targets: `raw_udp,mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yo
 
 Break rule: each point is N=3. A point is OK when aggregate `valid >= 2/3` and median `delivery_ratio >= 0.95`. The first non-OK connection count is the break point.
 
+Client load generation uses up to 4 client processes. Broadcast profiles split
+local connections across those processes but keep the fanout denominator at the
+total room size.
+
 ## Source Of Truth
 
 - Benchmark execution: [`../scripts/run_canonical_tests.sh`](../scripts/run_canonical_tests.sh)

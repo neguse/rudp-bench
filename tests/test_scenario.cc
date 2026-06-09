@@ -22,6 +22,7 @@ TEST(Scenario, ParsesAllFlags) {
       "--host=127.0.0.1", "--port=9000",
       "--rate-r=10", "--rate-u=100",
       "--size=64", "--conns=4",
+      "--fanout-conns=16", "--conn-id-offset=8",
       "--duration=30", "--warmup=2", "--ramp-up-ms=100", "--tail-ms=1500", "--loss=0",
       "--idle=adaptive", "--out=/tmp/out.csv",
   };
@@ -36,6 +37,8 @@ TEST(Scenario, ParsesAllFlags) {
   EXPECT_EQ(cfg->rate_u, 100u);
   EXPECT_EQ(cfg->size_bytes, 64u);
   EXPECT_EQ(cfg->conns, 4u);
+  EXPECT_EQ(cfg->fanout_conns, 16u);
+  EXPECT_EQ(cfg->conn_id_offset, 8u);
   EXPECT_EQ(cfg->duration_s, 30u);
   EXPECT_EQ(cfg->warmup_s, 2u);
   EXPECT_EQ(cfg->ramp_up_ms, 100u);
@@ -90,4 +93,15 @@ TEST(Scenario, RejectsMalformedNumericFlags) {
 TEST(Scenario, AcceptsNumericBoundaryValues) {
   EXPECT_TRUE(Parses({"rudp-bench", "--library=raw_udp", "--rate-u=1",
                       "--port=65535", "--loss=100", "--conns=1"}));
+}
+
+TEST(Scenario, DefaultsFanoutConnsToLocalConns) {
+  const char* argv[] = {
+      "rudp-bench", "--library=raw_udp", "--role=client",
+      "--rate-u=1", "--conns=7",
+  };
+  int argc = sizeof(argv) / sizeof(argv[0]);
+  auto cfg = rudp_bench::parse_scenario(argc, argv);
+  ASSERT_TRUE(cfg.has_value());
+  EXPECT_EQ(cfg->fanout_conns, 7u);
 }

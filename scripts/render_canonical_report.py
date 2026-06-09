@@ -40,7 +40,7 @@ DEFAULT_PROFILE_ROWS = [
         "rate_u": "30",
         "size": "1000",
         "conns_schedule": DEFAULT_MEDIA_CONNS,
-        "client_procs": "1",
+        "client_procs": "4",
         "notes": "near-MTU media packets, full-room unreliable fanout",
     },
     {
@@ -51,7 +51,7 @@ DEFAULT_PROFILE_ROWS = [
         "rate_u": "20",
         "size": "128",
         "conns_schedule": DEFAULT_GAME_CONNS,
-        "client_procs": "1",
+        "client_procs": "4",
         "notes": "20Hz state/input fanout plus 1Hz reliable gameplay events",
     },
     {

@@ -154,6 +154,7 @@ BENCH_CMD=(
   --game-conns "$CANONICAL_GAME_CONNS"
   --echo-conns "$CANONICAL_ECHO_CONNS"
   --reliable-echo-conns "$CANONICAL_RELIABLE_ECHO_CONNS"
+  --broadcast-client-procs 4
   --echo-client-procs 4
 )
 

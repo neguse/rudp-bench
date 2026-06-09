@@ -29,7 +29,8 @@ if (cfg == null)
 {
     Console.Error.WriteLine("usage: litenetlib_adapter --library=<name> --role=server|client " +
         "--host= --port= --rate-r= --rate-u= --size= --conns= " +
-        "--duration= --warmup= --ramp-up-ms= --tail-ms= --loss= --idle=spin|adaptive --out=");
+        "--fanout-conns= --conn-id-offset= --duration= --warmup= --ramp-up-ms= " +
+        "--tail-ms= --loss= --idle=spin|adaptive --out=");
     return 2;
 }
 
@@ -123,6 +124,14 @@ static Config? ParseArgs(string[] args)
         {
             if (!TryParseUInt(arg["--conns=".Length..], out cfg.Conns)) return null;
         }
+        else if (arg.StartsWith("--fanout-conns="))
+        {
+            if (!TryParseUInt(arg["--fanout-conns=".Length..], out cfg.FanoutConns)) return null;
+        }
+        else if (arg.StartsWith("--conn-id-offset="))
+        {
+            if (!TryParseUInt(arg["--conn-id-offset=".Length..], out cfg.ConnIdOffset)) return null;
+        }
         else if (arg.StartsWith("--duration="))
         {
             if (!TryParseUInt(arg["--duration=".Length..], out cfg.DurationS)) return null;
@@ -169,6 +178,7 @@ static Config? ParseArgs(string[] args)
         Console.Error.WriteLine("--conns must be > 0");
         return null;
     }
+    if (cfg.FanoutConns == 0) cfg.FanoutConns = cfg.Conns;
     return cfg;
 }
 
@@ -430,7 +440,7 @@ static CsvRow RunClient(Config cfg)
     var schedU = new ChannelSched(cfg.RateU, false, cfg.Conns, Stopwatch.GetTimestamp());
     ulong combinedRate = (ulong)cfg.RateR + cfg.RateU;
     ulong missedBudgetUs = TickUtil.PacingBudgetUs(Math.Max(cfg.RateR, cfg.RateU));
-    uint expectedPerSend = cfg.Mode == "broadcast" ? cfg.Conns : 1u;
+    uint expectedPerSend = cfg.Mode == "broadcast" ? cfg.FanoutConns : 1u;
     ulong targetAttempted = combinedRate * cfg.Conns * cfg.DurationS * expectedPerSend;
     ulong outstanding = 0;
     ulong acceptedR = 0;
@@ -453,7 +463,8 @@ static CsvRow RunClient(Config cfg)
         if (inActive) tick.RecordSendDue(expectedPerSend, lagUs, missedBudgetUs);
 
         ulong localSeq = seqCounters[i]++;
-        ulong globalSeq = ((ulong)i << 32) | localSeq;
+        ulong originId = cfg.ConnIdOffset + (ulong)i;
+        ulong globalSeq = (originId << 32) | localSeq;
         ulong tsNs = (ulong)(Stopwatch.GetTimestamp() * 1_000_000_000L / Stopwatch.Frequency);
         BitConverter.TryWriteBytes(payload.AsSpan(0, 8), globalSeq);
         BitConverter.TryWriteBytes(payload.AsSpan(8, 8), tsNs);
@@ -701,6 +712,8 @@ class Config
     public uint RateU;       // unreliable msg/s/conn (0 = no unreliable traffic)
     public uint SizeBytes = 64;
     public uint Conns = 1;
+    public uint FanoutConns = 0;
+    public uint ConnIdOffset = 0;
     public uint DurationS = 30;
     public uint WarmupS = 5; // spec: JIT/GC ウォームアップのため 5 秒デフォルト
     public uint RampUpMs = 0; // connect を等間隔に分散する時間。0 で即時(従来挙動)
@@ -1035,7 +1048,7 @@ class DeliveryTracker
 {
     public const string DedupPolicy = "sliding_window_65536_per_conn";
     private const int DedupWindowPerConn = 65_536;
-    private const ulong SeqMask = 0x0000FFFFFFFFFFFFul;
+    private const ulong SeqMask = ulong.MaxValue;
 
     private sealed class ConnDedupWindow
     {

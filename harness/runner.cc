@@ -357,7 +357,8 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   uint64_t accepted_u = 0;
   uint64_t delivered_r = 0;
   uint64_t delivered_u = 0;
-  uint32_t expected_per_send = (cfg.mode == ServerMode::Broadcast) ? cfg.conns : 1;
+  uint32_t expected_per_send =
+      (cfg.mode == ServerMode::Broadcast) ? cfg.fanout_conns : 1;
   uint64_t combined_rate = static_cast<uint64_t>(cfg.rate_r) + cfg.rate_u;
   uint64_t target_attempted =
       combined_rate * cfg.conns * cfg.duration_s * expected_per_send;
@@ -386,7 +387,8 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
     bool in_active = now >= warmup_end && now < run_end;
     if (in_active) tick.record_send_due(expected_per_send, lag_us, missed_budget);
     uint64_t local_seq = seq_counter[i]++;
-    uint64_t global_seq = (static_cast<uint64_t>(i) << 32) | local_seq;
+    uint64_t origin_id = static_cast<uint64_t>(cfg.conn_id_offset) + i;
+    uint64_t global_seq = (origin_id << 32) | local_seq;
     uint64_t ts = std::chrono::duration_cast<std::chrono::nanoseconds>(
                       now.time_since_epoch()).count();
     std::memcpy(payload.data(), &global_seq, 8);

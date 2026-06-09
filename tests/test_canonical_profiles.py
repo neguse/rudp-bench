@@ -62,6 +62,11 @@ def main() -> int:
     assert fallback["game_server"] == EXPECTED["game"]
     assert fallback["reliable_echo"] == EXPECTED["reliable_echo"]
     assert fallback["echo"] == EXPECTED["echo"]
+    fallback_procs = {row["profile"]: row["client_procs"] for row in renderer.DEFAULT_PROFILE_ROWS}
+    assert fallback_procs["media_relay"] == "4"
+    assert fallback_procs["game_server"] == "4"
+    assert fallback_procs["reliable_echo"] == "4"
+    assert fallback_procs["echo"] == "4"
 
     assert first_conn(EXPECTED["media"]) == 1
     assert first_conn(EXPECTED["game"]) == 1
@@ -76,7 +81,7 @@ def main() -> int:
         rate_u=30,
         size=1000,
         conns=[1],
-        client_procs=1,
+        client_procs=4,
         notes="test",
     )
     capacity = {}

@@ -216,6 +216,64 @@ def run_synthetic_combine(tmp: Path) -> None:
     assert combined["conn_disc_peer"] == "0"
 
 
+def run_broadcast_synthetic_combine(tmp: Path) -> None:
+    client_csvs = []
+    bins_r = []
+    bins_u = []
+    for i in range(2):
+        client_csv = tmp / f"broadcast_{i}.csv"
+        bin_r = tmp / f"broadcast_{i}_r.bin"
+        bin_u = tmp / f"broadcast_{i}_u.bin"
+        client_csvs.append(client_csv)
+        bins_r.append(bin_r)
+        bins_u.append(bin_u)
+        write_empty_bins(bin_r)
+        write_empty_bins(bin_u)
+
+    for client_csv in client_csvs:
+        write_raw(
+            client_csv,
+            rate_r="0",
+            rate_u="10",
+            conns="2",
+            duration_s="10",
+            mode="broadcast",
+            delivered="800",
+            accepted="800",
+            delivered_u="800",
+            accepted_u="800",
+            client_attempted="800",
+            client_accepted="800",
+            client_attempted_ratio="1.0000",
+            client_accepted_ratio="1.0000",
+        )
+
+    combined_csv = tmp / "broadcast_combined.csv"
+    subprocess.run(
+        [
+            "python3",
+            str(COMBINE_PATH),
+            f"--client-csv={client_csvs[0]}",
+            f"--client-csv={client_csvs[1]}",
+            f"--bins-r={bins_r[0]}",
+            f"--bins-r={bins_r[1]}",
+            f"--bins-u={bins_u[0]}",
+            f"--bins-u={bins_u[1]}",
+            f"--out={combined_csv}",
+            "--conns-total=4",
+        ],
+        check=True,
+    )
+
+    combined = csv_row(combined_csv)
+    assert combined["conns"] == "4"
+    assert combined["client_attempted"] == "1600"
+    assert combined["client_accepted"] == "1600"
+    assert combined["client_attempted_ratio"] == "1.0000"
+    assert combined["client_accepted_ratio"] == "1.0000"
+    assert combined["delivery_ratio"] == "1.0000"
+
+
 def run_smoke(args: argparse.Namespace, tmp: Path) -> None:
     """Run a single client + server, write bin sidecars, then merge through
     combine_clients with N=1 and confirm the percentiles agree."""
@@ -306,6 +364,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         run_synthetic_combine(tmp)
+        run_broadcast_synthetic_combine(tmp)
         run_smoke(args, tmp)
     return 0
 

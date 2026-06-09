@@ -161,7 +161,7 @@ def profile_defs(args: argparse.Namespace) -> List[Profile]:
             rate_u=30,
             size=1000,
             conns=split_ints(args.media_conns),
-            client_procs=1,
+            client_procs=args.broadcast_client_procs,
             notes="near-MTU media packets, full-room unreliable fanout",
         ),
         Profile(
@@ -172,7 +172,7 @@ def profile_defs(args: argparse.Namespace) -> List[Profile]:
             rate_u=20,
             size=128,
             conns=split_ints(args.game_conns),
-            client_procs=1,
+            client_procs=args.broadcast_client_procs,
             notes="20Hz state/input fanout plus 1Hz reliable gameplay events",
         ),
         Profile(
@@ -508,6 +508,7 @@ def main() -> int:
     p.add_argument("--game-conns", default=DEFAULT_GAME_CONNS)
     p.add_argument("--echo-conns", default=DEFAULT_ECHO_CONNS)
     p.add_argument("--reliable-echo-conns", default=DEFAULT_RELIABLE_ECHO_CONNS)
+    p.add_argument("--broadcast-client-procs", type=int, default=4)
     p.add_argument("--echo-client-procs", type=int, default=4)
     args = p.parse_args()
 

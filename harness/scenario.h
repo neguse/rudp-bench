@@ -19,6 +19,8 @@ struct ScenarioConfig {
   uint32_t rate_u = 0;            // unreliable msg/s per conn (0 = no unreliable traffic)
   uint32_t size_bytes = 64;
   uint32_t conns = 1;
+  uint32_t fanout_conns = 0;      // broadcast denominator; 0 means conns
+  uint32_t conn_id_offset = 0;    // global origin id offset for split clients
   uint32_t duration_s = 30;
   uint32_t warmup_s = 2;
   // 接続確立を一気にせず一定時間に分散させる ramp-up 時間。conns 個の connect を
