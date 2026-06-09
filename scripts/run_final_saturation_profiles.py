@@ -17,13 +17,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+import capabilities
 
-DEFAULT_LIBS = "coop_rudp,apex_rudp,litenetlib,enet,gns,raknet"
+DEFAULT_LIBS = (
+    "raw_udp,mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,"
+    "udt4,yojimbo,gns,litenetlib,msquic"
+)
 DEFAULT_RUNS = "1 2 3"
 DEFAULT_NETEM_ARGS = "25 5 1 100000"
-DEFAULT_MEDIA_CONNS = "5 50 75 100 125 150 200"
-DEFAULT_GAME_CONNS = "5 64 96 128 192 256"
-DEFAULT_ECHO_CONNS = "50 200 600 1000 1500 2000 3000"
+DEFAULT_MEDIA_CONNS = "1 5 50 75 100 125 150 200"
+DEFAULT_GAME_CONNS = "1 5 64 96 128 192 256"
+DEFAULT_ECHO_CONNS = "1 50 200 600 1000 1500 2000 3000"
+DEFAULT_RELIABLE_ECHO_CONNS = "1 50 200 600 1000 1500 2000 3000"
 
 
 @dataclass(frozen=True)
@@ -168,6 +176,17 @@ def profile_defs(args: argparse.Namespace) -> List[Profile]:
             notes="20Hz state/input fanout plus 1Hz reliable gameplay events",
         ),
         Profile(
+            name="reliable_echo",
+            use_case="reliable_transport_echo_baseline",
+            mode="echo",
+            rate_r=50,
+            rate_u=0,
+            size=64,
+            conns=split_ints(args.reliable_echo_conns),
+            client_procs=args.echo_client_procs,
+            notes="reliable-only echo baseline for stream/reliable transports",
+        ),
+        Profile(
             name="echo",
             use_case="synthetic_mixed_echo_baseline",
             mode="echo",
@@ -206,6 +225,7 @@ def run_phase(args: argparse.Namespace, profile: Profile, conns: int,
               run: str, libs: List[str], out: Path) -> int:
     run_id = f"{profile.name}_c{conns}_r{run}"
     log_path = out / f"log_{run_id}.txt"
+    client_procs = max(1, min(profile.client_procs, conns))
     cmd = [
         args.phase1_script,
         f"--libraries={','.join(libs)}",
@@ -218,7 +238,7 @@ def run_phase(args: argparse.Namespace, profile: Profile, conns: int,
         f"--duration={args.duration}",
         f"--tail-ms={args.tail_ms}",
         f"--idle={args.idle}",
-        f"--client-procs={profile.client_procs}",
+        f"--client-procs={client_procs}",
         f"--isolate={args.isolate}",
         f"--server-cpu={args.server_cpu}",
         f"--client-cpu={args.client_cpu}",
@@ -261,6 +281,8 @@ def stop_reason(row: Optional[Dict[str, str]], min_delivery: float) -> str:
         return "missing_summary"
     if row.get("valid") != "1":
         note = row.get("note") or f"valid_runs={row.get('n_valid', '')}/{row.get('n_total', '')}"
+        if note.startswith("unsupported_"):
+            return note
         return f"aggregate_invalid:{note}"
     delivery = to_float(row.get("delivery_ratio_median"))
     if delivery is None:
@@ -270,6 +292,64 @@ def stop_reason(row: Optional[Dict[str, str]], min_delivery: float) -> str:
     return "ok"
 
 
+def unsupported_profile_reason(profile: Profile, lib: str) -> str:
+    for channel, rate in (("r", profile.rate_r), ("u", profile.rate_u)):
+        if rate <= 0:
+            continue
+        if not capabilities.supports_reliability(lib, channel):
+            return "unsupported_reliable" if channel == "r" else "unsupported_unreliable"
+        max_payload = capabilities.max_payload_bytes(lib, channel)
+        if max_payload is not None and profile.size > max_payload:
+            return "unsupported_payload"
+    return ""
+
+
+def unsupported_conns(lib: str, conns: int) -> bool:
+    max_conns = capabilities.max_connections(lib)
+    return max_conns is not None and conns > max_conns
+
+
+def ensure_capacity_row(capacity: Dict[tuple, Dict[str, str]],
+                        profile: Profile, lib: str) -> Dict[str, str]:
+    return capacity.setdefault(
+        (profile.name, lib),
+        {
+            "profile": profile.name,
+            "library": lib,
+            "status": "not_started",
+            "last_ok_conns": "",
+            "last_ok_delivery": "",
+            "last_ok_server_cpu": "",
+            "break_conns": "",
+            "break_reason": "",
+            "break_delivery": "",
+            "break_server_cpu": "",
+        },
+    )
+
+
+def mark_capacity_stop(capacity: Dict[tuple, Dict[str, str]], profile: Profile,
+                       lib: str, conns: int, reason: str) -> None:
+    cap = ensure_capacity_row(capacity, profile, lib)
+    if reason.startswith("unsupported_") and not cap["last_ok_conns"]:
+        cap["status"] = "unsupported"
+        cap["last_ok_conns"] = "unsupported"
+    else:
+        cap["status"] = "broken"
+    cap["break_conns"] = str(conns)
+    cap["break_reason"] = reason
+
+
+def mark_first_measured_failure(cap: Dict[str, str], row: Dict[str, str],
+                                conns: int, reason: str) -> None:
+    cap["status"] = "below_gate" if reason.startswith("delivery<") else "failed_gate"
+    cap["last_ok_conns"] = cap["status"]
+    cap["break_conns"] = str(conns)
+    cap["break_reason"] = reason
+    cap["break_delivery"] = row.get("delivery_ratio_median", "")
+    cap["break_server_cpu"] = row.get("server_cpu_pct_median", "")
+
+
 def update_capacity_rows(capacity: Dict[tuple, Dict[str, str]], profile: Profile,
                          libs: List[str], rows: Dict[str, Dict[str, str]],
                          conns: int, min_delivery: float) -> List[str]:
@@ -277,27 +357,20 @@ def update_capacity_rows(capacity: Dict[tuple, Dict[str, str]], profile: Profile
     for lib in libs:
         row = rows.get(lib)
         reason = stop_reason(row, min_delivery)
-        key = (profile.name, lib)
-        cap = capacity.setdefault(
-            key,
-            {
-                "profile": profile.name,
-                "library": lib,
-                "status": "not_started",
-                "last_ok_conns": "",
-                "last_ok_delivery": "",
-                "last_ok_server_cpu": "",
-                "break_conns": "",
-                "break_reason": "",
-                "break_delivery": "",
-                "break_server_cpu": "",
-            },
-        )
+        cap = ensure_capacity_row(capacity, profile, lib)
         if reason == "ok":
             cap["status"] = "not_broken"
             cap["last_ok_conns"] = str(conns)
             cap["last_ok_delivery"] = row.get("delivery_ratio_median", "") if row else ""
             cap["last_ok_server_cpu"] = row.get("server_cpu_pct_median", "") if row else ""
+            continue
+        if reason.startswith("unsupported_") and not cap["last_ok_conns"]:
+            mark_capacity_stop(capacity, profile, lib, conns, reason)
+            broken.append(lib)
+            continue
+        if not cap["last_ok_conns"] and row is not None:
+            mark_first_measured_failure(cap, row, conns, reason)
+            broken.append(lib)
             continue
         cap["status"] = "broken"
         cap["break_conns"] = str(conns)
@@ -349,8 +422,26 @@ def run(args: argparse.Namespace) -> int:
     try:
         apply_netem(args, out)
         for profile in profiles:
-            active = list(libs)
+            active: List[str] = []
+            for lib in libs:
+                reason = unsupported_profile_reason(profile, lib)
+                if reason:
+                    mark_capacity_stop(capacity, profile, lib, profile.conns[0], reason)
+                else:
+                    active.append(lib)
             for conns in profile.conns:
+                if not active:
+                    break
+                unsupported_now = [lib for lib in active if unsupported_conns(lib, conns)]
+                for lib in unsupported_now:
+                    mark_capacity_stop(capacity, profile, lib, conns, "unsupported_conns")
+                if unsupported_now:
+                    active = [lib for lib in active if lib not in set(unsupported_now)]
+                    print(
+                        f"  profile={profile.name} unsupported_conns={','.join(unsupported_now)} "
+                        f"remaining={','.join(active) or '-'}",
+                        flush=True,
+                    )
                 if not active:
                     break
                 for r in runs:
@@ -416,6 +507,7 @@ def main() -> int:
     p.add_argument("--media-conns", default=DEFAULT_MEDIA_CONNS)
     p.add_argument("--game-conns", default=DEFAULT_GAME_CONNS)
     p.add_argument("--echo-conns", default=DEFAULT_ECHO_CONNS)
+    p.add_argument("--reliable-echo-conns", default=DEFAULT_RELIABLE_ECHO_CONNS)
     p.add_argument("--echo-client-procs", type=int, default=4)
     args = p.parse_args()
 

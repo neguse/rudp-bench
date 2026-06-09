@@ -18,12 +18,13 @@ DRY_RUN="${DRY_RUN:-0}"
 PUBLISH_DOCS="${PUBLISH_DOCS:-1}"
 PUBLISH_ID="${PUBLISH_ID:-$(date -u +%Y-%m-%d-canonical-%H%M%SZ)}"
 
-CANONICAL_LIBS="coop_rudp,apex_rudp,litenetlib,enet,gns,raknet"
+CANONICAL_LIBS="raw_udp,mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic"
 CANONICAL_RUNS="1 2 3"
 CANONICAL_NETEM_ARGS="25 5 1 100000"
-CANONICAL_MEDIA_CONNS="5 50 75 100 125 150 200"
-CANONICAL_GAME_CONNS="5 64 96 128 192 256"
-CANONICAL_ECHO_CONNS="50 200 600 1000 1500 2000 3000"
+CANONICAL_MEDIA_CONNS="1 5 50 75 100 125 150 200"
+CANONICAL_GAME_CONNS="1 5 64 96 128 192 256"
+CANONICAL_ECHO_CONNS="1 50 200 600 1000 1500 2000 3000"
+CANONICAL_RELIABLE_ECHO_CONNS="1 50 200 600 1000 1500 2000 3000"
 
 usage() {
   cat <<USAGE
@@ -152,6 +153,7 @@ BENCH_CMD=(
   --media-conns "$CANONICAL_MEDIA_CONNS"
   --game-conns "$CANONICAL_GAME_CONNS"
   --echo-conns "$CANONICAL_ECHO_CONNS"
+  --reliable-echo-conns "$CANONICAL_RELIABLE_ECHO_CONNS"
   --echo-client-procs 4
 )
 

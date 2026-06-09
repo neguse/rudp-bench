@@ -25,9 +25,10 @@ SCENARIO_RE = re.compile(
     r"(?P<loss>[^_]+)_(?P<idle>.+)$"
 )
 
-DEFAULT_MEDIA_CONNS = "5 50 75 100 125 150 200"
-DEFAULT_GAME_CONNS = "5 64 96 128 192 256"
-DEFAULT_ECHO_CONNS = "50 200 600 1000 1500 2000 3000"
+DEFAULT_MEDIA_CONNS = "1 5 50 75 100 125 150 200"
+DEFAULT_GAME_CONNS = "1 5 64 96 128 192 256"
+DEFAULT_ECHO_CONNS = "1 50 200 600 1000 1500 2000 3000"
+DEFAULT_RELIABLE_ECHO_CONNS = "1 50 200 600 1000 1500 2000 3000"
 
 
 DEFAULT_PROFILE_ROWS = [
@@ -52,6 +53,17 @@ DEFAULT_PROFILE_ROWS = [
         "conns_schedule": DEFAULT_GAME_CONNS,
         "client_procs": "1",
         "notes": "20Hz state/input fanout plus 1Hz reliable gameplay events",
+    },
+    {
+        "profile": "reliable_echo",
+        "use_case": "reliable_transport_echo_baseline",
+        "mode": "echo",
+        "rate_r": "50",
+        "rate_u": "0",
+        "size": "64",
+        "conns_schedule": DEFAULT_RELIABLE_ECHO_CONNS,
+        "client_procs": "4",
+        "notes": "reliable-only echo baseline for stream/reliable transports",
     },
     {
         "profile": "echo",
@@ -198,7 +210,7 @@ def strongest_rows(
                 best = row
                 best_key = key
         if best is None:
-            rows.append((profile, "none", "none", "none", ""))
+            rows.append((profile, "unmeasured", "unmeasured", "unmeasured", ""))
             continue
         break_text = "not broken"
         if best.get("break_conns"):
@@ -213,6 +225,16 @@ def strongest_rows(
             )
         )
     return rows
+
+
+def display_last_ok(row: Dict[str, str]) -> str:
+    value = row.get("last_ok_conns", "")
+    if value:
+        return value
+    status = row.get("status", "")
+    if status in {"unsupported", "below_gate", "failed_gate"}:
+        return status
+    return "unmeasured"
 
 
 def save_capacity_plot(
@@ -250,8 +272,17 @@ def save_capacity_plot(
         ax.set_xlabel("max OK connections")
         xmax = max(values) if values else 0
         ax.set_xlim(0, xmax * 1.18 if xmax > 0 else 1)
-        for yi, value in zip(y, values):
-            label = "none" if value <= 0 else str(int(value))
+        for yi, value, lib in zip(y, values, labels):
+            row = next(
+                (r for r in capacity_rows if r.get("profile") == profile and r.get("library") == lib),
+                None,
+            )
+            if row and row.get("status") in {"unsupported", "below_gate", "failed_gate"}:
+                label = row.get("status", "")
+            elif value <= 0:
+                label = "unmeasured"
+            else:
+                label = str(int(value))
             xpos = value + max(xmax * 0.02, 0.5) if value > 0 else max(xmax * 0.02, 0.5)
             ax.text(xpos, yi, label, va="center", fontsize=8)
     fig.tight_layout()
@@ -442,7 +473,7 @@ def build_report(
                         row.get("profile", ""),
                         row.get("library", ""),
                         row.get("status", ""),
-                        row.get("last_ok_conns", "") or "none",
+                        display_last_ok(row),
                         row.get("last_ok_delivery", ""),
                         row.get("last_ok_server_cpu", ""),
                         row.get("break_conns", "") or "not broken",
