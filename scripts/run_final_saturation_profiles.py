@@ -21,6 +21,9 @@ from typing import Dict, Iterable, List, Optional
 DEFAULT_LIBS = "coop_rudp,apex_rudp,litenetlib,enet,gns,raknet"
 DEFAULT_RUNS = "1 2 3"
 DEFAULT_NETEM_ARGS = "25 5 1 100000"
+DEFAULT_MEDIA_CONNS = "5 50 75 100 125 150 200"
+DEFAULT_GAME_CONNS = "5 64 96 128 192 256"
+DEFAULT_ECHO_CONNS = "50 200 600 1000 1500 2000 3000"
 
 
 @dataclass(frozen=True)
@@ -410,9 +413,9 @@ def main() -> int:
     p.add_argument("--min-valid", type=int, default=0,
                    help="valid runs required per point; 0 means min(2, number of runs)")
     p.add_argument("--min-delivery", type=float, default=0.95)
-    p.add_argument("--media-conns", default="50 75 100 125 150 200")
-    p.add_argument("--game-conns", default="64 96 128 192 256")
-    p.add_argument("--echo-conns", default="200 600 1000 1500 2000 3000")
+    p.add_argument("--media-conns", default=DEFAULT_MEDIA_CONNS)
+    p.add_argument("--game-conns", default=DEFAULT_GAME_CONNS)
+    p.add_argument("--echo-conns", default=DEFAULT_ECHO_CONNS)
     p.add_argument("--echo-client-procs", type=int, default=4)
     args = p.parse_args()
 

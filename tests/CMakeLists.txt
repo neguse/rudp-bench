@@ -52,6 +52,10 @@ if(PYTHON3_EXECUTABLE)
         NAME test_aggregate_runs
         COMMAND ${PYTHON3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_aggregate_runs.py"
     )
+    add_test(
+        NAME test_canonical_profiles
+        COMMAND ${PYTHON3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_canonical_profiles.py"
+    )
 endif()
 
 add_executable(test_raw_udp_smoke test_raw_udp_smoke.cc)

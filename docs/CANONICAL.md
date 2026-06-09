@@ -22,9 +22,9 @@ scripts/run_canonical_tests.sh
 
 | profile | workload | mode | traffic | payload | conn sweep |
 |---|---|---|---|---:|---|
-| `media_relay` | media SFU / relay fanout | broadcast | unreliable 30Hz | 1000B | 50, 75, 100, 125, 150, 200 |
-| `game_server` | authoritative game state/event fanout | broadcast | reliable 1Hz + unreliable 20Hz | 128B | 64, 96, 128, 192, 256 |
-| `echo` | mixed 50/50 synthetic baseline | echo | reliable 50Hz + unreliable 50Hz | 64B | 200, 600, 1000, 1500, 2000, 3000 |
+| `media_relay` | media SFU / relay fanout | broadcast | unreliable 30Hz | 1000B | 5, 50, 75, 100, 125, 150, 200 |
+| `game_server` | authoritative game state/event fanout | broadcast | reliable 1Hz + unreliable 20Hz | 128B | 5, 64, 96, 128, 192, 256 |
+| `echo` | mixed 50/50 synthetic baseline | echo | reliable 50Hz + unreliable 50Hz | 64B | 50, 200, 600, 1000, 1500, 2000, 3000 |
 
 Targets: `coop_rudp,apex_rudp,litenetlib,enet,gns,raknet`
 

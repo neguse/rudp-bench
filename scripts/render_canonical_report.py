@@ -25,6 +25,10 @@ SCENARIO_RE = re.compile(
     r"(?P<loss>[^_]+)_(?P<idle>.+)$"
 )
 
+DEFAULT_MEDIA_CONNS = "5 50 75 100 125 150 200"
+DEFAULT_GAME_CONNS = "5 64 96 128 192 256"
+DEFAULT_ECHO_CONNS = "50 200 600 1000 1500 2000 3000"
+
 
 DEFAULT_PROFILE_ROWS = [
     {
@@ -34,7 +38,7 @@ DEFAULT_PROFILE_ROWS = [
         "rate_r": "0",
         "rate_u": "30",
         "size": "1000",
-        "conns_schedule": "50 75 100 125 150 200",
+        "conns_schedule": DEFAULT_MEDIA_CONNS,
         "client_procs": "1",
         "notes": "near-MTU media packets, full-room unreliable fanout",
     },
@@ -45,7 +49,7 @@ DEFAULT_PROFILE_ROWS = [
         "rate_r": "1",
         "rate_u": "20",
         "size": "128",
-        "conns_schedule": "64 96 128 192 256",
+        "conns_schedule": DEFAULT_GAME_CONNS,
         "client_procs": "1",
         "notes": "20Hz state/input fanout plus 1Hz reliable gameplay events",
     },
@@ -56,7 +60,7 @@ DEFAULT_PROFILE_ROWS = [
         "rate_r": "50",
         "rate_u": "50",
         "size": "64",
-        "conns_schedule": "200 600 1000 1500 2000 3000",
+        "conns_schedule": DEFAULT_ECHO_CONNS,
         "client_procs": "4",
         "notes": "mixed 50/50 echo baseline used for implementation validation",
     },
