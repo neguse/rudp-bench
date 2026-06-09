@@ -133,14 +133,14 @@ CAPABILITIES: Dict[str, Dict[str, object]] = {
         },
     },
     "gns": {
-        "encryption": "on",
+        "encryption": "off",
         "max_conns": None,
         "modes": {
-            "r": {"max_payload": 65536, "flush_policy": "no_nagle", "transport": "gns_message"},
-            "u": {"max_payload": 65536, "flush_policy": "no_nagle", "transport": "gns_message"},
+            "r": {"max_payload": 65536, "flush_policy": "nagle", "transport": "gns_message"},
+            "u": {"max_payload": 65536, "flush_policy": "nagle", "transport": "gns_message"},
         },
     },
-    "gns_nagle": {
+    "gns_encrypted": {
         "encryption": "on",
         "max_conns": None,
         "modes": {
@@ -148,16 +148,24 @@ CAPABILITIES: Dict[str, Dict[str, object]] = {
             "u": {"max_payload": 65536, "flush_policy": "nagle", "transport": "gns_message"},
         },
     },
-    "gns_split_no_nagle": {
-        "encryption": "on",
+    "gns_no_nagle": {
+        "encryption": "off",
         "max_conns": None,
         "modes": {
-            "r": {"max_payload": 65536, "flush_policy": "no_nagle_split_lanes", "transport": "gns_message"},
-            "u": {"max_payload": 65536, "flush_policy": "no_nagle_split_lanes", "transport": "gns_message"},
+            "r": {"max_payload": 65536, "flush_policy": "no_nagle", "transport": "gns_message"},
+            "u": {"max_payload": 65536, "flush_policy": "no_nagle", "transport": "gns_message"},
         },
     },
-    "gns_split_nagle": {
-        "encryption": "on",
+    "gns_smallbuf": {
+        "encryption": "off",
+        "max_conns": None,
+        "modes": {
+            "r": {"max_payload": 65536, "flush_policy": "nagle", "transport": "gns_message"},
+            "u": {"max_payload": 65536, "flush_policy": "nagle", "transport": "gns_message"},
+        },
+    },
+    "gns_split_lanes": {
+        "encryption": "off",
         "max_conns": None,
         "modes": {
             "r": {"max_payload": 65536, "flush_policy": "nagle_split_lanes", "transport": "gns_message"},

@@ -15,14 +15,19 @@ static GnsRegistrar registrar;
 
 using namespace rudp_bench;
 
-// GNS はデフォルトで暗号化 ON であることを検証する
+// ベンチ既定の "gns" は他アダプタと条件を揃えるため暗号化 OFF。
+// 暗号化込みの計測は "gns_encrypted" バリアントで行う。
 TEST(GnsSmoke, Capability) {
   auto a = create_adapter("gns");
   ASSERT_NE(a, nullptr);
   EXPECT_TRUE(a->supports(true));
   EXPECT_TRUE(a->supports(false));
-  EXPECT_TRUE(a->encryption_on());
+  EXPECT_FALSE(a->encryption_on());
   EXPECT_STREQ(a->name(), "gns");
+
+  auto enc = create_adapter("gns_encrypted");
+  ASSERT_NE(enc, nullptr);
+  EXPECT_TRUE(enc->encryption_on());
 }
 
 TEST(GnsSmoke, ReliableEcho) {

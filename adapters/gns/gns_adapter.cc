@@ -5,6 +5,15 @@
 #include <steam/steamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
 
+// Internal GNS global (we link the static lib in-tree): UDP socket
+// SO_SNDBUF/SO_RCVBUF, hardcoded to 256KB upstream with no public config.
+// It also caps the SNP send loop at (size >> 11) packets per service-thread
+// wakeup. 256KB is ~3.4ms of headroom at media_relay@50conns (75MB/s) and
+// only 128 packets/think — both far too small under fanout load.
+namespace SteamNetworkingSocketsLib {
+extern int g_cbUDPSocketBufferSize;
+}
+
 #include <arpa/inet.h>
 #include <cstdlib>
 #include <cstring>
@@ -20,9 +29,31 @@ namespace {
 constexpr int GNS_RECV_BATCH = 256;
 
 struct GnsOptions {
-  bool use_nagle = false;
+  // Nagle ON by default: the canonical broadcast profiles are syscall-bound
+  // (one sendmsg per packet, 64% of server CPU in the gprofng profile), and
+  // 5ms coalescing turns ~10 small fanout messages into one MTU packet
+  // (game_server c64: 151% -> 87% server CPU, media c50: 0.59 -> 0.93).
+  bool use_nagle = true;
   bool split_lanes = false;
+  bool encrypted = false;
+  // Deviates from the L17 256KB convention: GNS sends ALL conns through one
+  // socket on a single service thread, so at media_relay@50 (33k pkt/s out)
+  // a 256KB SO_SNDBUF holds ~128 in-flight skbs vs a ~1100-packet BDP through
+  // netem's 25ms delay — ENOBUFS drops as a buffer artifact, not protocol
+  // loss. 4MB (= host rmem_max/wmem_max) clears it: c50 0.9389 -> 0.9584,
+  // no regression on any other profile (2026-06-10 A/B, N=2).
+  int socket_buffer_bytes = 4 * 1024 * 1024;
 };
+
+// GNS rate-limits ALL traffic (unreliable included) with a token bucket whose
+// default ceiling is SendRateMax=256KB/s — that cap, not the wire, was the
+// media_relay break at 50 conns (50 senders * 30Hz * 1000B = 1.5MB/s per conn,
+// observed delivery 0.153 ~= 256KB/1.5MB). Raise the bucket to its config max
+// and size the queues for fanout bursts instead of the 512KB default.
+constexpr int32_t GNS_SEND_RATE_BPS = 0x10000000;       // 256MB/s (config max)
+constexpr int32_t GNS_SEND_BUFFER_BYTES = 32 * 1024 * 1024;
+constexpr int32_t GNS_RECV_BUFFER_BYTES = 32 * 1024 * 1024;
+constexpr int32_t GNS_RECV_BUFFER_MESSAGES = 1 << 20;
 
 // Forward declaration — defined after GnsAdapter.
 static void gns_status_callback(SteamNetConnectionStatusChangedCallback_t* info);
@@ -37,7 +68,11 @@ struct GnsGlobal {
 };
 static GnsGlobal g_gns;
 
-void ensure_gns_init() {
+void ensure_gns_init(int socket_buffer_bytes) {
+  // Internal global, read when each UDP socket is created (after the adapter
+  // constructor). Also feeds SNP's packets-per-think cap (size >> 11). One
+  // bench process hosts one adapter instance, so last-write-wins is fine.
+  SteamNetworkingSocketsLib::g_cbUDPSocketBufferSize = socket_buffer_bytes;
   static std::once_flag flag;
   std::call_once(flag, []() {
     SteamNetworkingErrMsg err;
@@ -54,7 +89,7 @@ void ensure_gns_init() {
 class GnsAdapter : public rudp_bench::Adapter {
  public:
   explicit GnsAdapter(GnsOptions options = {}) : options_(options) {
-    ensure_gns_init();
+    ensure_gns_init(options_.socket_buffer_bytes);
     iface_ = SteamNetworkingSockets();
     // One poll group for ALL connections so receive draining is a few
     // ReceiveMessagesOnPollGroup calls per tick instead of one
@@ -72,11 +107,9 @@ class GnsAdapter : public rudp_bench::Adapter {
     addr.Clear();
     addr.m_port = port;
 
-    SteamNetworkingConfigValue_t opt;
-    opt.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
-               reinterpret_cast<void*>(gns_status_callback));
-
-    listen_sock_ = iface_->CreateListenSocketIP(addr, 1, &opt);
+    auto opts = connection_opts();
+    listen_sock_ = iface_->CreateListenSocketIP(
+        addr, static_cast<int>(opts.size()), opts.data());
     if (listen_sock_ == k_HSteamListenSocket_Invalid) std::abort();
 
     std::lock_guard<std::mutex> glock(g_gns.mtx);
@@ -90,11 +123,9 @@ class GnsAdapter : public rudp_bench::Adapter {
     inet_pton(AF_INET, host, &in);
     addr.SetIPv4(ntohl(in.s_addr), port);
 
-    SteamNetworkingConfigValue_t opt;
-    opt.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
-               reinterpret_cast<void*>(gns_status_callback));
-
-    HSteamNetConnection hConn = iface_->ConnectByIPAddress(addr, 1, &opt);
+    auto opts = connection_opts();
+    HSteamNetConnection hConn = iface_->ConnectByIPAddress(
+        addr, static_cast<int>(opts.size()), opts.data());
     if (hConn == k_HSteamNetConnection_Invalid) std::abort();
 
     // クライアント側: ConnectByIPAddress 直後に登録することで
@@ -147,6 +178,56 @@ class GnsAdapter : public rudp_bench::Adapter {
         hConn, data, static_cast<uint32>(len), flags, nullptr);
     // k_EResultIgnored: unreliable dropped due to NoDelay — not an error
     return (r == k_EResultOK || r == k_EResultIgnored) ? 0 : -1;
+  }
+
+  // Broadcast fanout: one SendMessages call instead of count individual
+  // sends. GNS groups the batch per connection, so the timestamp fetch,
+  // handle lookup and the NoNagle "think" run once per conn per call instead
+  // of once per message — the per-send overhead is the server bottleneck at
+  // high fanout (e.g. game_server@96 ≈ 190k sends/s).
+  size_t send_many(const uint32_t* conn_ids, size_t count, const void* data,
+                   size_t len, bool reliable) override {
+    if (count == 0) return 0;
+    int flags = reliable ? k_nSteamNetworkingSend_Reliable
+                         : k_nSteamNetworkingSend_Unreliable;
+    if (!options_.use_nagle) flags |= k_nSteamNetworkingSend_NoNagle;
+
+    scratch_conns_.clear();
+    scratch_conns_.reserve(count);
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      for (size_t i = 0; i < count; ++i) {
+        auto it = id_to_conn_.find(conn_ids[i]);
+        scratch_conns_.push_back(it == id_to_conn_.end()
+                                     ? k_HSteamNetConnection_Invalid
+                                     : it->second);
+      }
+    }
+
+    scratch_msgs_.clear();
+    scratch_msgs_.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      if (scratch_conns_[i] == k_HSteamNetConnection_Invalid) continue;
+      SteamNetworkingMessage_t* msg =
+          SteamNetworkingUtils()->AllocateMessage(static_cast<int>(len));
+      if (!msg) break;
+      std::memcpy(msg->m_pData, data, len);
+      msg->m_cbSize = static_cast<int>(len);
+      msg->m_conn = scratch_conns_[i];
+      msg->m_nFlags = flags;
+      if (options_.split_lanes) msg->m_idxLane = reliable ? 0 : 1;
+      scratch_msgs_.push_back(msg);
+    }
+    if (scratch_msgs_.empty()) return 0;
+
+    scratch_results_.assign(scratch_msgs_.size(), 0);
+    iface_->SendMessages(static_cast<int>(scratch_msgs_.size()),
+                         scratch_msgs_.data(), scratch_results_.data());
+    size_t accepted = 0;
+    for (int64 r : scratch_results_) {
+      if (r >= 0 || r == -k_EResultIgnored) ++accepted;
+    }
+    return accepted;
   }
 
   int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
@@ -218,7 +299,7 @@ class GnsAdapter : public rudp_bench::Adapter {
     }
     return options_.use_nagle ? "nagle" : "no_nagle";
   }
-  bool encryption_on() const override { return true; }
+  bool encryption_on() const override { return options_.encrypted; }
 
   // gns_status_callback から呼ばれる (g_gns.mtx は既に解放済み)
   void on_status_changed(SteamNetConnectionStatusChangedCallback_t* info) {
@@ -287,6 +368,34 @@ class GnsAdapter : public rudp_bench::Adapter {
   }
 
  private:
+  // Shared config for listen sockets and outbound connections. Unencrypted=3
+  // ("required") must be set on BOTH peers; every harness process goes through
+  // this same path, so the handshake agrees.
+  std::vector<SteamNetworkingConfigValue_t> connection_opts() {
+    std::vector<SteamNetworkingConfigValue_t> opts;
+    opts.emplace_back();
+    opts.back().SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
+                       reinterpret_cast<void*>(gns_status_callback));
+    opts.emplace_back();
+    opts.back().SetInt32(k_ESteamNetworkingConfig_SendRateMin, GNS_SEND_RATE_BPS);
+    opts.emplace_back();
+    opts.back().SetInt32(k_ESteamNetworkingConfig_SendRateMax, GNS_SEND_RATE_BPS);
+    opts.emplace_back();
+    opts.back().SetInt32(k_ESteamNetworkingConfig_SendBufferSize,
+                         GNS_SEND_BUFFER_BYTES);
+    opts.emplace_back();
+    opts.back().SetInt32(k_ESteamNetworkingConfig_RecvBufferSize,
+                         GNS_RECV_BUFFER_BYTES);
+    opts.emplace_back();
+    opts.back().SetInt32(k_ESteamNetworkingConfig_RecvBufferMessages,
+                         GNS_RECV_BUFFER_MESSAGES);
+    if (!options_.encrypted) {
+      opts.emplace_back();
+      opts.back().SetInt32(k_ESteamNetworkingConfig_Unencrypted, 3);
+    }
+    return opts;
+  }
+
   ISteamNetworkingSockets* iface_ = nullptr;
   HSteamListenSocket listen_sock_ = k_HSteamListenSocket_Invalid;
   HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
@@ -299,6 +408,11 @@ class GnsAdapter : public rudp_bench::Adapter {
   uint32_t next_id_ = 1;
 
   rudp_bench::ReusableInboundQueue inbox_;
+
+  // send_many scratch buffers (harness calls send_many from one thread).
+  std::vector<HSteamNetConnection> scratch_conns_;
+  std::vector<SteamNetworkingMessage_t*> scratch_msgs_;
+  std::vector<int64> scratch_results_;
 };
 
 // アダプタインスタンスへのルーティングを行うグローバルコールバック
@@ -336,14 +450,25 @@ static void gns_status_callback(SteamNetConnectionStatusChangedCallback_t* info)
 namespace rudp_bench {
 void register_gns_adapter() {
   register_adapter("gns", []() { return std::make_unique<GnsAdapter>(); });
-  register_adapter("gns_nagle", []() {
-    return std::make_unique<GnsAdapter>(GnsOptions{true, false});
+  register_adapter("gns_encrypted", []() {
+    GnsOptions o;
+    o.encrypted = true;
+    return std::make_unique<GnsAdapter>(o);
   });
-  register_adapter("gns_split_no_nagle", []() {
-    return std::make_unique<GnsAdapter>(GnsOptions{false, true});
+  register_adapter("gns_no_nagle", []() {
+    GnsOptions o;
+    o.use_nagle = false;
+    return std::make_unique<GnsAdapter>(o);
   });
-  register_adapter("gns_split_nagle", []() {
-    return std::make_unique<GnsAdapter>(GnsOptions{true, true});
+  register_adapter("gns_smallbuf", []() {
+    GnsOptions o;
+    o.socket_buffer_bytes = 256 * 1024;
+    return std::make_unique<GnsAdapter>(o);
+  });
+  register_adapter("gns_split_lanes", []() {
+    GnsOptions o;
+    o.split_lanes = true;
+    return std::make_unique<GnsAdapter>(o);
   });
 }
 }  // namespace rudp_bench
