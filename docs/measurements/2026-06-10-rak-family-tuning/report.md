@@ -98,4 +98,4 @@ close() では CloseConnection + 数回の RunUpdateCycle で切断通知だけ 
 
 - 境界点 N=3: `results/rak_boundary_n3/`、ピンポイント: `results/rak_check_*` (`results/` は gitignore)
 - クラッシュ解析 core: `coredumpctl` (RecvFromLoopInt → 解放済み eventHandler への仮想呼び出し)
-- 全 lib canonical 再計測は別途実施し `docs/measurements/current.md` を更新する。
+- 全 lib の canonical 再計測 (公開済み): [`../2026-06-10-canonical-022240Z/report.md`](../2026-06-10-canonical-022240Z/report.md) — `current.md` もこの run を指す。他 lib の break 位置に回帰なし。
