@@ -56,6 +56,10 @@ struct AsyncTxPacket {
 
 struct SockCtx {
   int fd = -1;
+  // Clock cache refreshed once per adapter entry point. rudp_send reads the
+  // socket clock per call, which dominates CPU during fanout (one read per
+  // recipient) if it hits the real clock every time.
+  uint64_t cached_now_ns = 0;
   bool async_tx = false;
   bool tx_stop = false;
   std::mutex tx_mu;
@@ -408,11 +412,17 @@ int recv_batch_cb(void* user, rudp_in_packet* packets, size_t max_count) {
   return static_cast<int>(delivered);
 }
 
-uint64_t now_ns_cb(void*) {
+uint64_t real_now_ns() {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           clock_type::now().time_since_epoch())
           .count());
+}
+
+uint64_t now_ns_cb(void* user) {
+  auto* ctx = static_cast<SockCtx*>(user);
+  if (ctx && ctx->cached_now_ns != 0) return ctx->cached_now_ns;
+  return real_now_ns();
 }
 
 class CoopRudpAdapter : public rudp_bench::Adapter {
@@ -474,6 +484,10 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     return ep_ && find_conn(conn_id) != nullptr;
   }
 
+  // send()/send_many() reuse the timestamp cached at poll() entry. The
+  // harness polls every tick, so staleness is bounded by one tick; message
+  // enqueue_ns only feeds queue-delay stats and optional deadlines (unused
+  // here), while RTO timing uses flush-time clocks.
   int send(uint32_t conn_id, const void* data, size_t len, bool reliable) override {
     if (!ep_) return -1;
     rudp_conn* c = find_conn(conn_id);
@@ -532,7 +546,8 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
 
   void poll() override {
     if (!ep_) return;
-    uint64_t now = now_ns_cb(nullptr);
+    uint64_t now = real_now_ns();
+    ctx_.cached_now_ns = now;
     rudp_endpoint_flush(ep_, now);
     rudp_endpoint_poll(ep_, now);
   }
@@ -693,9 +708,22 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     cfg.max_messages =
         std::max<uint32_t>(4096, cfg.max_conns * MESSAGES_PER_CONNECTION);
     bool broad_recv = cfg.max_conns <= 512;
+    if (is_server_ && broad_recv) {
+      // Broadcast rooms fan every inbound message out to all peers, and the
+      // 1Hz reliable events arrive near-synchronized across clients, so up to
+      // conns^2 reliable messages stay allocated for ~RTT until acked. Size
+      // the pool for one full fanout burst or rudp_send rejects ~half of it.
+      // 1.5x headroom: unreliable fanout keeps allocating while the burst
+      // drains, so sizing exactly one burst still rejects the tail of it.
+      uint64_t fanout_burst = (uint64_t)cfg.max_conns * cfg.max_conns * 3u / 2u +
+                              (uint64_t)cfg.max_conns * MESSAGES_PER_CONNECTION;
+      cfg.max_messages = std::max<uint32_t>(
+          cfg.max_messages,
+          (uint32_t)std::min<uint64_t>(fanout_burst, 196608));
+    }
     cfg.max_recv_events =
         broad_recv
-            ? std::max<uint32_t>(8192, cfg.max_conns * BROAD_RECV_EVENTS_PER_CONNECTION)
+            ? std::max<uint32_t>(32768, cfg.max_conns * BROAD_RECV_EVENTS_PER_CONNECTION)
             : std::max<uint32_t>(8192, cfg.max_conns * NARROW_RECV_EVENTS_PER_CONNECTION);
     cfg.max_ordered_holds = 1024;
     cfg.sent_packet_count = 512;

@@ -76,6 +76,7 @@ typedef struct rudp_msg {
   uint16_t frag_count;
   uint32_t msg_id;
   uint32_t replace_key;
+  uint32_t owner_conn_p1; /* conn index + 1; 0 = unowned */
   uint32_t lost_ack_seqs[RUDP_MAX_LOST_ACK_SEQS];
   uint64_t enqueue_ns;
   uint64_t deadline_ns;
@@ -196,6 +197,9 @@ struct rudp_conn {
   uint32_t sent_seq_head;
   uint32_t sent_seq_tail;
   uint32_t sent_seq_count;
+  /* live messages owned by this conn with a recorded lost packet seq; gates
+     the late-ack rescue scans in release_late_acked_messages */
+  uint32_t late_ack_msg_count;
 };
 
 struct rudp_endpoint {
@@ -224,6 +228,7 @@ struct rudp_endpoint {
   uint32_t* sent_seq_queue;
   rudp_ordered_hold* holds;
   uint8_t* hold_data;
+  uint32_t ordered_hold_count; /* occupied holds; gates drain_ordered scans */
 
   rudp_recv_event_i* recv_events;
   uint8_t* recv_event_data;
@@ -363,6 +368,9 @@ static int ring_push_priority(rudp_ring* r, rudp_endpoint* ep, uint32_t v) {
   uint8_t priority = (v < ep->cfg.max_messages && ep->msgs[v].used)
                          ? ep->msgs[v].priority
                          : 0;
+  /* priority 0 can never beat any queued element, so the rotate below would
+     always fall through to a tail push; skip the O(n) scan. */
+  if (priority == 0) return ring_push(r, v);
   uint32_t n = r->count;
   int inserted = 0;
   for (uint32_t i = 0; i < n; ++i) {
@@ -564,6 +572,11 @@ static void free_msg(rudp_endpoint* ep, uint32_t idx) {
   if (idx >= ep->cfg.max_messages) return;
   rudp_msg* m = &ep->msgs[idx];
   if (!m->used || ep->free_msg_count >= ep->cfg.max_messages) return;
+  if (m->lost_ack_seq_count > 0 && m->owner_conn_p1 > 0 &&
+      m->owner_conn_p1 <= ep->cfg.max_conns) {
+    rudp_conn* owner = &ep->conns[m->owner_conn_p1 - 1u];
+    if (owner->late_ack_msg_count > 0) --owner->late_ack_msg_count;
+  }
   memset(m, 0, sizeof(*m));
   m->data = ep->msg_data + ((size_t)idx * ep->frame_payload);
   ep->free_msgs[ep->free_msg_count++] = idx;
@@ -786,6 +799,10 @@ static void complete_late_acked_msg(rudp_conn* c, uint32_t mi,
 
 static void release_late_acked_messages(rudp_conn* c, uint32_t ack,
                                         uint64_t bits) {
+  /* Only messages that lost a packet can be late-acked; without any, both
+     rescue scans below are guaranteed no-ops. This runs per received ACK,
+     so the fast path matters. */
+  if (c->late_ack_msg_count == 0) return;
   rudp_endpoint* ep = c->ep;
   for (uint32_t flow_id = 0; flow_id < ep->cfg.max_flows; ++flow_id) {
     rudp_flow_state* f = &c->flows[flow_id];
@@ -1359,6 +1376,7 @@ rudp_send_result rudp_send(rudp_conn* conn, const void* data, size_t len,
     }
     allocated[frag] = mi;
     rudp_msg* m = &conn->ep->msgs[mi];
+    m->owner_conn_p1 = conn->index + 1u;
     m->reliability = opts->reliability;
     m->flow_id = opts->flow_id;
     m->channel_id = opts->channel_id;
@@ -1510,6 +1528,7 @@ static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp) {
     if (mi >= c->ep->cfg.max_messages) continue;
     rudp_msg* m = &c->ep->msgs[mi];
     if (!m->used) continue;
+    if (m->lost_ack_seq_count == 0) ++c->late_ack_msg_count;
     note_msg_lost_seq(m, sp->seq);
     if (m->inflight_refs > 0) {
       --m->inflight_refs;
@@ -1853,12 +1872,14 @@ static int hold_ordered(rudp_conn* c, uint16_t flow_id, uint16_t channel_id,
                         uint16_t len) {
   rudp_endpoint* ep = c->ep;
   if (len > ep->max_payload) return 0;
-  for (uint32_t i = 0; i < ep->cfg.max_ordered_holds; ++i) {
-    rudp_ordered_hold* h = &ep->holds[i];
-    if (h->used && h->conn_index == c->index &&
-        h->channel_id == channel_id &&
-        h->channel_seq == channel_seq) {
-      return h->msg_id == msg_id;
+  if (ep->ordered_hold_count > 0) {
+    for (uint32_t i = 0; i < ep->cfg.max_ordered_holds; ++i) {
+      rudp_ordered_hold* h = &ep->holds[i];
+      if (h->used && h->conn_index == c->index &&
+          h->channel_id == channel_id &&
+          h->channel_seq == channel_seq) {
+        return h->msg_id == msg_id;
+      }
     }
   }
   for (uint32_t i = 0; i < ep->cfg.max_ordered_holds; ++i) {
@@ -1874,6 +1895,7 @@ static int hold_ordered(rudp_conn* c, uint16_t flow_id, uint16_t channel_id,
     h->len = len;
     h->data = ep->hold_data + ((size_t)i * ep->max_payload);
     if (len > 0) memcpy(h->data, data, len);
+    ++ep->ordered_hold_count;
     return 1;
   }
   return 0;
@@ -1881,6 +1903,9 @@ static int hold_ordered(rudp_conn* c, uint16_t flow_id, uint16_t channel_id,
 
 static void drain_ordered(rudp_conn* c, uint16_t channel_id) {
   rudp_endpoint* ep = c->ep;
+  /* Runs per delivered message; with no held ordered data the scan below is
+     a guaranteed miss over max_ordered_holds slots. */
+  if (ep->ordered_hold_count == 0) return;
   rudp_channel_state* ch = channel_for(c, channel_id);
   if (!ch) return;
   int progressed = 1;
@@ -1897,6 +1922,7 @@ static void drain_ordered(rudp_conn* c, uint16_t channel_id) {
         return;
       }
       h->used = 0;
+      if (ep->ordered_hold_count > 0) --ep->ordered_hold_count;
       ++ch->expected_ordered;
       progressed = 1;
       break;
