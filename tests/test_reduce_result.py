@@ -376,7 +376,7 @@ def main() -> int:
             "unsupported_conns",
             library="slikenet",
             reliable="u",
-            conns="2",
+            conns="4097",
             server_raw=False,
             client_raw=False,
         )
@@ -549,7 +549,7 @@ def main() -> int:
         assert scenario_rows["unsupported_payload"]["flush_policy"] == "poll_send_packets"
         assert scenario_rows["unsupported_payload"]["max_payload_bytes"] == "4096"
         assert scenario_rows["unsupported_payload"]["max_connections"] == "64"
-        assert scenario_rows["unsupported_conns"]["max_connections"] == "1"
+        assert scenario_rows["unsupported_conns"]["max_connections"] == "4096"
         assert scenario_rows["enet_conns_4096_unsupported"]["max_connections"] == "4095"
         assert scenario_rows["pinned"]["server_cpu_pin"] == "0"
         assert scenario_rows["pinned"]["client_cpu_pin"] == "1"

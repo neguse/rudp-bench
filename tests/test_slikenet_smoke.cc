@@ -76,7 +76,8 @@ TEST(SLikeNetSmoke, Capability) {
   ASSERT_NE(a, nullptr);
   EXPECT_TRUE(a->supports(true));
   EXPECT_TRUE(a->supports(false));
-  EXPECT_EQ(a->max_connections(), 1u);
+  // 共通 rak_family adapter (per-connection RakPeer) になり多重接続に対応
+  EXPECT_EQ(a->max_connections(), 4096u);
   EXPECT_FALSE(a->encryption_on());
   EXPECT_STREQ(a->name(), "slikenet");
 }

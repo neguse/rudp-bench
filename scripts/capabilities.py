@@ -79,7 +79,7 @@ CAPABILITIES: Dict[str, Dict[str, object]] = {
     },
     "slikenet": {
         "encryption": "off",
-        "max_conns": 1,
+        "max_conns": 4096,
         "modes": {
             "r": {
                 "max_payload": 65536,
