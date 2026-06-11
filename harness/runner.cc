@@ -184,11 +184,20 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   };
   auto start = std::chrono::steady_clock::now();
   auto server_tail_ms = std::max<uint32_t>(2000, cfg.tail_ms + 500);
+  // The client spends ~ramp_up_ms connecting before its warmup+duration
+  // window even starts, so the server lifetime must cover ramp too.
+  // Without this the server exits mid-run and the tail of the client's send
+  // window is "lost" — at ramp=10s/duration=20s that reads as delivery≈0.6,
+  // an artifact that was misattributed to the library under test.
   auto deadline = start + std::chrono::seconds(cfg.duration_s + cfg.warmup_s) +
+                  std::chrono::milliseconds(cfg.ramp_up_ms) +
                   std::chrono::milliseconds(server_tail_ms);
   // M2: exclude warmup from the server CPU window too. The server has no
   // explicit warmup gate (it just reacts), so re-baseline once warmup elapses.
-  auto measure_begin = start + std::chrono::seconds(cfg.warmup_s);
+  // Shift by ramp_up_ms as well: the client is still connecting during ramp,
+  // so including it would dilute the server CPU average with idle time.
+  auto measure_begin = start + std::chrono::seconds(cfg.warmup_s) +
+                       std::chrono::milliseconds(cfg.ramp_up_ms);
   bool measure_started = (cfg.warmup_s == 0);
   auto next_rss_sample = start + kRssSampleInterval;
   uint64_t server_received = 0;
@@ -325,6 +334,22 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
         a.poll();
         std::this_thread::sleep_for(std::chrono::microseconds(100));
       }
+    }
+  }
+  // Always consume the FULL ramp window, even after the last connect. The
+  // canonical harness splits one room across several client processes, each
+  // ramping only its own conns share: without this tail wait a 1-conn process
+  // skips the ramp entirely while a 2-conn sibling burns ramp/2, so the
+  // processes' measurement windows end up offset by up to ramp_up_ms. In
+  // broadcast mode that offset reads as a delivery deficit (senders missing
+  // from the edges of each receiver's window) and the fanout to already-exited
+  // receivers wedges in the transport's send queue. Aligning every process to
+  // the same connect-phase length removes the artifact.
+  if (cfg.ramp_up_ms > 0) {
+    auto ramp_end = t_connect_begin + std::chrono::milliseconds(cfg.ramp_up_ms);
+    while (clock::now() < ramp_end) {
+      a.poll();
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
   }
   for (auto id : ids) {

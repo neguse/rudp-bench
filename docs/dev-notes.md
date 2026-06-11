@@ -79,6 +79,45 @@ per-channel histogram 採用後の実測(2026-05-27、netem 25ms+5ms+5% loss、c
 - loss 条件で reliable retransmit を見る場合、active window 後の既定 tail 500ms だけでは切り捨てが起きうる。`--tail-ms` を伸ばし、`scenarios.csv` の `tail_ms` と一緒に結果を読む。
 - server の per-loop recv drain に人工上限があると、1000conn mixed のような burst 条件で forward delivery を過小評価しうる。現 runner は既定で上限なし、切り分け時だけ `RUDP_SERVER_RECV_DRAIN_LIMIT=<n>` を使う。`server_recv_drained_p99` / `server_recv_drained_max` が大きい行は server drain が ranking に影響している可能性を疑う。
 
+### 1.7 ramp_up_ms は server 寿命に入っていなかった(msquic canonical 崩壊の正体、2026-06-12)
+
+**事例:** canonical で msquic だけ全 profile `last_ok_conns=1`(50 conns で delivery 0.62、CPU は 11〜37% と余裕)。調査の結果、ライブラリ起因ではなく **harness のライフサイクルバグ**だった:
+
+- `run_phase1_quick.sh` は msquic にだけ `RAMP_UP_MS=10000` を与える(接続を 10 秒に分散)
+- client は「全接続確立 → warmup 2s → 計測 duration 秒」と動くので、送信窓が ~10 秒後ろにずれる
+- 一方 server(`runner.cc`)は**自分の起動時刻**から `warmup + duration + max(2s, tail+500ms)` で退場
+- → server が client の送信窓の後半 ~8 秒を残して exit。その間の送信は「相手不在」で全損
+- delivery ≈ (duration − ramp + 2s) / duration。duration=20s で 0.6、40s で 0.8 と完全に一致
+- RTT p95 は正常(届いた分は普通に届く)、conn_disc=0(msquic server は no-op close + `_Exit(0)` なので切断通知も出ない)が特徴
+
+過去メモの「enet は ramp=10s で 38% drop(busy-poll で内部 queue 溢れ)」も dr 0.62 — **同じアーティファクトの誤診**だった可能性が高い。
+
+**対策(実施済み):**
+- `runner.cc`: server の deadline と CPU 計測窓 `measure_begin` に `cfg.ramp_up_ms` を加算(server にも `--ramp-up-ms` は元々渡っていた)
+- `run_phase1_quick.sh`: プロセス kill 用 `TIMEOUT_S` にも ramp 秒を加算
+- 教訓: **「delivery が duration 非依存の一定割合で欠ける」を見たら、まず両端のライフサイクル(窓ズレ)を疑う**。ライブラリのチューニング(pacing 無効化等)に走る前に、client/server の active window が重なっているか `connect_ms` と突き合わせる。
+
+同調査で芋づる式に出た harness バグ 2 件(いずれも修正済み):
+
+1. **systemd-run unit の `LimitNOFILE` 既定 1024**: 対話 shell は 524288 なのに `--isolate=systemd` 経路だけ fd 上限 1024。msquic は conn ごとに UDP socket を作るため c1000 でハンドシェイクが永久ストール → `exit=client_crash`。`run_phase1_quick.sh` の systemd-run に `-p LimitNOFILE=524288` を追加。**「手動再現では通るが script 経由で落ちる」ときは ulimit/cgroup の unit 既定値差を疑う。**
+2. **multi-proc client の ramp 窓ズレ**: runner の ramp_interval は「自プロセスの conns 数」で割るため、1-conn proc は ramp をスキップ(即接続)、2-conn proc は ramp/2 だけ消費 → 4 proc の計測窓が最大 ~ramp_up_ms ずれる。broadcast の delivery_ratio は全送信者が常時送っている前提なので、ズレが構造的欠損として出る(c5 で p1-3=0.910 / p0=0.850、= sender 不在時間 × conn 比から算出した理論値と完全一致)。退場済み client への fanout が transport の send queue に死骸として残るのも同根(msquic で conn あたり ~270 件の未解決 send として観測される。RUDP_MSQUIC_DGRAM_DEBUG=1 で stuck の年齢/conn/state 分布を出せる)。`runner.cc` で **ramp_up_ms > 0 のとき最後の接続後も ramp 窓全体を消費してから計測に進む**よう修正し、全 proc の窓を揃えた。
+
+### 1.8 修正後の msquic 実測(2026-06-12、canonical 同等条件の単発 N=1)
+
+3 件の harness 修正(server 寿命 + LimitNOFILE + ramp 窓揃え)と adapter の BBR 化後、netem 25ms+5ms+1% / systemd isolation / client-procs=4 で:
+
+| profile | 修正前 (published) | 修正後 (N=1) |
+|---|---|---|
+| reliable_echo | last_ok=1, c50 で 0.63 | **c3000 で 0.9999**(apex 同等) |
+| echo (mixed) | last_ok=1 | c1500 で 0.990(c2000+ 未測) |
+| game_server | last_ok=1, c5 で 0.85 | **c128 で 0.981**、c192 で 0.30(server CPU 限界) |
+| media_relay | last_ok=1 | **c5 で 0.978**、c50 で 0.25(server CPU 197% 飽和) |
+
+adapter 変更: PacingEnabled=FALSE(アーティファクト誤診時代の暫定)を撤去し、CongestionControlAlgorithm=BBR を設定(vendored core は preview 常時有効なので使える)。BBR は netem 1% ランダムロスで Cubic が cwnd を絞るのを回避し、media_relay c25 で 0.46→0.88 など datagram 系を改善。media_relay の高 conn は per-datagram crypto の server CPU 飽和が本物の限界(gns 117% vs msquic ~197% @c50)。
+
+canonical full re-run + publish は未実施。次回 canonical 実行時にこの修正が全 lib に乗る(他 lib は ramp=0 なので実質 msquic のみ変化、enet の「ramp で劣化」記録も誤診として解消)。
+詳細データ: `results/msquic_fix_sweep_*`, `results/msquic_rampfix_*`, `results/msquic_gs_high_*`。
+
 ---
 
 ## 2. 再現性ベンチ環境・手順(ARK/Minecraft 同居機)

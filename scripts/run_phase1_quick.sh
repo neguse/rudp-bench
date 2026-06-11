@@ -33,9 +33,14 @@ CLIENT_PROCS=1
 DURATION=20
 MODE=echo
 # Per-lib ramp: msquic alone needs spread-out connects (its workers race when
-# all 200 conns handshake at once). Other libs degrade when ramp_up_ms > 0
-# because they busy-poll the adapter for the ramp duration, which floods
-# internal queues (enet observed dropping 38%+ at ramp=10s, dr 0.62 vs 0.98).
+# all 200 conns handshake at once).
+# NOTE (2026-06-12): the earlier observation that "other libs degrade when
+# ramp_up_ms > 0" (enet dr 0.62 at ramp=10s) was a harness artifact, not a
+# library property: the server lifetime did not account for ramp_up_ms, so it
+# exited mid-run and the tail of the client's send window was lost
+# (dr ≈ (duration - ramp + 2s) / duration). Fixed in harness/runner.cc by
+# extending the server deadline by ramp_up_ms. The same artifact is what made
+# msquic's canonical capacity collapse to conns=1 across all profiles.
 RAMP_UP_MS_DEFAULT=0
 RAMP_UP_MS_MSQUIC=10000
 
@@ -205,6 +210,7 @@ run_timeout() {
       -p AllowedCPUs="$cpu" -p CPUWeight=10000 \
       -p User="$USER" \
       -p LimitCORE=infinity \
+      -p LimitNOFILE=524288 \
       -p RuntimeMaxSec="${timeout_s}s" \
       "${SYSTEMD_ENV_ARGS[@]}" \
       --quiet --wait --pipe --collect \
@@ -242,7 +248,8 @@ for lib in ${LIBS//,/ }; do
   if [ "$lib" = "litenetlib" ]; then
     WARMUP_ARG="$LITENETLIB_WARMUP"
     TAIL_TIMEOUT_S=$(((TAIL_MS + 999) / 1000))
-    TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + TAIL_TIMEOUT_S + 10))
+    RAMP_TIMEOUT_S=$(((RAMP_UP_MS + 999) / 1000))
+    TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + RAMP_TIMEOUT_S + TAIL_TIMEOUT_S + 10))
     if [ ! -x "$LITENETLIB_BIN" ]; then
       : >"$S_STDOUT"
       : >"$C_STDOUT"
@@ -315,7 +322,8 @@ for lib in ${LIBS//,/ }; do
     fi
   else
     TAIL_TIMEOUT_S=$(((TAIL_MS + 999) / 1000))
-    TIMEOUT_S=$((DURATION + 2 + TAIL_TIMEOUT_S + 10))
+    RAMP_TIMEOUT_S=$(((RAMP_UP_MS + 999) / 1000))
+    TIMEOUT_S=$((DURATION + 2 + RAMP_TIMEOUT_S + TAIL_TIMEOUT_S + 10))
     run_timeout "$SERVER_CPU" "$TIMEOUT_S" server "$BIN" --library="$lib" --role=server --port="$PORT" \
       --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup=2 --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$LOSS" \
       --size="$SIZE" --conns="$CONNS" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \

@@ -2,10 +2,16 @@
 #include "harness/adapter_registry.h"
 #include "harness/inbound_queue.h"
 
+// BBR congestion control is preview-gated in the public header, but the
+// vendored msquic core is always built with preview features on
+// (third_party/msquic/src/core/precomp.h defines it), so the implementation
+// is present in the static lib we link.
+#define QUIC_API_ENABLE_PREVIEW_FEATURES 1
 #include <msquic.h>
 
 #include <arpa/inet.h>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -53,25 +59,41 @@ void ensure_msquic_cert() {
 
 const QUIC_BUFFER Alpn = {9, (uint8_t*)"rudp-bnch"};
 
-// L2: the suspected cause of the flat ~0.58 datagram delivery is that, with a
-// full congestion window, msquic discards unreliable datagrams (LOST_DISCARDED)
-// rather than queueing them — a roughly constant drop fraction independent of
-// conns. Disable pacing so submitted datagrams are offered to the network
-// immediately instead of being held by the pacer. (BBR, the other lever, is
-// gated behind QUIC_API_ENABLE_PREVIEW_FEATURES in this vendored msquic and the
-// prebuilt runtime may not carry it, so it is intentionally not forced here.)
-// Whether pacing-off lifts delivery — or whether the loss is purely cwnd-driven
-// discard — is now observable via the L1/L4 datagram send-state counters; the
-// instrumentation is what makes this a verifiable change rather than a guess.
+// History: the "flat ~0.58 delivery" this tuning hook originally chased turned
+// out to be a harness lifecycle artifact (server lifetime did not cover the
+// msquic-only ramp_up_ms; see docs/dev-notes.md 1.7), not a datagram problem.
+// The pacing-off workaround from that era is therefore dropped (pacing back to
+// msquic default = on).
+//
+// What remains real: under netem random loss (canonical: 1%), Cubic repeatedly
+// collapses cwnd, and queued datagrams either stall past the measurement tail
+// or get LOST_DISCARDED — observed as media_relay delivery ~0.87 at conns=5
+// while raknet/slikenet sit at ~0.98. BBR is loss-resilient (rate is modeled
+// from delivery rate, not loss events) and the vendored core always compiles
+// it in, so use it for both roles. Effect is verifiable via the L1/L4
+// datagram send-state counters.
 void apply_datagram_tuning(QUIC_SETTINGS& settings) {
-  settings.PacingEnabled = FALSE;
-  settings.IsSet.PacingEnabled = TRUE;
+  settings.CongestionControlAlgorithm = QUIC_CONGESTION_CONTROL_ALGORITHM_BBR;
+  settings.IsSet.CongestionControlAlgorithm = TRUE;
 }
 
 struct SendCtx {
   std::vector<uint8_t> data;
   QUIC_BUFFER buf;
+  // Debug-only (RUDP_MSQUIC_DGRAM_DEBUG=1): offer timestamp + conn handle so
+  // close() can report when the never-resolved datagrams were submitted.
+  int64_t offer_ms = 0;
+  HQUIC conn = nullptr;
+  int last_state = -1;  // last observed QUIC_DATAGRAM_SEND_STATE
 };
+
+bool dgram_debug_enabled() {
+  static const bool on = []() {
+    const char* v = std::getenv("RUDP_MSQUIC_DGRAM_DEBUG");
+    return v && *v && *v != '0';
+  }();
+  return on;
+}
 
 struct StreamCtx {
   class MsquicAdapter* adapter;
@@ -244,11 +266,43 @@ class MsquicAdapter : public rudp_bench::Adapter {
                      "msquic_datagram: offered=%llu submit_failed=%llu "
                      "acked=%llu lost=%llu canceled=%llu\n",
                      (unsigned long long)offered,
-                     (unsigned long long)submit_failed,
+                     (unsigned long long)dgram_submit_failed_.load(),
                      (unsigned long long)dgram_acked_.load(),
                      (unsigned long long)dgram_lost_.load(),
                      (unsigned long long)dgram_canceled_.load());
         std::fflush(stderr);
+      }
+      if (dgram_debug_enabled()) {
+        // Histogram of never-resolved datagrams by offer time and by conn —
+        // answers "when were the stuck sends submitted, and to whom".
+        std::lock_guard<std::mutex> lock(dbg_mtx_);
+        if (!dbg_outstanding_.empty()) {
+          int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+          std::unordered_map<int64_t, int> by_sec;
+          std::unordered_map<HQUIC, int> by_conn;
+          std::unordered_map<int, int> by_state;
+          for (auto* c : dbg_outstanding_) {
+            by_sec[(now_ms - c->offer_ms) / 1000]++;
+            by_conn[c->conn]++;
+            by_state[c->last_state]++;
+          }
+          std::fprintf(stderr, "msquic_dgram_stuck: total=%zu\n",
+                       dbg_outstanding_.size());
+          for (auto& [age_s, n] : by_sec)
+            std::fprintf(stderr, "msquic_dgram_stuck_age: age_s=%lld n=%d\n",
+                         (long long)age_s, n);
+          for (auto& [conn, n] : by_conn)
+            std::fprintf(stderr, "msquic_dgram_stuck_conn: conn=%p n=%d\n",
+                         (void*)conn, n);
+          for (auto& [st, n] : by_state)
+            std::fprintf(stderr,
+                         "msquic_dgram_stuck_state: state=%d n=%d "
+                         "(-1=never_indicated 1=SENT 3=ACK_SPURIOUS 5=CANCELED)\n",
+                         st, n);
+          std::fflush(stderr);
+        }
       }
     }
   }
@@ -326,6 +380,11 @@ class MsquicAdapter : public rudp_bench::Adapter {
 
       case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED: {
         auto state = ev->DATAGRAM_SEND_STATE_CHANGED.State;
+        if (dgram_debug_enabled()) {
+          auto* dctx = static_cast<SendCtx*>(
+              ev->DATAGRAM_SEND_STATE_CHANGED.ClientContext);
+          if (dctx) dctx->last_state = static_cast<int>(state);
+        }
         if (QUIC_DATAGRAM_SEND_STATE_IS_FINAL(state)) {
           // L1/L4: classify the terminal state instead of silently dropping it.
           // ACKNOWLEDGED == the peer got it; LOST_DISCARDED == QUIC itself gave
@@ -348,6 +407,10 @@ class MsquicAdapter : public rudp_bench::Adapter {
           }
           auto* ctx = static_cast<SendCtx*>(
               ev->DATAGRAM_SEND_STATE_CHANGED.ClientContext);
+          if (ctx && dgram_debug_enabled()) {
+            std::lock_guard<std::mutex> lock(dbg_mtx_);
+            dbg_outstanding_.erase(ctx);
+          }
           delete ctx;
           ev->DATAGRAM_SEND_STATE_CHANGED.ClientContext = nullptr;
         }
@@ -481,9 +544,21 @@ class MsquicAdapter : public rudp_bench::Adapter {
                      static_cast<const uint8_t*>(data) + len);
     ctx->buf.Buffer = ctx->data.data();
     ctx->buf.Length = static_cast<uint32_t>(len);
+    if (dgram_debug_enabled()) {
+      ctx->offer_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+      ctx->conn = conn;
+      std::lock_guard<std::mutex> lock(dbg_mtx_);
+      dbg_outstanding_.insert(ctx);
+    }
 
     if (QUIC_FAILED(MsQuic->DatagramSend(conn, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx))) {
       dgram_submit_failed_.fetch_add(1, std::memory_order_relaxed);
+      if (dgram_debug_enabled()) {
+        std::lock_guard<std::mutex> lock(dbg_mtx_);
+        dbg_outstanding_.erase(ctx);
+      }
       delete ctx;
       return -1;
     }
@@ -560,6 +635,10 @@ class MsquicAdapter : public rudp_bench::Adapter {
   std::atomic<uint64_t> dgram_lost_{0};
   std::atomic<uint64_t> dgram_canceled_{0};
   bool closed_ = false;
+
+  // Debug-only (RUDP_MSQUIC_DGRAM_DEBUG=1): live set of unresolved sends.
+  std::mutex dbg_mtx_;
+  std::unordered_set<SendCtx*> dbg_outstanding_;
 
   rudp_bench::ReusableInboundQueue inbox_;
 
