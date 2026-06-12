@@ -31,11 +31,15 @@ Targets: `raw_udp,mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yo
 
 Break rule: each point is N=3. A point is OK when aggregate `valid >= 2/3` and median `delivery_ratio >= 0.95`. The first non-OK connection count is the break point.
 
-Client load generation uses up to 8 client processes on 8 logical CPUs (4
-physical cores). Broadcast profiles split local connections across those
+Client load generation: echo profiles use 8 client processes on 8 logical
+CPUs (4 physical cores); broadcast profiles use 4 client processes on the
+same CPU set. Broadcast profiles split local connections across the
 processes but keep the fanout denominator at the total room size.
-(2026-06-12: raised from 4 processes — at echo conns>=2000 the 4-process farm
-was generation-limited (`client_tick` invalid), understating capable servers.)
+(2026-06-12: echo raised from 4 processes — at conns>=2000 the 4-process farm
+was generation-limited (`client_tick` invalid), understating capable servers.
+Broadcast stays at 4: it is not generation-limited there, and 8 processes
+measurably degrade receive-side delivery for thread-heavy clients —
+gns media_relay c50 drops 0.97→0.52 with 8 processes.)
 
 ## Source Of Truth
 

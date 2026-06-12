@@ -102,20 +102,18 @@ per-channel histogram 採用後の実測(2026-05-27、netem 25ms+5ms+5% loss、c
 1. **systemd-run unit の `LimitNOFILE` 既定 1024**: 対話 shell は 524288 なのに `--isolate=systemd` 経路だけ fd 上限 1024。msquic は conn ごとに UDP socket を作るため c1000 でハンドシェイクが永久ストール → `exit=client_crash`。`run_phase1_quick.sh` の systemd-run に `-p LimitNOFILE=524288` を追加。**「手動再現では通るが script 経由で落ちる」ときは ulimit/cgroup の unit 既定値差を疑う。**
 2. **multi-proc client の ramp 窓ズレ**: runner の ramp_interval は「自プロセスの conns 数」で割るため、1-conn proc は ramp をスキップ(即接続)、2-conn proc は ramp/2 だけ消費 → 4 proc の計測窓が最大 ~ramp_up_ms ずれる。broadcast の delivery_ratio は全送信者が常時送っている前提なので、ズレが構造的欠損として出る(c5 で p1-3=0.910 / p0=0.850、= sender 不在時間 × conn 比から算出した理論値と完全一致)。退場済み client への fanout が transport の send queue に死骸として残るのも同根(msquic で conn あたり ~270 件の未解決 send として観測される。RUDP_MSQUIC_DGRAM_DEBUG=1 で stuck の年齢/conn/state 分布を出せる)。`runner.cc` で **ramp_up_ms > 0 のとき最後の接続後も ramp 窓全体を消費してから計測に進む**よう修正し、全 proc の窓を揃えた。
 
-### 1.8 修正後の msquic 実測(2026-06-12、canonical 同等条件の単発 N=1)
+### 1.8 修正後の msquic 実測(2026-06-12、canonical N=3 published)
 
-3 件の harness 修正(server 寿命 + LimitNOFILE + ramp 窓揃え)と adapter の BBR 化後、netem 25ms+5ms+1% / systemd isolation / client-procs=4 で:
+3 件の harness 修正(server 寿命 + LimitNOFILE + ramp 窓揃え)と adapter の BBR 化後、canonical 再計測(`docs/measurements/2026-06-12-canonical-060653Z/`)での msquic last_ok:
 
-| profile | 修正前 (published) | 修正後 (N=1) |
+| profile | 旧 published | 新 published |
 |---|---|---|
-| reliable_echo | last_ok=1, c50 で 0.63 | **c3000 で 0.9999**(apex 同等) |
-| echo (mixed) | last_ok=1 | c1500 で 0.990(c2000+ 未測) |
-| game_server | last_ok=1, c5 で 0.85 | **c128 で 0.981**、c192 で 0.30(server CPU 限界) |
-| media_relay | last_ok=1 | **c5 で 0.978**、c50 で 0.25(server CPU 197% 飽和) |
+| reliable_echo | 1 | **1000**(c1000 で 1.0000。c1500 も delivery 1.0 だが msquic 自身の client が attempted 0.991 で tick gate 落ち) |
+| echo (mixed) | 1 | **1500**(0.987) |
+| game_server | 1 | **96**(0.981。c128 は server CPU 限界) |
+| media_relay | 1 | **5**(0.980。c50 は server CPU ~198% 飽和、raknet/slikenet と同位置) |
 
-adapter 変更: PacingEnabled=FALSE(アーティファクト誤診時代の暫定)を撤去し、CongestionControlAlgorithm=BBR を設定(vendored core は preview 常時有効なので使える)。BBR は netem 1% ランダムロスで Cubic が cwnd を絞るのを回避し、media_relay c25 で 0.46→0.88 など datagram 系を改善。media_relay の高 conn は per-datagram crypto の server CPU 飽和が本物の限界(gns 117% vs msquic ~197% @c50)。
-
-canonical full re-run + publish は未実施。次回 canonical 実行時にこの修正が全 lib に乗る(他 lib は ramp=0 なので実質 msquic のみ変化、enet の「ramp で劣化」記録も誤診として解消)。
+adapter 変更: PacingEnabled=FALSE(アーティファクト誤診時代の暫定)を撤去し、CongestionControlAlgorithm=BBR を設定(vendored core は preview 常時有効なので使える)。BBR は netem 1% ランダムロスで Cubic が cwnd を絞るのを回避し、media_relay c25 で 0.46→0.88 など datagram 系を改善。media_relay の高 conn は per-datagram crypto の server CPU 飽和が本物の限界(gns 117% vs msquic ~198% @c50)。
 詳細データ: `results/msquic_fix_sweep_*`, `results/msquic_rampfix_*`, `results/msquic_gs_high_*`。
 
 ### 1.9 同調査の横展開で直した below_gate 群(2026-06-12)
@@ -125,7 +123,8 @@ msquic と同じ「c1 から壊れている=ライブラリ起因として不自
 1. **yojimbo(全 profile below_gate、echo c1 で 0.42)**: adapter が poll() ごとに `SendPackets()` を呼んでいた。yojimbo は呼び出しごとに必ず 1 パケット(server は接続クライアントごとに 1 パケット)生成する固定ティック設計なので、spin する harness では数万 pkt/s のほぼ空パケット洪水になり、受信側の復号がコア飽和 → rx ドロップで崩壊していた(server CPU 67% @c1 が証拠)。送信と AdvanceTime を 100Hz cadence に間引いて echo c1 0.42→0.989(server CPU 67%→14%)、c50 0.99、game_server c64(MaxClients 上限)0.954。**固定ティック設計の lib を busy-poll harness に繋ぐときは tick cadence を adapter 側で守ること。**
 2. **udt4(reliable_echo below_gate、c1 で 0.31 / RTT p50 2.5s)**: デフォルト CC(CUDTCC)はバルク転送向けレート制御で、netem 1% loss 下では送信レートが offered 50Hz を割り込み送信バッファに秒単位で滞留する。ベース `CCC`(period 1us / 固定 window / loss 無反応)を `UDT_CC` で設定して c1 1.0 に。あわせて blocking send が「1 conn の stall が同一プロセスの全 conn を巻き込む」増幅器になっていたため、`UDT_SNDSYN=false` + per-conn pending queue で非ブロッキング化。c50 ~0.89-0.93 / c200 0.77 は UDT4 本来のロス回復特性(conn 単位の秒級 stall)で、これ以上は深追いしない。
 3. **udt4 の c200+ "crash"**: UDT::connect は同期ブロッキング(~RTT/conn)で、script の固定 +10s スラックを接続だけで使い切って RuntimeMaxSec kill されていた。`TIMEOUT_S` に `CONNS/10` 秒の接続スラックを追加し、crash 扱い → 正直な delivery break に。
-4. **echo c2000+ の `aggregate_invalid:client_tick`(gns/coop_rudp/litenetlib)**: client 4 proc / 4 論理 CPU が飽和し attempted_ratio<0.99 = **負荷生成側の限界**だった。client を 8 proc / 8 論理 CPU(3,4,5,6,11,12,13,14)に倍増したところ gns echo c2000 で tick_ok=1 になり、delivery 0.85 はそのまま = server 律速の正直な break に変わった。canonical 設定を 8 proc に更新済み(`run_canonical_tests.sh` / CANONICAL.md)。ゲーム同居前提でも実測でコア 0-2 に余裕があることを確認済み。
+4. **echo c2000+ の `aggregate_invalid:client_tick`(gns/coop_rudp/litenetlib)**: client 4 proc / 4 論理 CPU が飽和し attempted_ratio<0.99 = **負荷生成側の限界**だった。client を 8 proc / 8 論理 CPU(3,4,5,6,11,12,13,14)に倍増したところ gns echo c2000 で tick_ok=1 になり、delivery 0.85 はそのまま = server 律速の正直な break に変わった。ゲーム同居前提でも実測でコア 0-2 に余裕があることを確認済み。
+   **ただし broadcast は 4 proc のまま**: broadcast は client 律速ではなく、逆に 8 proc 化すると thread の多い client(gns)の受信側 delivery が落ちる(media_relay c50 で 4proc=0.966 / 8proc=0.522 を A/B で確認。apex の media c150 も同様に低下)。最終構成は `--echo-client-procs 8` / `--broadcast-client-procs 4`(CPU セットは共通)。**client farm の構成変更は「困っていたプロファイル」だけに適用し、他プロファイルは A/B してから動かすこと。**
 5. **netem 残留ガード**: lo に netem が残っていると loopback smoke テストが黙って落ちる。`test_no_netem_on_lo` を ctest 先頭に追加(明示メッセージで fail)。
 
 ---

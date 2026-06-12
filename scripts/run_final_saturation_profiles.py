@@ -82,14 +82,14 @@ def split_runs(value: str) -> List[str]:
 
 
 def split_ints(value: str) -> List[int]:
+    # Empty list is allowed: a profile with an empty conns schedule is
+    # SKIPPED by run() (partial re-runs of a subset of profiles).
     out: List[int] = []
     for item in value.replace(",", " ").split():
         item = item.strip()
         if not item:
             continue
         out.append(int(item))
-    if not out:
-        raise ValueError("connection schedule must not be empty")
     return out
 
 
@@ -422,6 +422,9 @@ def run(args: argparse.Namespace) -> int:
     try:
         apply_netem(args, out)
         for profile in profiles:
+            if not profile.conns:
+                print(f"profile={profile.name} skipped (empty conns schedule)", flush=True)
+                continue
             active: List[str] = []
             for lib in libs:
                 reason = unsupported_profile_reason(profile, lib)
