@@ -202,16 +202,30 @@ public:
         auto now = std::chrono::steady_clock::now();
         time_ = 100.0 + std::chrono::duration<double>(now - start_).count();
 
+        // yojimbo は SendPackets() 呼び出しごとに必ず 1 パケット(サーバは
+        // 接続クライアントごとに 1 パケット)を生成する固定ティック設計。
+        // spin する harness の poll 周波数のまま呼ぶと数万 pkt/s のほぼ空
+        // パケット洪水になり、受信側の復号がコア飽和 → rx ドロップで
+        // delivery が c1 ですら 0.42 に崩壊していた。examples と同様に
+        // 送信だけ固定 cadence(100Hz)に間引く。受信と時刻進行は毎 poll。
+        const bool do_send = now >= next_send_packets_;
+        if (do_send) {
+            next_send_packets_ = now + std::chrono::milliseconds(10);
+        }
+
+        // AdvanceTime(タイムアウト/ack スケジューラ管理)も spin 周波数では
+        // 全接続走査がコストになるため送信と同じ 100Hz に間引く。
+        // ReceivePackets と message drain は受信レイテンシに効くので毎 poll。
         if (is_server_ && server_) {
-            server_->SendPackets();
+            if (do_send) server_->SendPackets();
             server_->ReceivePackets();
-            server_->AdvanceTime(time_);
+            if (do_send) server_->AdvanceTime(time_);
             drain_server_messages();
         } else if (!is_server_) {
             for (auto& [id, client] : clients_) {
-                client->SendPackets();
+                if (do_send) client->SendPackets();
                 client->ReceivePackets();
-                client->AdvanceTime(time_);
+                if (do_send) client->AdvanceTime(time_);
                 drain_client_messages(id, client.get());
             }
         }
@@ -265,6 +279,7 @@ private:
 
     bool is_server_ = true;
     std::chrono::steady_clock::time_point start_;
+    std::chrono::steady_clock::time_point next_send_packets_{};  // 100Hz 送信 cadence
     double time_ = 0.0;
 
     rudp_bench::ReusableInboundQueue inbox_;

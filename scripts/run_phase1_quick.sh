@@ -249,7 +249,12 @@ for lib in ${LIBS//,/ }; do
     WARMUP_ARG="$LITENETLIB_WARMUP"
     TAIL_TIMEOUT_S=$(((TAIL_MS + 999) / 1000))
     RAMP_TIMEOUT_S=$(((RAMP_UP_MS + 999) / 1000))
-    TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + RAMP_TIMEOUT_S + TAIL_TIMEOUT_S + 10))
+    # 接続フェーズのスラックを conns に比例させる。udt4 のように connect が
+    # 同期ブロッキング(~RTT/conn)な lib は固定 +10s では高 conns で
+    # 接続中に RuntimeMaxSec へ達し、本来 delivery break の点が crash 扱いに
+    # なってしまう(netem RTT 50ms × conns/proc ≈ conns/80 秒)。
+    CONNECT_TIMEOUT_S=$((CONNS / 10))
+    TIMEOUT_S=$((DURATION + LITENETLIB_WARMUP + RAMP_TIMEOUT_S + TAIL_TIMEOUT_S + 10 + CONNECT_TIMEOUT_S))
     if [ ! -x "$LITENETLIB_BIN" ]; then
       : >"$S_STDOUT"
       : >"$C_STDOUT"
@@ -323,7 +328,9 @@ for lib in ${LIBS//,/ }; do
   else
     TAIL_TIMEOUT_S=$(((TAIL_MS + 999) / 1000))
     RAMP_TIMEOUT_S=$(((RAMP_UP_MS + 999) / 1000))
-    TIMEOUT_S=$((DURATION + 2 + RAMP_TIMEOUT_S + TAIL_TIMEOUT_S + 10))
+    # 接続スラックの説明は litenetlib ブランチの同名変数のコメントを参照。
+    CONNECT_TIMEOUT_S=$((CONNS / 10))
+    TIMEOUT_S=$((DURATION + 2 + RAMP_TIMEOUT_S + TAIL_TIMEOUT_S + 10 + CONNECT_TIMEOUT_S))
     run_timeout "$SERVER_CPU" "$TIMEOUT_S" server "$BIN" --library="$lib" --role=server --port="$PORT" \
       --rate-r="$RATE_R" --rate-u="$RATE_U" --duration="$DURATION" --warmup=2 --ramp-up-ms="$RAMP_UP_MS" --tail-ms="$TAIL_MS" --loss="$LOSS" \
       --size="$SIZE" --conns="$CONNS" --mode="$MODE" --idle="$IDLE" --out="$S_OUT" \

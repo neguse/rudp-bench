@@ -1,3 +1,11 @@
+# lo に netem が残っているとループバック越しの smoke テストが
+# 遅延/ロスで黙って落ちる(ベンチ後の `scripts/netem.sh clear` 忘れが典型)。
+# 最初に明示的なメッセージで fail させて原因を分かりやすくする。
+add_test(
+    NAME test_no_netem_on_lo
+    COMMAND sh -c "if tc qdisc show dev lo | grep -q netem; then echo 'ERROR: netem is still applied to lo (run: sudo scripts/netem.sh clear). Loopback smoke tests would fail spuriously.' >&2; exit 1; fi"
+)
+
 add_executable(test_adapter_registry test_adapter_registry.cc)
 target_link_libraries(test_adapter_registry PRIVATE rudp_bench_harness GTest::gtest_main)
 add_test(NAME test_adapter_registry COMMAND test_adapter_registry)

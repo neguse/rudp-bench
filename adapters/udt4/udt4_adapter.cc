@@ -5,6 +5,7 @@
 // UDT4 SDK 4.11 — vendored via FetchContent in adapters/udt4/CMakeLists.txt
 #include <udt.h>
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -38,9 +39,26 @@
 // libudt-dev 4.11+dfsg1 chosen (vendor approach option from the spec).
 // ============================================================
 
+#include <ccc.h>
+
 namespace {
 
 static constexpr UDTSOCKET kInvalidSock = -1;
+
+// UDT のデフォルト CC(CUDTCC)はギガビット級バルク転送向けのレート制御で、
+// loss を見るたび送信周期を引き伸ばす。64B@50Hz のような小メッセージ流だと
+// netem 1% loss 下で送信レートが offered rate を割り込み、送信バッファに
+// 秒単位で滞留する(canonical で RTT p50 2.5s / delivery 0.31 の正体)。
+// ベース CCC は「period 1us・固定 window 16・loss 無反応」の素朴な
+// 窓制御で、この benchmark の message workload には十分かつ安定。
+// window 16 / RTT 50ms ≈ 320 pkt/s/conn >> offered 50 pkt/s。
+class BenchCCC : public CCC {
+ public:
+    BenchCCC() {
+        m_dPktSndPeriod = 1.0;
+        m_dCWndSize = 64.0;
+    }
+};
 
 void ensure_udt_init() {
     static std::once_flag flag;
@@ -55,6 +73,8 @@ struct ConnState {
     uint32_t id = 0;
     std::vector<uint8_t> partial;
     size_t partial_offset = 0;
+    // 非ブロッキング送信で書き切れなかったバイト列(フレーム順保存)。
+    std::deque<uint8_t> out_pending;
 };
 
 class Udt4Adapter : public rudp_bench::Adapter {
@@ -132,11 +152,15 @@ class Udt4Adapter : public rudp_bench::Adapter {
 
     // ---- both sides --------------------------------------------------------
 
+    // 送信は非ブロッキング。書き切れない分は per-conn の out_pending に積み、
+    // poll() で再送する。旧実装は blocking send だったため、1 conn の
+    // 送信バッファ詰まり(loss 由来の一時 stall)がプロセス内の全 conn の
+    // tick/送受信を巻き込み、p99 RTT が秒単位に膨らんでいた。
     int send(uint32_t conn_id, const void* data, size_t len,
              bool /*reliable*/) override {
         auto it = conns_.find(conn_id);
         if (it == conns_.end()) return -1;
-        UDTSOCKET s = it->second.sock;
+        ConnState& conn = it->second;
 
         // 4-byte LE length prefix
         uint32_t flen = static_cast<uint32_t>(len);
@@ -146,8 +170,10 @@ class Udt4Adapter : public rudp_bench::Adapter {
             uint8_t(flen >> 16),
             uint8_t(flen >> 24)
         };
-        if (send_all(s, hdr, 4) < 0) return -1;
-        if (send_all(s, static_cast<const uint8_t*>(data), len) < 0) return -1;
+        conn.out_pending.insert(conn.out_pending.end(), hdr, hdr + 4);
+        const uint8_t* p = static_cast<const uint8_t*>(data);
+        conn.out_pending.insert(conn.out_pending.end(), p, p + len);
+        flush_pending(conn);
         return 0;
     }
 
@@ -170,6 +196,11 @@ class Udt4Adapter : public rudp_bench::Adapter {
                 auto it = sock_to_id_.find(s);
                 if (it != sock_to_id_.end()) drain_conn(it->second);
             }
+        }
+
+        // 書き残しのある conn を再 flush(stall した conn は自分だけ遅れる)。
+        for (auto& [id, conn] : conns_) {
+            if (!conn.out_pending.empty()) flush_pending(conn);
         }
     }
 
@@ -195,7 +226,7 @@ class Udt4Adapter : public rudp_bench::Adapter {
     bool supports(bool reliable) const override { return reliable; }
     size_t max_payload_bytes(bool /*reliable*/) const override { return 65536; }
     const char* flush_policy(bool reliable) const override {
-        return reliable ? "blocking_stream" : "unsupported";
+        return reliable ? "nonblocking_stream_pending_queue" : "unsupported";
     }
     bool encryption_on() const override { return false; }
 
@@ -204,6 +235,13 @@ class Udt4Adapter : public rudp_bench::Adapter {
         UDTSOCKET s = UDT::socket(AF_INET, SOCK_STREAM, 0);
         if (s == UDT::INVALID_SOCK)
             throw std::runtime_error("UDT::socket failed");
+        // CC は connect/bind 前に設定する必要がある。listener に設定すると
+        // accept されたソケットにも継承される。
+        CCCFactory<BenchCCC> cc_factory;
+        UDT::setsockopt(s, 0, UDT_CC, &cc_factory, sizeof(cc_factory));
+        // 送信も非ブロッキング(書けない分は adapter 側 out_pending に積む)。
+        bool snd_syn = false;
+        UDT::setsockopt(s, 0, UDT_SNDSYN, &snd_syn, sizeof(snd_syn));
         return s;
     }
 
@@ -211,16 +249,20 @@ class Udt4Adapter : public rudp_bench::Adapter {
         if (eid_ == -1) eid_ = UDT::epoll_create();
     }
 
-    int send_all(UDTSOCKET s, const void* data, size_t len) {
-        const char* p = static_cast<const char*>(data);
-        size_t remaining = len;
-        while (remaining > 0) {
-            int n = UDT::send(s, p, static_cast<int>(remaining), 0);
-            if (n == UDT::ERROR) return -1;
-            p += n;
-            remaining -= static_cast<size_t>(n);
+    // out_pending から書けるだけ書く。送信バッファ満杯(EASYNCSND)なら
+    // 残りを保持して即 return(次の poll で再試行)。
+    void flush_pending(ConnState& conn) {
+        while (!conn.out_pending.empty()) {
+            char chunk[4096];
+            size_t n = std::min(conn.out_pending.size(), sizeof(chunk));
+            std::copy(conn.out_pending.begin(),
+                      conn.out_pending.begin() + static_cast<long>(n), chunk);
+            int sent = UDT::send(conn.sock, chunk, static_cast<int>(n), 0);
+            if (sent == UDT::ERROR || sent <= 0) break;
+            conn.out_pending.erase(conn.out_pending.begin(),
+                                   conn.out_pending.begin() + sent);
+            if (static_cast<size_t>(sent) < n) break;
         }
-        return 0;
     }
 
     void accept_all() {
@@ -233,6 +275,8 @@ class Udt4Adapter : public rudp_bench::Adapter {
 
             bool rcv_syn = false;
             UDT::setsockopt(ns, 0, UDT_RCVSYN, &rcv_syn, sizeof(rcv_syn));
+            bool snd_syn = false;
+            UDT::setsockopt(ns, 0, UDT_SNDSYN, &snd_syn, sizeof(snd_syn));
 
             uint32_t id = next_id_++;
             ConnState& conn = conns_[id];

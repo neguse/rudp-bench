@@ -147,15 +147,15 @@ BENCH_CMD=(
   --idle adaptive
   --isolate systemd
   --server-cpu 7,15
-  --client-cpu 5,6,13,14
+  --client-cpu 3,4,5,6,11,12,13,14
   --min-valid 2
   --min-delivery 0.95
   --media-conns "$CANONICAL_MEDIA_CONNS"
   --game-conns "$CANONICAL_GAME_CONNS"
   --echo-conns "$CANONICAL_ECHO_CONNS"
   --reliable-echo-conns "$CANONICAL_RELIABLE_ECHO_CONNS"
-  --broadcast-client-procs 4
-  --echo-client-procs 4
+  --broadcast-client-procs 8
+  --echo-client-procs 8
 )
 
 run_cmd "${BENCH_CMD[@]}"
