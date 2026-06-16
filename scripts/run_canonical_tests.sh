@@ -17,6 +17,8 @@ UPDATE_SUBMODULES="${UPDATE_SUBMODULES:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 PUBLISH_DOCS="${PUBLISH_DOCS:-1}"
 PUBLISH_ID="${PUBLISH_ID:-$(date -u +%Y-%m-%d-canonical-%H%M%SZ)}"
+BENCH_ISOLATE="${BENCH_ISOLATE:-1}"
+BENCH_ISOLATE_ACTIVE=0
 
 CANONICAL_LIBS="mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic"
 CANONICAL_RUNS="1 2 3"
@@ -37,6 +39,7 @@ Options:
   --build-dir PATH         CMake build directory (default: $BUILD_DIR)
   --no-submodule-update    Skip git submodule update
   --no-publish-docs        Do not publish docs/measurements/<id> or update current.md
+  --no-bench-isolate       Do not run scripts/bench_isolate.sh setup/teardown
   --dry-run                Print commands without executing them
   -h, --help               Show this help
 
@@ -71,6 +74,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-publish-docs)
       PUBLISH_DOCS=0
+      shift
+      ;;
+    --no-bench-isolate)
+      BENCH_ISOLATE=0
       shift
       ;;
     --dry-run)
@@ -115,6 +122,14 @@ run_cmd() {
   fi
 }
 
+cleanup() {
+  if [ "$BENCH_ISOLATE_ACTIVE" = "1" ] && [ "$DRY_RUN" != "1" ]; then
+    set +e
+    "$ROOT/scripts/bench_isolate.sh" teardown
+  fi
+}
+trap cleanup EXIT
+
 command -v "$CMAKE" >/dev/null 2>&1 || { echo "cmake not found: $CMAKE" >&2; exit 2; }
 command -v "$PYTHON" >/dev/null 2>&1 || { echo "python not found: $PYTHON" >&2; exit 2; }
 
@@ -133,6 +148,13 @@ fi
 
 run_cmd "$CMAKE" -S "$ROOT" -B "$BUILD_DIR"
 run_cmd "$CMAKE" --build "$BUILD_DIR" -j "$JOBS"
+
+if [ "$BENCH_ISOLATE" != "0" ]; then
+  run_cmd "$ROOT/scripts/bench_isolate.sh" setup
+  if [ "$DRY_RUN" != "1" ]; then
+    BENCH_ISOLATE_ACTIVE=1
+  fi
+fi
 
 BENCH_CMD=(
   "$PYTHON" scripts/run_final_saturation_profiles.py

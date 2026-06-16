@@ -497,7 +497,7 @@ def main() -> int:
     p.add_argument("--idle", default="adaptive", choices=["spin", "adaptive"])
     p.add_argument("--isolate", default="systemd", choices=["taskset", "systemd"])
     p.add_argument("--server-cpu", default="7,15")
-    p.add_argument("--client-cpu", default="5,6,13,14")
+    p.add_argument("--client-cpu", default="3,4,5,6,11,12,13,14")
     p.add_argument("--build-dir", default="build")
     p.add_argument("--phase1-script", default="scripts/run_phase1_quick.sh")
     p.add_argument(

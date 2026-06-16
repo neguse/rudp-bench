@@ -3,16 +3,12 @@
 #
 # Layout (Ryzen 7 PRO 5750GE, 8 physical / 16 logical):
 #   server  : phys core 7    -> CPU 7,15
-#   client  : phys cores 5,6 -> CPU 5,6,13,14   (2 phys: load generator must
-#             NOT be the bottleneck -- a single phys core could not emit the
-#             full offered load for heavy libs at high conns. e.g. gns @1000
-#             conns on 1 phys core hit attempted_ratio=0.68 -> invalid run;
-#             2 phys cores -> attempted_ratio=1.0. See docs/measurements/
-#             2026-05-30-netem-limit-artifact. The harness already invalidates
-#             runs with attempted_ratio<0.99, so an under-provisioned client
-#             yields no data rather than wrong data -- provision it generously
-#             and verify attempted_ratio==1.0 for the heaviest lib / max conns.)
-#   OS/games: phys cores 0-4 -> CPU 0-4,8-12
+#   client  : phys cores 3-6 -> CPU 3,4,5,6,11,12,13,14
+#             Echo profiles use 8 client processes, so the load generator gets
+#             8 logical CPUs / 4 physical cores. The harness invalidates runs
+#             with attempted_ratio<0.99; still provision the generator
+#             generously so client_tick does not become the measurement.
+#   OS/games: phys cores 0-2 -> CPU 0-2,8-10
 #
 # Uses cgroup v2 via systemd slice properties (AllowedCPUs). The bench
 # cores are drained by confining system/user/init slices to OS cores;
@@ -24,11 +20,11 @@
 
 set -euo pipefail
 
-OS_CPUS="0-4,8-12"
+OS_CPUS="0-2,8-10"
 SERVER_CPUS="7,15"
-CLIENT_CPUS="5,6,13,14"
-BENCH_CORES_LIST="5 6 7 13 14 15"
-BENCH_CORES_CSV="5,6,7,13,14,15"
+CLIENT_CPUS="3,4,5,6,11,12,13,14"
+BENCH_CORES_LIST="3 4 5 6 7 11 12 13 14 15"
+BENCH_CORES_CSV="3,4,5,6,7,11,12,13,14,15"
 
 setup() {
     sudo systemctl set-property -- system.slice AllowedCPUs="$OS_CPUS"

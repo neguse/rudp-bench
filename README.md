@@ -29,8 +29,11 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-The full canonical benchmark requires `sudo` for `tc netem` and `systemd-run`
-CPU pinning. It is intentionally not part of the normal unit-test loop.
+The full canonical benchmark requires `sudo` for `tc netem`, `systemd-run`
+CPU pinning, and temporary cgroup CPU isolation. The canonical runner confines
+OS/background work to CPUs `0,1,2,8,9,10`, clients to
+`3,4,5,6,11,12,13,14`, and the server to `7,15` on the current 8C/16T
+measurement host. It is intentionally not part of the normal unit-test loop.
 
 ## Canonical Benchmark
 

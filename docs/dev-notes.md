@@ -137,7 +137,7 @@ msquic と同じ「c1 から壊れている=ライブラリ起因として不自
 
 **手順:**
 1. `scripts/bench_isolate.sh setup` — systemd の system/user/init slice を一部コアに閉じ込め、bench 用に物理コアを空ける。governor を performance 固定、NIC IRQ も追い出す
-   - ※ 隔離レイアウトは更新されている。最新の client/server コア割当は `bench_isolate.sh` と各 report のセットアップ節を参照(2026-05-30 時点: client=2物理コア, server=1物理コア)
+   - ※ 隔離レイアウトは更新されている。最新の client/server コア割当は `bench_isolate.sh` と各 report のセットアップ節を参照(2026-06-17 時点: OS=3物理コア, client=4物理コア, server=1物理コア)
 2. ベンチ実行は `--isolate=systemd --server-cpu=... --client-cpu=...` 付き。`systemd-run --slice=bench-server.slice --working-directory=$PWD -p User=$USER -p AllowedCPUs=... -p RuntimeMaxSec=...s --quiet --wait --pipe --collect` で起動
 3. ネット条件は `sudo scripts/netem.sh apply <delay_ms> <jitter_ms> <loss_pct>` を loopback に。**loopback は send/recv 両方で netem を通る**ので片道 25ms 指定で RTT ~50ms、loss も実効 `1-(1-loss)²`
 4. 終わったら `scripts/netem.sh clear`、`scripts/bench_isolate.sh teardown`

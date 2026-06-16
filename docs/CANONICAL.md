@@ -45,6 +45,21 @@ Broadcast stays at 4: it is not generation-limited there, and 8 processes
 measurably degrade receive-side delivery for thread-heavy clients —
 gns media_relay c50 drops 0.97→0.52 with 8 processes.)
 
+## CPU Isolation
+
+The canonical layout is role-isolated by physical core:
+
+| role | physical cores | logical CPUs |
+|---|---:|---|
+| OS / background | 0-2 | 0,1,2,8,9,10 |
+| client load generator | 3-6 | 3,4,5,6,11,12,13,14 |
+| server under test | 7 | 7,15 |
+
+`scripts/run_canonical_tests.sh` runs `scripts/bench_isolate.sh setup` before
+the sweep and tears it down on exit. The benchmark processes are then launched
+through `systemd-run` with matching `AllowedCPUs` so OS, client, and server do
+not share a physical core.
+
 ## Source Of Truth
 
 - Benchmark execution: [`../scripts/run_canonical_tests.sh`](../scripts/run_canonical_tests.sh)
