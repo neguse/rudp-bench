@@ -5,7 +5,7 @@
 ## Run
 
 ```sh
-scripts/run_canonical_tests.sh
+go run ./cmd/rudp-bench-canonical
 ```
 
 この repo で "canonical test" と言うときは unit test ではなく、最新の final saturation benchmark 一式を指す。
@@ -55,14 +55,15 @@ The canonical layout is role-isolated by physical core:
 | client load generator | 3-6 | 3,4,5,6,11,12,13,14 |
 | server under test | 7 | 7,15 |
 
-`scripts/run_canonical_tests.sh` runs `scripts/bench_isolate.sh setup` before
+`go run ./cmd/rudp-bench-canonical` runs `scripts/bench_isolate.sh setup` before
 the sweep and tears it down on exit. The benchmark processes are then launched
 through `systemd-run` with matching `AllowedCPUs` so OS, client, and server do
 not share a physical core.
 
 ## Source Of Truth
 
-- Benchmark execution: [`../scripts/run_canonical_tests.sh`](../scripts/run_canonical_tests.sh)
+- Benchmark execution: [`../cmd/rudp-bench-canonical`](../cmd/rudp-bench-canonical)
+- Compatibility wrapper: [`../scripts/run_canonical_tests.sh`](../scripts/run_canonical_tests.sh)
 - Per-run report generation: [`../scripts/render_canonical_report.py`](../scripts/render_canonical_report.py)
 - Stable published pointer: [`measurements/current.md`](measurements/current.md)
 - Dated measurement reports under `docs/measurements/` are archived run outputs.

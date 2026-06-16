@@ -25,8 +25,8 @@ def load_script(path: Path):
     return module
 
 
-def shell_var(text: str, name: str) -> str:
-    match = re.search(rf'^{name}="([^"]+)"$', text, re.MULTILINE)
+def go_const(text: str, name: str) -> str:
+    match = re.search(rf'\b{name}\s*=\s*"([^"]+)"', text, re.MULTILINE)
     assert match, name
     return match.group(1)
 
@@ -38,6 +38,7 @@ def first_conn(schedule: str) -> int:
 def main() -> int:
     runner = load_script(ROOT / "scripts" / "run_final_saturation_profiles.py")
     renderer = load_script(ROOT / "scripts" / "render_canonical_report.py")
+    canonical_go = (ROOT / "cmd" / "rudp-bench-canonical" / "main.go").read_text()
     canonical_sh = (ROOT / "scripts" / "run_canonical_tests.sh").read_text()
 
     assert runner.DEFAULT_LIBS == EXPECTED["libs"]
@@ -51,11 +52,12 @@ def main() -> int:
     assert renderer.DEFAULT_ECHO_CONNS == EXPECTED["echo"]
     assert renderer.DEFAULT_RELIABLE_ECHO_CONNS == EXPECTED["reliable_echo"]
 
-    assert shell_var(canonical_sh, "CANONICAL_LIBS") == EXPECTED["libs"]
-    assert shell_var(canonical_sh, "CANONICAL_MEDIA_CONNS") == EXPECTED["media"]
-    assert shell_var(canonical_sh, "CANONICAL_GAME_CONNS") == EXPECTED["game"]
-    assert shell_var(canonical_sh, "CANONICAL_ECHO_CONNS") == EXPECTED["echo"]
-    assert shell_var(canonical_sh, "CANONICAL_RELIABLE_ECHO_CONNS") == EXPECTED["reliable_echo"]
+    assert go_const(canonical_go, "canonicalLibs") == EXPECTED["libs"]
+    assert go_const(canonical_go, "canonicalMediaConns") == EXPECTED["media"]
+    assert go_const(canonical_go, "canonicalGameConns") == EXPECTED["game"]
+    assert go_const(canonical_go, "canonicalEchoConns") == EXPECTED["echo"]
+    assert go_const(canonical_go, "canonicalReliableEchoConns") == EXPECTED["reliable_echo"]
+    assert "go run ./cmd/rudp-bench-canonical" in canonical_sh
 
     fallback = {row["profile"]: row["conns_schedule"] for row in renderer.DEFAULT_PROFILE_ROWS}
     assert fallback["media_relay"] == EXPECTED["media"]

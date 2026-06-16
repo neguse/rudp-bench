@@ -11,7 +11,7 @@ Install the baseline toolchain:
 
 ```sh
 sudo apt-get install -y \
-  build-essential cmake git python3 python3-pip iproute2 \
+  build-essential cmake git golang-go python3 python3-pip iproute2 \
   libsodium-dev libnuma-dev libssl-dev libprotobuf-dev protobuf-compiler
 python3 -m pip install -r scripts/requirements.txt
 ```
@@ -38,6 +38,12 @@ measurement host. It is intentionally not part of the normal unit-test loop.
 ## Canonical Benchmark
 
 **Start here:** [`docs/CANONICAL.md`](docs/CANONICAL.md)
+
+Run the canonical benchmark with:
+
+```sh
+go run ./cmd/rudp-bench-canonical
+```
 
 `docs/CANONICAL.md` is the single human-facing entrypoint for the canonical sweep definition, current published result, and generated report workflow. Do not duplicate result tables in this README.
 
