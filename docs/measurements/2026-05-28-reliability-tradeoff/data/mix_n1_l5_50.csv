@@ -1,3 +1,0 @@
-run_id,scenario_id,library,valid,invalid_reason,delivery_ratio,rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,server_cpu_pct
-20260528T162629Z,gns_r50_u50_64_50_echo_0_spin,gns,1,ok,0.9529,56200,136900,190100,51600,63200,67800,115.17
-20260528T162629Z,msquic_r50_u50_64_50_echo_0_spin,msquic,1,ok,0.8951,55000,121000,161600,50800,62500,67400,127.81

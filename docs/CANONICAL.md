@@ -27,7 +27,11 @@ scripts/run_canonical_tests.sh
 | `reliable_echo` | reliable transport echo baseline | echo | reliable 50Hz | 64B | 1, 50, 200, 600, 1000, 1500, 2000, 3000 |
 | `echo` | mixed 50/50 synthetic baseline | echo | reliable 50Hz + unreliable 50Hz | 64B | 1, 50, 200, 600, 1000, 1500, 2000, 3000 |
 
-Targets: `raw_udp,mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic`
+Targets: `mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic`
+
+`raw_udp` is kept in the repository as the unreliable-only floor baseline. It
+is not a normal canonical target for reliable or mixed profiles because it has
+no reliable channel; include it only in explicitly-unreliable baseline sweeps.
 
 Break rule: each point is N=3. A point is OK when aggregate `valid >= 2/3` and median `delivery_ratio >= 0.95`. The first non-OK connection count is the break point.
 

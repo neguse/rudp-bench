@@ -23,7 +23,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import capabilities
 
 DEFAULT_LIBS = (
-    "raw_udp,mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,"
+    "mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,"
     "udt4,yojimbo,gns,litenetlib,msquic"
 )
 DEFAULT_RUNS = "1 2 3"
@@ -512,7 +512,7 @@ def main() -> int:
     p.add_argument("--echo-conns", default=DEFAULT_ECHO_CONNS)
     p.add_argument("--reliable-echo-conns", default=DEFAULT_RELIABLE_ECHO_CONNS)
     p.add_argument("--broadcast-client-procs", type=int, default=4)
-    p.add_argument("--echo-client-procs", type=int, default=4)
+    p.add_argument("--echo-client-procs", type=int, default=8)
     args = p.parse_args()
 
     if not split_csv(args.libraries):

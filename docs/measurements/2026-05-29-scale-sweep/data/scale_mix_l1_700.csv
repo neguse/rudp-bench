@@ -1,3 +1,0 @@
-run_id,scenario_id,library,valid,invalid_reason,delivery_ratio,rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,server_cpu_pct
-20260528T164604Z,mini_rudp_r50_u50_64_700_echo_0_spin,mini_rudp,0,client_tick,0.0433,3339000,15924000,20277000,629300,840300,840300,100.00
-20260528T164604Z,enet_r50_u50_64_700_echo_0_spin,enet,0,client_tick,0.4626,1307000,6768000,9405000,53200,65400,70000,100.00

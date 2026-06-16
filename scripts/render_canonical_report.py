@@ -62,7 +62,7 @@ DEFAULT_PROFILE_ROWS = [
         "rate_u": "0",
         "size": "64",
         "conns_schedule": DEFAULT_RELIABLE_ECHO_CONNS,
-        "client_procs": "4",
+        "client_procs": "8",
         "notes": "reliable-only echo baseline for stream/reliable transports",
     },
     {
@@ -73,7 +73,7 @@ DEFAULT_PROFILE_ROWS = [
         "rate_u": "50",
         "size": "64",
         "conns_schedule": DEFAULT_ECHO_CONNS,
-        "client_procs": "4",
+        "client_procs": "8",
         "notes": "mixed 50/50 echo baseline used for implementation validation",
     },
 ]
@@ -451,6 +451,11 @@ def build_report(
         for path in plots[profile]:
             title = path.stem.replace("_", " ")
             lines.extend([f"![{title}]({rel(path, out_path.parent)})", ""])
+    data_files = ["capacity.csv", "summary.csv", "profiles.csv"]
+    for optional in ("results_all.csv", "scenarios_all.csv"):
+        if (run_dir / optional).exists():
+            data_files.append(optional)
+
     lines.extend(
         [
             "## Capacity Table",
@@ -504,11 +509,10 @@ def build_report(
             "",
             "## Data Files",
             "",
-            f"- [`capacity.csv`]({rel(run_dir / 'capacity.csv', out_path.parent)})",
-            f"- [`summary.csv`]({rel(run_dir / 'summary.csv', out_path.parent)})",
-            f"- [`results_all.csv`]({rel(run_dir / 'results_all.csv', out_path.parent)})",
-            f"- [`scenarios_all.csv`]({rel(run_dir / 'scenarios_all.csv', out_path.parent)})",
-            f"- [`profiles.csv`]({rel(run_dir / 'profiles.csv', out_path.parent)})",
+            *[
+                f"- [`{name}`]({rel(run_dir / name, out_path.parent)})"
+                for name in data_files
+            ],
             "",
         ]
     )

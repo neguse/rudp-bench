@@ -1,7 +1,0 @@
-# msquic datagram send-state tally (L1/L4), server side, run1 per conns
-# format: offered submit_failed acked lost canceled
-## conns=200
-msquic_datagram: offered=134684 submit_failed=0 acked=132778 lost=1339 canceled=0
-## conns=600
-msquic_datagram: offered=399463 submit_failed=0 acked=393271 lost=4036 canceled=0
-## conns=1000

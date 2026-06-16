@@ -18,7 +18,7 @@ DRY_RUN="${DRY_RUN:-0}"
 PUBLISH_DOCS="${PUBLISH_DOCS:-1}"
 PUBLISH_ID="${PUBLISH_ID:-$(date -u +%Y-%m-%d-canonical-%H%M%SZ)}"
 
-CANONICAL_LIBS="raw_udp,mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic"
+CANONICAL_LIBS="mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic"
 CANONICAL_RUNS="1 2 3"
 CANONICAL_NETEM_ARGS="25 5 1 100000"
 CANONICAL_MEDIA_CONNS="1 5 50 75 100 125 150 200"

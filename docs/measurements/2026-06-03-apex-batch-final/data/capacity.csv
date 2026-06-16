@@ -1,4 +1,0 @@
-profile,library,status,last_ok_conns,last_ok_delivery,last_ok_server_cpu,break_conns,break_reason,break_delivery,break_server_cpu
-echo,apex_rudp,not_broken,3000,0.9906,58.32,,,,
-game_server,apex_rudp,broken,128,0.9717,26.71,192,delivery<0.95,0.7018,32.40
-media_relay,apex_rudp,broken,125,0.9733,59.84,150,delivery<0.95,0.6588,54.73

@@ -36,7 +36,7 @@ add_subdirectory(adapters/yojimbo)
 add_subdirectory(adapters/gns)
 add_subdirectory(adapters/msquic)
 
-# LiteNetLib: .NET 8 独立バイナリ — cmake --build がここで dotnet build を呼ぶ
+# LiteNetLib: .NET 10 独立バイナリ — cmake --build がここで dotnet build を呼ぶ
 find_program(DOTNET_EXECUTABLE dotnet)
 if(DOTNET_EXECUTABLE)
     add_custom_target(litenetlib_build ALL
@@ -47,7 +47,7 @@ if(DOTNET_EXECUTABLE)
     )
     message(STATUS "dotnet found: ${DOTNET_EXECUTABLE} — litenetlib_build target added")
 else()
-    message(WARNING "dotnet not found; LiteNetLib adapter will not be built (apt: dotnet-sdk-8.0)")
+    message(WARNING "dotnet not found; LiteNetLib adapter will not be built (install a .NET 10 SDK)")
 endif()
 
 add_subdirectory(tests)

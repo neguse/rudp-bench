@@ -10,6 +10,7 @@
 #include <msquic.h>
 
 #include <arpa/inet.h>
+#include <unistd.h>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -45,16 +46,32 @@ void ensure_msquic_init() {
   });
 }
 
-void ensure_msquic_cert() {
+struct MsquicCertPaths {
+  std::string cert;
+  std::string key;
+};
+
+const MsquicCertPaths& ensure_msquic_cert() {
+  static MsquicCertPaths paths;
   static std::once_flag flag;
   std::call_once(flag, []() {
+    char cert_path[128];
+    char key_path[128];
+    std::snprintf(cert_path, sizeof(cert_path), "/tmp/rudp-bench-msquic-%ld-cert.pem",
+                  static_cast<long>(::getpid()));
+    std::snprintf(key_path, sizeof(key_path), "/tmp/rudp-bench-msquic-%ld-key.pem",
+                  static_cast<long>(::getpid()));
+    paths.cert = cert_path;
+    paths.key = key_path;
     // Generate self-signed cert for benchmark use
-    int rc = std::system(
+    std::string cmd =
         "openssl req -x509 -newkey rsa:2048 -nodes -days 365 "
-        "-keyout /tmp/msquic_key.pem -out /tmp/msquic_cert.pem "
-        "-subj '/CN=rudp-bench' 2>/dev/null");
+        "-keyout " + paths.key + " -out " + paths.cert +
+        " -subj '/CN=rudp-bench' 2>/dev/null";
+    int rc = std::system(cmd.c_str());
     if (rc != 0) std::abort();
   });
+  return paths;
 }
 
 const QUIC_BUFFER Alpn = {9, (uint8_t*)"rudp-bnch"};
@@ -116,7 +133,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
 
   void server_listen(uint16_t port) override {
     is_server_ = true;
-    ensure_msquic_cert();
+    const auto& cert_paths = ensure_msquic_cert();
 
     QUIC_REGISTRATION_CONFIG reg_cfg = {"rudp-bench-srv", QUIC_EXECUTION_PROFILE_LOW_LATENCY};
     QUIC_STATUS status;
@@ -138,8 +155,8 @@ class MsquicAdapter : public rudp_bench::Adapter {
     if (QUIC_FAILED(status)) MSQUIC_DIE("server ConfigurationOpen", status);
 
     QUIC_CERTIFICATE_FILE cert_file;
-    cert_file.CertificateFile = "/tmp/msquic_cert.pem";
-    cert_file.PrivateKeyFile = "/tmp/msquic_key.pem";
+    cert_file.CertificateFile = cert_paths.cert.c_str();
+    cert_file.PrivateKeyFile = cert_paths.key.c_str();
 
     QUIC_CREDENTIAL_CONFIG cred_cfg{};
     cred_cfg.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;

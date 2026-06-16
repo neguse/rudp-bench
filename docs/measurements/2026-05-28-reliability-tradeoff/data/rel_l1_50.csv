@@ -1,4 +1,0 @@
-run_id,scenario_id,library,valid,invalid_reason,delivery_ratio,rtt_r_p50_us,rtt_r_p95_us,rtt_r_p99_us,rtt_u_p50_us,rtt_u_p95_us,rtt_u_p99_us,server_cpu_pct
-20260528T160824Z,raw_udp_r50_u0_64_50_echo_0_spin,raw_udp,0,unsupported_reliable,,,,,,,,0.00
-20260528T160824Z,mini_rudp_r50_u0_64_50_echo_0_spin,mini_rudp,1,ok,1.0020,51400,64900,102000,0,0,0,100.00
-20260528T160824Z,enet_r50_u0_64_50_echo_0_spin,enet,1,ok,1.0024,52100,85400,126600,0,0,0,100.00

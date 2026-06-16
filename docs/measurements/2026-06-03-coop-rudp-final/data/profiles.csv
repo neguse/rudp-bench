@@ -1,4 +1,0 @@
-profile,use_case,mode,rate_r,rate_u,size,conns_schedule,client_procs,notes
-media_relay,media_sfu_unreliable_fanout,broadcast,0,30,1000,125 150,1,"near-MTU media packets, full-room unreliable fanout"
-game_server,authoritative_game_snapshot_event_fanout,broadcast,1,20,128,128 192,1,20Hz state/input fanout plus 1Hz reliable gameplay events
-echo,synthetic_mixed_echo_baseline,echo,50,50,64,3000,4,mixed 50/50 echo baseline used for implementation validation

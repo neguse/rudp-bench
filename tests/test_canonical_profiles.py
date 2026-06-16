@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 EXPECTED = {
-    "libs": "raw_udp,mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic",
+    "libs": "mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic",
     "media": "1 5 50 75 100 125 150 200",
     "game": "1 5 64 96 128 192 256",
     "echo": "1 50 200 600 1000 1500 2000 3000",
@@ -65,8 +65,8 @@ def main() -> int:
     fallback_procs = {row["profile"]: row["client_procs"] for row in renderer.DEFAULT_PROFILE_ROWS}
     assert fallback_procs["media_relay"] == "4"
     assert fallback_procs["game_server"] == "4"
-    assert fallback_procs["reliable_echo"] == "4"
-    assert fallback_procs["echo"] == "4"
+    assert fallback_procs["reliable_echo"] == "8"
+    assert fallback_procs["echo"] == "8"
 
     assert first_conn(EXPECTED["media"]) == 1
     assert first_conn(EXPECTED["game"]) == 1
