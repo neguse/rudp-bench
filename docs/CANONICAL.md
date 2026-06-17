@@ -16,7 +16,7 @@ go run ./cmd/rudp-bench-canonical
 
 **open this:** [`measurements/current.md`](measurements/current.md)
 
-`scripts/run_canonical_tests.sh` publishes each run to a dated directory under `docs/measurements/` and updates `docs/measurements/current.md` to point at that latest report. Review and commit both the dated directory and `current.md` when publishing a new current result.
+`go run ./cmd/rudp-bench-canonical` publishes each run to a dated directory under `docs/measurements/` and updates `docs/measurements/current.md` to point at that latest report. Review and commit both the dated directory and `current.md` when publishing a new current result.
 
 ## Canonical Sweep
 
