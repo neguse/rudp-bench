@@ -46,6 +46,7 @@ constexpr uint32_t MAX_ADAPTER_CONNECTIONS = 4096;
 constexpr uint32_t MESSAGES_PER_CONNECTION = 64;
 constexpr uint32_t BROAD_RECV_EVENTS_PER_CONNECTION = 64;
 constexpr uint32_t NARROW_RECV_EVENTS_PER_CONNECTION = 16;
+constexpr uint64_t DEFAULT_IDLE_POLL_MIN_NS = 100'000;
 
 using clock_type = std::chrono::steady_clock;
 
@@ -171,6 +172,24 @@ size_t size_env_or_default(const char* name, size_t default_value) {
   size_t max_size = std::numeric_limits<size_t>::max();
   if (parsed > max_size) return max_size;
   return static_cast<size_t>(parsed);
+}
+
+uint64_t coop_idle_poll_min_ns() {
+  static uint64_t value = []() -> uint64_t {
+    const char* v = std::getenv("COOP_IDLE_POLL_US");
+    if (!v || !*v) return DEFAULT_IDLE_POLL_MIN_NS;
+    errno = 0;
+    char* end = nullptr;
+    unsigned long long parsed = std::strtoull(v, &end, 10);
+    if (end == v || *end != '\0' || errno == ERANGE) {
+      return DEFAULT_IDLE_POLL_MIN_NS;
+    }
+    if (parsed > std::numeric_limits<uint64_t>::max() / 1000ull) {
+      return std::numeric_limits<uint64_t>::max();
+    }
+    return static_cast<uint64_t>(parsed) * 1000ull;
+  }();
+  return value;
 }
 
 int send_packets_raw_now(int fd, const rudp_out_packet* packets, size_t count) {
@@ -496,6 +515,7 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     opts.reliability = reliable ? RUDP_RELIABLE_UNORDERED : RUDP_UNRELIABLE;
     rudp_send_result sr = rudp_send(c, data, len, &opts);
     if (sr != RUDP_SEND_QUEUED && sr != RUDP_SEND_OK) return -1;
+    send_pending_ = true;
     return 0;
   }
 
@@ -503,15 +523,17 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
                    size_t len, bool reliable) override {
     if (!ep_) return 0;
     if (!conn_ids && count > 0) return 0;
+    const std::vector<rudp_conn*>* conns = cached_broadcast_conns(conn_ids, count);
     size_t accepted = 0;
+    rudp_send_opts opts{};
+    opts.reliability = reliable ? RUDP_RELIABLE_UNORDERED : RUDP_UNRELIABLE;
     for (size_t i = 0; i < count; ++i) {
-      rudp_conn* c = find_conn(conn_ids[i]);
+      rudp_conn* c = conns ? (*conns)[i] : find_conn(conn_ids[i]);
       if (!c) continue;
-      rudp_send_opts opts{};
-      opts.reliability = reliable ? RUDP_RELIABLE_UNORDERED : RUDP_UNRELIABLE;
       rudp_send_result sr = rudp_send(c, data, len, &opts);
       if (sr == RUDP_SEND_QUEUED || sr == RUDP_SEND_OK) ++accepted;
     }
+    if (accepted > 0) send_pending_ = true;
     return accepted;
   }
 
@@ -540,6 +562,7 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
           remember_conn(*out_conn_id, c);
         }
       }
+      activity_since_poll_ = true;
       return r;
     }
   }
@@ -548,8 +571,19 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     if (!ep_) return;
     uint64_t now = real_now_ns();
     ctx_.cached_now_ns = now;
+    uint64_t idle_poll_min_ns = coop_idle_poll_min_ns();
+    if (!send_pending_ && !activity_since_poll_ && idle_poll_min_ns > 0 &&
+        now < next_idle_poll_ns_) {
+      return;
+    }
+    send_pending_ = false;
+    activity_since_poll_ = false;
     rudp_endpoint_flush(ep_, now);
     rudp_endpoint_poll(ep_, now);
+    next_idle_poll_ns_ =
+        now > std::numeric_limits<uint64_t>::max() - idle_poll_min_ns
+            ? std::numeric_limits<uint64_t>::max()
+            : now + idle_poll_min_ns;
   }
 
   void close() override { close_impl(); }
@@ -569,6 +603,13 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     connected_peak_ = 0;
     conn_cache_complete_ = false;
     conn_by_id_.clear();
+    send_pending_ = false;
+    activity_since_poll_ = false;
+    next_idle_poll_ns_ = 0;
+    broadcast_cache_ids_ = nullptr;
+    broadcast_cache_count_ = 0;
+    broadcast_cache_generation_ = 0;
+    broadcast_conn_cache_.clear();
   }
 
  public:
@@ -683,7 +724,12 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
   void remember_conn(uint32_t conn_id, rudp_conn* conn) {
     if (!conn) return;
     auto [it, inserted] = conn_by_id_.try_emplace(conn_id, conn);
+    if (!inserted && it->second == conn) {
+      refresh_conn_cache_complete();
+      return;
+    }
     if (!inserted) it->second = conn;
+    ++conn_cache_generation_;
     connected_peak_ =
         std::max<uint32_t>(connected_peak_, static_cast<uint32_t>(conn_by_id_.size()));
     refresh_conn_cache_complete();
@@ -702,7 +748,15 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     cfg.socket.recv_batch = recv_batch_cb;
     cfg.socket.now_ns = now_ns_cb;
     cfg.mtu = DEFAULT_MTU;
-    cfg.max_conns = std::max<uint32_t>(hinted_connections_, 64);
+    if (hinted_connections_ > 0) {
+      uint32_t headroom = std::max<uint32_t>(1, hinted_connections_ / 16);
+      cfg.max_conns =
+          hinted_connections_ > MAX_ADAPTER_CONNECTIONS - headroom
+              ? MAX_ADAPTER_CONNECTIONS
+              : hinted_connections_ + headroom;
+    } else {
+      cfg.max_conns = 64;
+    }
     cfg.max_flows = 1;
     cfg.max_channels = 1;
     cfg.max_messages =
@@ -736,12 +790,37 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     ensure_physical_buffers(&ctx_);
   }
 
+  const std::vector<rudp_conn*>* cached_broadcast_conns(const uint32_t* conn_ids,
+                                                        size_t count) {
+    if (conn_ids == broadcast_cache_ids_ && count == broadcast_cache_count_ &&
+        broadcast_cache_generation_ == conn_cache_generation_) {
+      return &broadcast_conn_cache_;
+    }
+    broadcast_conn_cache_.clear();
+    broadcast_conn_cache_.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      broadcast_conn_cache_.push_back(find_conn(conn_ids[i]));
+    }
+    broadcast_cache_ids_ = conn_ids;
+    broadcast_cache_count_ = count;
+    broadcast_cache_generation_ = conn_cache_generation_;
+    return &broadcast_conn_cache_;
+  }
+
   SockCtx ctx_;
   rudp_endpoint* ep_ = nullptr;
   bool is_server_ = false;
   uint32_t hinted_connections_ = 0;
   uint32_t next_local_id_ = 1;
   std::unordered_map<uint32_t, rudp_conn*> conn_by_id_;
+  uint64_t conn_cache_generation_ = 0;
+  bool send_pending_ = false;
+  bool activity_since_poll_ = false;
+  uint64_t next_idle_poll_ns_ = 0;
+  const uint32_t* broadcast_cache_ids_ = nullptr;
+  size_t broadcast_cache_count_ = 0;
+  uint64_t broadcast_cache_generation_ = 0;
+  std::vector<rudp_conn*> broadcast_conn_cache_;
   uint32_t connected_peak_ = 0;
   bool conn_cache_complete_ = false;
   uint32_t wire_prefix_ =
