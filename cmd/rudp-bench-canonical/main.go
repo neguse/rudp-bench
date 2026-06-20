@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	canonicalLibs              = "mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic"
+	canonicalLibs              = "mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic,quiche,lsquic"
 	canonicalRuns              = "1 2 3"
 	canonicalNetemArgs         = "25 5 1 100000"
 	canonicalMediaConns        = "1 5 50 75 100 125 150 200"

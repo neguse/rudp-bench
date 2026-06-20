@@ -35,6 +35,15 @@ add_subdirectory(adapters/udt4)
 add_subdirectory(adapters/yojimbo)
 add_subdirectory(adapters/gns)
 add_subdirectory(adapters/msquic)
+add_subdirectory(adapters/quiche)
+add_subdirectory(adapters/lsquic)
+
+# Shared library adapters: set RPATH so the binary finds .so files at runtime
+set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
+set(CMAKE_BUILD_RPATH
+    ${CMAKE_BINARY_DIR}/quiche_cargo/release
+    ${CMAKE_BINARY_DIR}/adapters/lsquic
+)
 
 # LiteNetLib: .NET 10 独立バイナリ — cmake --build がここで dotnet build を呼ぶ
 find_program(DOTNET_EXECUTABLE dotnet)

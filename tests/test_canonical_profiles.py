@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 EXPECTED = {
-    "libs": "mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic",
+    "libs": "mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic,quiche,lsquic",
     "media": "1 5 50 75 100 125 150 200",
     "game": "1 5 64 96 128 192 256",
     "echo": "1 50 200 600 1000 1500 2000 3000",

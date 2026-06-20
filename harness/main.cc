@@ -24,6 +24,8 @@ void register_udt4_adapter();
 void register_yojimbo_adapter();
 void register_gns_adapter();
 void register_msquic_adapter();
+void register_quiche_adapter();
+void register_lsquic_adapter();
 }  // namespace rudp_bench
 
 int main(int argc, const char* argv[]) {
@@ -39,6 +41,8 @@ int main(int argc, const char* argv[]) {
   rudp_bench::register_yojimbo_adapter();
   rudp_bench::register_gns_adapter();
   rudp_bench::register_msquic_adapter();
+  rudp_bench::register_quiche_adapter();
+  rudp_bench::register_lsquic_adapter();
 
   auto cfg_opt = rudp_bench::parse_scenario(argc, argv);
   if (!cfg_opt) {
@@ -137,7 +141,8 @@ int main(int argc, const char* argv[]) {
   // adapter when main returns; the C++ destructor chain then UAFs into
   // them and trips glibc's double-free check. Skip destructors entirely
   // and let the OS reclaim memory at process exit.
-  if (cfg.library == "msquic") {
+  if (cfg.library == "msquic" || cfg.library == "quiche" ||
+      cfg.library == "lsquic") {
     std::_Exit(0);
   }
   return 0;

@@ -180,6 +180,30 @@ CAPABILITIES: Dict[str, Dict[str, object]] = {
             "u": {"max_payload": 1000, "flush_policy": "async_internal", "transport": "quic_datagram"},
         },
     },
+    "quiche": {
+        "encryption": "on",
+        "max_conns": None,
+        "modes": {
+            "r": {"max_payload": 65536, "flush_policy": "poll_send", "transport": "quic_stream"},
+            "u": {"max_payload": 1200, "flush_policy": "poll_send", "transport": "quic_datagram"},
+        },
+    },
+    "lsquic": {
+        "encryption": "on",
+        "max_conns": None,
+        "modes": {
+            "r": {
+                "max_payload": 65536,
+                "flush_policy": "poll_process_conns",
+                "transport": "quic_stream",
+            },
+            "u": {
+                "max_payload": 1200,
+                "flush_policy": "poll_process_conns",
+                "transport": "quic_datagram",
+            },
+        },
+    },
     "litenetlib": {
         "encryption": "off",
         "max_conns": None,

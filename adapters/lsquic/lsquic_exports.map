@@ -1,0 +1,7 @@
+{
+    global:
+        lsquic_*;
+        rudp_bench_lsquic_*;
+    local:
+        *;
+};

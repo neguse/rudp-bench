@@ -23,4 +23,6 @@ target_link_libraries(rudp-bench PRIVATE
   adapter_yojimbo
   adapter_gns
   adapter_msquic
+  adapter_quiche
+  adapter_lsquic
 )

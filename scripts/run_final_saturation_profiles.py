@@ -24,7 +24,7 @@ import capabilities
 
 DEFAULT_LIBS = (
     "mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,"
-    "udt4,yojimbo,gns,litenetlib,msquic"
+    "udt4,yojimbo,gns,litenetlib,msquic,quiche,lsquic"
 )
 DEFAULT_RUNS = "1 2 3"
 DEFAULT_NETEM_ARGS = "25 5 1 100000"
