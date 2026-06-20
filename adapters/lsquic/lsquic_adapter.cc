@@ -24,6 +24,7 @@
 
 namespace {
 
+constexpr size_t kMaxDatagramSize = 1350;
 constexpr size_t kInboxLimit = 1u << 16;
 
 struct CertPaths {
@@ -288,18 +289,29 @@ class LsquicAdapter : public rudp_bench::Adapter {
   }
 
   void recv_packets() {
-    uint8_t buf[65535];
-    sockaddr_storage peer{};
-    socklen_t peer_len;
+    constexpr unsigned kBatch = 64;
+    uint8_t bufs[kBatch][kMaxDatagramSize];
+    sockaddr_storage peers[kBatch];
+    struct iovec iovs[kBatch];
+    struct mmsghdr hdrs[kBatch];
+    for (unsigned i = 0; i < kBatch; ++i) {
+      iovs[i].iov_base = bufs[i];
+      iovs[i].iov_len = sizeof(bufs[0]);
+      std::memset(&hdrs[i], 0, sizeof(hdrs[0]));
+      hdrs[i].msg_hdr.msg_name = &peers[i];
+      hdrs[i].msg_hdr.msg_namelen = sizeof(peers[i]);
+      hdrs[i].msg_hdr.msg_iov = &iovs[i];
+      hdrs[i].msg_hdr.msg_iovlen = 1;
+    }
     for (;;) {
-      peer_len = sizeof(peer);
-      ssize_t n = ::recvfrom(sock_fd_, buf, sizeof(buf), 0,
-                             reinterpret_cast<sockaddr*>(&peer), &peer_len);
-      if (n <= 0) break;
-      lsquic_engine_packet_in(
-          engine_, buf, static_cast<size_t>(n),
-          reinterpret_cast<sockaddr*>(&local_addr_),
-          reinterpret_cast<sockaddr*>(&peer), this, 0);
+      int rc = ::recvmmsg(sock_fd_, hdrs, kBatch, MSG_DONTWAIT, nullptr);
+      if (rc <= 0) break;
+      for (int i = 0; i < rc; ++i) {
+        lsquic_engine_packet_in(
+            engine_, bufs[i], hdrs[i].msg_len,
+            reinterpret_cast<sockaddr*>(&local_addr_),
+            reinterpret_cast<sockaddr*>(&peers[i]), this, 0);
+      }
     }
   }
 
