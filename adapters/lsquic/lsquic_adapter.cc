@@ -530,22 +530,29 @@ class LsquicAdapter : public rudp_bench::Adapter {
                              const lsquic_out_spec* specs,
                              unsigned n_specs) {
     auto* adapter = static_cast<LsquicAdapter*>(ctx);
+    constexpr unsigned kBatch = 64;
+    struct mmsghdr hdrs[kBatch];
     unsigned n_sent = 0;
-    for (unsigned i = 0; i < n_specs; ++i) {
-      struct msghdr msg{};
-      msg.msg_name = const_cast<sockaddr*>(specs[i].dest_sa);
-      msg.msg_namelen = (specs[i].dest_sa->sa_family == AF_INET6)
-                            ? sizeof(sockaddr_in6)
-                            : sizeof(sockaddr_in);
-      msg.msg_iov = specs[i].iov;
-      msg.msg_iovlen = specs[i].iovlen;
-
-      ssize_t sent = ::sendmsg(adapter->sock_fd_, &msg, 0);
-      if (sent < 0) {
+    while (n_sent < n_specs) {
+      unsigned batch = std::min(kBatch, n_specs - n_sent);
+      for (unsigned i = 0; i < batch; ++i) {
+        auto& s = specs[n_sent + i];
+        auto& h = hdrs[i];
+        std::memset(&h, 0, sizeof(h));
+        h.msg_hdr.msg_name = const_cast<sockaddr*>(s.dest_sa);
+        h.msg_hdr.msg_namelen = (s.dest_sa->sa_family == AF_INET6)
+                                    ? sizeof(sockaddr_in6)
+                                    : sizeof(sockaddr_in);
+        h.msg_hdr.msg_iov = s.iov;
+        h.msg_hdr.msg_iovlen = s.iovlen;
+      }
+      int rc = ::sendmmsg(adapter->sock_fd_, hdrs, batch, 0);
+      if (rc <= 0) {
         if (n_sent == 0) return -1;
         break;
       }
-      ++n_sent;
+      n_sent += static_cast<unsigned>(rc);
+      if (static_cast<unsigned>(rc) < batch) break;
     }
     return static_cast<int>(n_sent);
   }

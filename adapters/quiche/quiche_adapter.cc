@@ -438,20 +438,40 @@ class QuicheAdapter : public rudp_bench::Adapter {
   }
 
   void flush_conns() {
-    uint8_t out[MAX_DATAGRAM_SIZE];
-    quiche_send_info send_info{};
+    constexpr unsigned kBatch = 64;
+    uint8_t bufs[kBatch][MAX_DATAGRAM_SIZE];
+    struct iovec iovs[kBatch];
+    sockaddr_storage addrs[kBatch];
+    struct mmsghdr hdrs[kBatch];
+    unsigned pending = 0;
+
+    auto flush_batch = [&]() {
+      if (pending == 0) return;
+      int rc = ::sendmmsg(sock_fd_, hdrs, pending, 0);
+      (void)rc;
+      pending = 0;
+    };
 
     for (auto& c : conns_) {
       if (!c->conn || c->closed) continue;
       for (;;) {
+        quiche_send_info send_info{};
         ssize_t written =
-            quiche_conn_send(c->conn, out, sizeof(out), &send_info);
+            quiche_conn_send(c->conn, bufs[pending], sizeof(bufs[0]), &send_info);
         if (written == QUICHE_ERR_DONE) break;
         if (written < 0) break;
-        ::sendto(sock_fd_, out, static_cast<size_t>(written), 0,
-                 reinterpret_cast<sockaddr*>(&send_info.to), send_info.to_len);
+        iovs[pending].iov_base = bufs[pending];
+        iovs[pending].iov_len = static_cast<size_t>(written);
+        std::memcpy(&addrs[pending], &send_info.to, send_info.to_len);
+        std::memset(&hdrs[pending], 0, sizeof(hdrs[0]));
+        hdrs[pending].msg_hdr.msg_name = &addrs[pending];
+        hdrs[pending].msg_hdr.msg_namelen = send_info.to_len;
+        hdrs[pending].msg_hdr.msg_iov = &iovs[pending];
+        hdrs[pending].msg_hdr.msg_iovlen = 1;
+        if (++pending == kBatch) flush_batch();
       }
     }
+    flush_batch();
   }
 
   int send_stream(QuicheConn* c, const void* data, size_t len) {
