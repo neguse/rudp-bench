@@ -1,0 +1,37 @@
+{
+  "locked": true,
+  "libs": [
+    "mini_rudp",
+    "coop_rudp",
+    "apex_rudp",
+    "enet",
+    "kcp",
+    "slikenet",
+    "raknet",
+    "udt4",
+    "yojimbo",
+    "gns",
+    "litenetlib",
+    "msquic",
+    "quiche",
+    "lsquic"
+  ],
+  "profiles": [
+    "media_relay",
+    "game_server",
+    "reliable_echo",
+    "echo"
+  ],
+  "runs": 3,
+  "duration": 20,
+  "tail_ms": 500,
+  "netem": true,
+  "netem_args": "25 5 1 100000",
+  "isolate": "systemd",
+  "server_cpu": "7,15",
+  "client_cpu": "3,4,5,6,11,12,13,14",
+  "min_valid": 2,
+  "min_delivery": 0.95,
+  "build": true,
+  "publish": true
+}

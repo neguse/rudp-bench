@@ -1,0 +1,19 @@
+{
+  "libs": [
+    "coop_rudp",
+    "enet",
+    "kcp"
+  ],
+  "profiles": [
+    "echo"
+  ],
+  "runs": 1,
+  "duration": 5,
+  "tail_ms": 100,
+  "netem": false,
+  "isolate": "taskset",
+  "min_valid": 1,
+  "min_delivery": 0.95,
+  "build": true,
+  "publish": false
+}
