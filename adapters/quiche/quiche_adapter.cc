@@ -401,8 +401,7 @@ class QuicheAdapter : public rudp_bench::Adapter {
         }
       }
 
-      // Drain datagrams
-      uint8_t dgram_buf[65536];
+      uint8_t dgram_buf[MAX_DATAGRAM_SIZE];
       for (;;) {
         ssize_t dglen =
             quiche_conn_dgram_recv(c->conn, dgram_buf, sizeof(dgram_buf));

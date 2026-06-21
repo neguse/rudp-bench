@@ -208,13 +208,18 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   uint64_t server_echo_accepted_u = 0;
   BoundedHistogram server_recv_drained{100'000};
   size_t recv_drain_limit = server_recv_drain_limit();
-  while (std::chrono::steady_clock::now() < deadline) {
-    auto loop_now = std::chrono::steady_clock::now();
-    if (!measure_started && loop_now >= measure_begin) {
-      ps.mark_measure_begin();
-      measure_started = true;
+  uint32_t server_tick_ctr = 0;
+  auto loop_now = std::chrono::steady_clock::now();
+  for (;;) {
+    if ((++server_tick_ctr & 255) == 0) {
+      loop_now = std::chrono::steady_clock::now();
+      if (loop_now >= deadline) break;
+      if (!measure_started && loop_now >= measure_begin) {
+        ps.mark_measure_begin();
+        measure_started = true;
+      }
+      sample_proc_if_due(ps, loop_now, next_rss_sample);
     }
-    sample_proc_if_due(ps, loop_now, next_rss_sample);
     a.poll();
     bool did_work = false;
     size_t drained_this_tick = 0;
@@ -459,8 +464,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
     return best;
   };
 
-  while (clock::now() < tail_until) {
-    auto now = clock::now();
+  for (auto now = clock::now(); now < tail_until; now = clock::now()) {
     if (!measure_started && now >= warmup_end) {
       ps.mark_measure_begin();  // M2: drop warmup from the CPU window
       measure_started = true;
