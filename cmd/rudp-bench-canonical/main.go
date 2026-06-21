@@ -225,7 +225,7 @@ func findRepoRoot() (string, error) {
 		return "", err
 	}
 	for {
-		if fileExists(filepath.Join(dir, "CMakeLists.txt")) && fileExists(filepath.Join(dir, "scripts", "run_final_saturation_profiles.py")) {
+		if fileExists(filepath.Join(dir, "CMakeLists.txt")) && fileExists(filepath.Join(dir, "go.mod")) {
 			return dir, nil
 		}
 		parent := filepath.Dir(dir)

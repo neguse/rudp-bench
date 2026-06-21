@@ -10,8 +10,7 @@ import (
 )
 
 // FindRepoRoot walks up from the current working directory looking for a
-// directory that contains both CMakeLists.txt and
-// scripts/run_final_saturation_profiles.py.
+// directory that contains both CMakeLists.txt and go.mod.
 func FindRepoRoot() (string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -22,7 +21,7 @@ func FindRepoRoot() (string, error) {
 		return "", err
 	}
 	for {
-		if FileExists(filepath.Join(dir, "CMakeLists.txt")) && FileExists(filepath.Join(dir, "scripts", "run_final_saturation_profiles.py")) {
+		if FileExists(filepath.Join(dir, "CMakeLists.txt")) && FileExists(filepath.Join(dir, "go.mod")) {
 			return dir, nil
 		}
 		parent := filepath.Dir(dir)
