@@ -5,12 +5,12 @@
 ## Run
 
 ```sh
-go run ./cmd/rudp-bench-canonical
+go run ./cmd/rudp-benchctl run scenarios/canonical.json
 ```
 
 この repo で "canonical test" と言うときは unit test ではなく、最新の final saturation benchmark 一式を指す。
 
-実行後は `$OUT/report.md` を見る。Markdown 内に `plots/*.png` が埋め込まれ、capacity / delivery / CPU / RTT p95 を確認できる。
+実行後は `$OUT/report.md` を見る。Markdown 内に `plots/*.svg` が埋め込まれ、capacity / delivery / CPU / RTT p95 を確認できる。
 
 ## Current Published Result
 
@@ -27,7 +27,7 @@ go run ./cmd/rudp-bench-canonical
 | `reliable_echo` | reliable transport echo baseline | echo | reliable 50Hz | 64B | 1, 50, 200, 600, 1000, 1500, 2000, 3000 |
 | `echo` | mixed 50/50 synthetic baseline | echo | reliable 50Hz + unreliable 50Hz | 64B | 1, 50, 200, 600, 1000, 1500, 2000, 3000 |
 
-Targets: `mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic`
+Targets: `mini_rudp,coop_rudp,apex_rudp,enet,kcp,slikenet,raknet,udt4,yojimbo,gns,litenetlib,msquic,quiche,lsquic`
 
 `raw_udp` is kept in the repository as the unreliable-only floor baseline. It
 is not a normal canonical target for reliable or mixed profiles because it has
@@ -55,16 +55,13 @@ The canonical layout is role-isolated by physical core:
 | client load generator | 3-6 | 3,4,5,6,11,12,13,14 |
 | server under test | 7 | 7,15 |
 
-`go run ./cmd/rudp-bench-canonical` runs `scripts/bench_isolate.sh setup` before
-the sweep and tears it down on exit. The benchmark processes are then launched
-through `systemd-run` with matching `AllowedCPUs` so OS, client, and server do
-not share a physical core.
+`rudp-benchctl` は `isolate=systemd` のとき自動で systemd slice を設定し、
+sweep 終了時に teardown する。benchmark process は `systemd-run` の
+`AllowedCPUs` で起動され、OS / client / server が物理コアを共有しない。
 
 ## Source Of Truth
 
-- Benchmark execution: [`../cmd/rudp-bench-canonical`](../cmd/rudp-bench-canonical)
-- Compatibility wrapper: [`../scripts/run_canonical_tests.sh`](../scripts/run_canonical_tests.sh)
-- Per-run report generation: [`../scripts/render_canonical_report.py`](../scripts/render_canonical_report.py)
+- Benchmark CLI: [`../cmd/rudp-benchctl`](../cmd/rudp-benchctl)
+- Canonical scenario: [`../scenarios/canonical.json`](../scenarios/canonical.json)
 - Stable published pointer: [`measurements/current.md`](measurements/current.md)
 - Dated measurement reports under `docs/measurements/` are archived run outputs.
-- `README.md` and `docs/FINAL_OUTPUT.md` are compatibility pointers only. Do not duplicate result tables there.

@@ -4,23 +4,15 @@ Reliable UDP / RUDP / QUIC implementations を同じ workload で比較する be
 
 ## Prerequisites
 
-This project is Linux-first. The benchmark path uses loopback `tc netem`,
-systemd CPU isolation, and several vendored native libraries.
-
-Install the baseline toolchain:
+Linux-first. `tc netem`, systemd CPU isolation, vendored native libraries を使う。
 
 ```sh
 sudo apt-get install -y \
-  build-essential cmake git golang-go python3 python3-pip iproute2 \
+  build-essential cmake git golang-go iproute2 \
   libsodium-dev libnuma-dev libssl-dev libprotobuf-dev protobuf-compiler
-python3 -m pip install -r scripts/requirements.txt
 ```
 
-LiteNetLib is built as a separate .NET adapter and currently targets
-`.NET 10` (`net10.0`). Install a .NET 10 SDK if you want the `litenetlib`
-target and smoke test.
-
-Initialize dependencies and build:
+LiteNetLib は .NET 10 adapter。`litenetlib` を測る場合のみ .NET 10 SDK が必要。
 
 ```sh
 git submodule update --init --recursive
@@ -29,23 +21,30 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-The full canonical benchmark requires `sudo` for `tc netem`, `systemd-run`
-CPU pinning, and temporary cgroup CPU isolation. The canonical runner confines
-OS/background work to CPUs `0,1,2,8,9,10`, clients to
-`3,4,5,6,11,12,13,14`, and the server to `7,15` on the current 8C/16T
-measurement host. It is intentionally not part of the normal unit-test loop.
+## Benchmark CLI
 
-## Canonical Benchmark
-
-**Start here:** [`docs/CANONICAL.md`](docs/CANONICAL.md)
-
-Run the canonical benchmark with:
+全ベンチマーク操作は `rudp-benchctl` に統合。Python 依存なし。
 
 ```sh
-go run ./cmd/rudp-bench-canonical
+go build -o rudp-benchctl ./cmd/rudp-benchctl
+
+# canonical sweep (locked scenario — override不可)
+./rudp-benchctl run scenarios/canonical.json
+
+# quick smoke test
+./rudp-benchctl run scenarios/quick.json
+
+# 単発実行
+./rudp-benchctl run --lib coop_rudp --profile echo --conns 50 --duration 5
+
+# 実行計画プレビュー
+./rudp-benchctl run scenarios/canonical.json --plan
+
+# dry-run (コマンド出力のみ)
+./rudp-benchctl run --lib enet --profile echo --conns 10 --dry-run
 ```
 
-`docs/CANONICAL.md` is the single human-facing entrypoint for the canonical sweep definition, current published result, and generated report workflow. Do not duplicate result tables in this README.
+canonical sweep は `sudo` が必要（`tc netem`, `systemd-run` CPU pinning, cgroup isolation）。
 
 ## Docs
 
