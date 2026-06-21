@@ -26,6 +26,7 @@ namespace {
 
 constexpr size_t kMaxDatagramSize = 1350;
 constexpr size_t kInboxLimit = 1u << 16;
+constexpr size_t kDgramQueueLimit = 64;
 
 struct CertPaths {
   std::string cert;
@@ -195,8 +196,8 @@ class LsquicAdapter : public rudp_bench::Adapter {
     if (inbox_.dropped() > 0) {
       std::fprintf(stderr, "lsquic_inbox_dropped: %llu\n",
                    (unsigned long long)inbox_.dropped());
-      std::fflush(stderr);
     }
+    std::fflush(stderr);
     // Don't try to cleanly shut down — same rationale as msquic adapter
   }
 
@@ -333,6 +334,9 @@ class LsquicAdapter : public rudp_bench::Adapter {
   }
 
   int send_dgram(ConnCtx* cctx, const void* data, size_t len) {
+    if (cctx->dgram_queue.size() >= kDgramQueueLimit) {
+      return -1;
+    }
     cctx->dgram_queue.emplace_back(
         static_cast<const uint8_t*>(data),
         static_cast<const uint8_t*>(data) + len);
@@ -504,8 +508,6 @@ class LsquicAdapter : public rudp_bench::Adapter {
     }
     auto& front = q.front();
     if (front.size() > buf_sz) {
-      q.pop_front();
-      if (q.empty()) lsquic_conn_want_datagram_write(conn, 0);
       return -1;
     }
     std::memcpy(buf, front.data(), front.size());
