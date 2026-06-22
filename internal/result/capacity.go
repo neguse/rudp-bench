@@ -216,6 +216,47 @@ func (t *CapacityTracker) WriteCSV(path string) error {
 	return WriteCSV(path, bench.CapacityFields, rows)
 }
 
+// PriorCapacity holds the prior measurement state for a (profile, library) pair.
+type PriorCapacity struct {
+	Status      string
+	LastOKConns int
+	BreakConns  int
+}
+
+// ReadCapacityCSV reads a capacity.csv and returns a map keyed by "profile/library".
+func ReadCapacityCSV(path string) (map[string]PriorCapacity, error) {
+	rows, err := ReadCSVRows(path)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]PriorCapacity, len(rows))
+	for _, r := range rows {
+		key := r["profile"] + "/" + r["library"]
+		pc := PriorCapacity{Status: r["status"]}
+		if v, ok := IntOrNone(r["last_ok_conns"]); ok {
+			pc.LastOKConns = v
+		}
+		if v, ok := IntOrNone(r["break_conns"]); ok {
+			pc.BreakConns = v
+		}
+		out[key] = pc
+	}
+	return out, nil
+}
+
+// PriorWasOK returns true if the prior measurement at this (profile, lib, conns)
+// was clearly stable (prior existed and conns <= last_ok_conns).
+func PriorWasOK(prior map[string]PriorCapacity, profile, lib string, conns int) bool {
+	if prior == nil {
+		return false
+	}
+	pc, ok := prior[profile+"/"+lib]
+	if !ok {
+		return false
+	}
+	return conns <= pc.LastOKConns
+}
+
 // sortKeys sorts [2]string keys lexicographically.
 func sortKeys(keys [][2]string) {
 	for i := 0; i < len(keys); i++ {

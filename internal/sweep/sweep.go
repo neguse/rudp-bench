@@ -43,6 +43,8 @@ type RunConfig struct {
 	DryRun        bool
 	Plan          bool
 	Resume        bool
+	Adaptive      bool
+	Prior         map[string]result.PriorCapacity
 	Jobs          int
 	CMake         string
 	LitenetlibBin string
@@ -175,30 +177,30 @@ func Run(ctx context.Context, cfg RunConfig) error {
 				break
 			}
 
-			// Run each repetition: for each run, execute all active libs
-			for _, r := range cfg.Runs {
-				runID := fmt.Sprintf("%s_c%d_r%s", profile.Name, conns, r)
+			clientProcs := profile.ClientProcs
+			if clientProcs > conns {
+				clientProcs = conns
+			}
+			if clientProcs < 1 {
+				clientProcs = 1
+			}
 
-				// Resume: skip completed points
-				if cfg.Resume && completed[runID] {
-					fmt.Printf("[%s] profile=%s conns=%d run=%s SKIP (completed)\n",
-						time.Now().Format("15:04:05"), profile.Name, conns, r)
-					continue
-				}
+			// lib-outer / run-inner: each lib runs its N runs consecutively.
+			// Adaptive mode can break early after run=1 if prior+current both OK.
+			anyAdaptiveSkip := false
+			for _, lib := range active {
+				for ri, r := range cfg.Runs {
+					runID := fmt.Sprintf("%s_c%d_r%s", profile.Name, conns, r)
 
-				clientProcs := profile.ClientProcs
-				if clientProcs > conns {
-					clientProcs = conns
-				}
-				if clientProcs < 1 {
-					clientProcs = 1
-				}
+					if cfg.Resume && completed[runID+"/"+lib] {
+						fmt.Printf("[%s] %s %s c=%d run=%s SKIP (completed)\n",
+							time.Now().Format("15:04:05"), profile.Name, lib, conns, r)
+						continue
+					}
 
-				fmt.Printf("[%s] profile=%s conns=%d run=%s libs=%s START\n",
-					time.Now().Format("15:04:05"), profile.Name, conns, r,
-					strings.Join(active, ","))
+					fmt.Printf("[%s] %s %s c=%d run=%s START\n",
+						time.Now().Format("15:04:05"), profile.Name, lib, conns, r)
 
-				for _, lib := range active {
 					scenarioID := fmt.Sprintf("%s_r%d_u%d_%d_%d_%s_0_%s",
 						lib, profile.RateR, profile.RateU,
 						profile.Size, conns, profile.Mode, cfg.Idle)
@@ -235,18 +237,34 @@ func Run(ctx context.Context, cfg RunConfig) error {
 							"runner returned error for lib=%s profile=%s conns=%d run=%s: %v\n",
 							lib, profile.Name, conns, r, err)
 					}
-				}
 
-				fmt.Printf("[%s] profile=%s conns=%d run=%s DONE\n",
-					time.Now().Format("15:04:05"), profile.Name, conns, r)
+					// Adaptive: after run=1, check if this lib can skip remaining runs
+					if cfg.Adaptive && ri == 0 && len(cfg.Runs) > 1 && !cfg.DryRun {
+						if result.PriorWasOK(cfg.Prior, profile.Name, lib, conns) {
+							if run1OK := checkRun1Delivery(execOpts.Results, lib, scenarioID, cfg.MinDelivery); run1OK {
+								fmt.Printf("  %s %s c=%d adaptive: prior+run1 OK, skip runs %s\n",
+									profile.Name, lib, conns, strings.Join(cfg.Runs[1:], ","))
+								anyAdaptiveSkip = true
+								break
+							}
+						}
+					}
+				}
 			}
 
 			if cfg.DryRun {
 				continue
 			}
 
-			// After all runs for this conns point: combine and aggregate
-			summaryPath, err := connSummary(cfg.Out, profile.Name, conns, cfg.MinValid)
+			// When adaptive skip occurred, some libs have N=1 data.
+			// Use min_valid=1 so single-run results are still valid.
+			minValid := cfg.MinValid
+			if anyAdaptiveSkip && minValid > 1 {
+				minValid = 1
+			}
+
+			// After all libs complete their runs for this conns point: combine and aggregate
+			summaryPath, err := connSummary(cfg.Out, profile.Name, conns, minValid)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "connSummary failed for profile=%s conns=%d: %v\n",
 					profile.Name, conns, err)
@@ -486,6 +504,28 @@ func containsStr(ss []string, s string) bool {
 	for _, v := range ss {
 		if v == s {
 			return true
+		}
+	}
+	return false
+}
+
+// checkRun1Delivery reads the per-run result CSV after run=1 and returns true
+// if the library's delivery_ratio >= minDelivery and the run is valid.
+func checkRun1Delivery(resultsCSV, lib, scenarioID string, minDelivery float64) bool {
+	rows, err := result.ReadCSVRows(resultsCSV)
+	if err != nil || len(rows) == 0 {
+		return false
+	}
+	for _, r := range rows {
+		if r["library"] == lib && r["scenario_id"] == scenarioID {
+			if r["valid"] != "1" {
+				return false
+			}
+			delivery, ok := result.FloatOrNone(r["delivery_ratio"])
+			if !ok {
+				return false
+			}
+			return delivery >= minDelivery
 		}
 	}
 	return false

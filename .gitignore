@@ -6,7 +6,7 @@ compile_commands.json
 *.swp
 __pycache__/
 # Go build artifacts
-rudp-benchctl
+/rudp-benchctl
 
 # .NET build artifacts
 adapters/litenetlib/bin/

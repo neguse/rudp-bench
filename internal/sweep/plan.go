@@ -26,6 +26,11 @@ func ShowPlan(cfg RunConfig) {
 	fmt.Printf("est. time:      %s+\n", formatDuration(estSeconds))
 	fmt.Printf("netem:          %v\n", cfg.Netem)
 	fmt.Printf("isolation:      %s\n", cfg.Isolate)
+	fmt.Printf("adaptive:       %v", cfg.Adaptive)
+	if cfg.Adaptive && cfg.Prior != nil {
+		fmt.Printf(" (%d prior entries)", len(cfg.Prior))
+	}
+	fmt.Println()
 	fmt.Printf("publish:        %v\n", cfg.Publish && !cfg.NoPublish)
 	fmt.Printf("output:         %s\n", cfg.Out)
 }

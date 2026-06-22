@@ -13,6 +13,7 @@ import (
 
 	"github.com/neguse/rudp-bench/internal/bench"
 	"github.com/neguse/rudp-bench/internal/cli"
+	"github.com/neguse/rudp-bench/internal/result"
 	"github.com/neguse/rudp-bench/internal/sweep"
 )
 
@@ -81,6 +82,8 @@ func run(args []string) error {
 	resume := fs.Bool("resume", false, "resume from previous run")
 	noBuild := fs.Bool("no-build", false, "skip cmake build")
 	noPublish := fs.Bool("no-publish", false, "skip publish step")
+	noAdaptive := fs.Bool("no-adaptive", false, "disable adaptive N (always run full N)")
+	priorPath := fs.String("prior", "", "path to prior capacity.csv (auto-detected from current.md if empty)")
 
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -103,7 +106,7 @@ func run(args []string) error {
 			var overridden []string
 			fs.Visit(func(f *flag.Flag) {
 				switch f.Name {
-				case "out", "build-dir", "jobs", "cmake", "dry-run", "plan", "resume", "no-build", "no-publish":
+				case "out", "build-dir", "jobs", "cmake", "dry-run", "plan", "resume", "no-build", "no-publish", "no-adaptive", "prior":
 					// allowed
 				default:
 					overridden = append(overridden, "--"+f.Name)
@@ -226,6 +229,18 @@ func run(args []string) error {
 		}
 	}
 
+	// Load prior capacity for adaptive mode
+	adaptive := !*noAdaptive
+	var prior map[string]result.PriorCapacity
+	if adaptive {
+		prior = loadPrior(root, *priorPath)
+		if prior != nil {
+			fmt.Printf("adaptive: loaded %d prior capacity entries\n", len(prior))
+		} else {
+			fmt.Println("adaptive: no prior found, all points run full N")
+		}
+	}
+
 	cfg := sweep.RunConfig{
 		Root:          root,
 		Out:           cli.AbsPath(root, *out),
@@ -250,6 +265,8 @@ func run(args []string) error {
 		DryRun:        *dryRun,
 		Plan:          *plan,
 		Resume:        *resume,
+		Adaptive:      adaptive,
+		Prior:         prior,
 		Jobs:          *jobs,
 		CMake:         *cmake,
 		LitenetlibBin: "adapters/litenetlib/bin/Release/net10.0/litenetlib_adapter",
@@ -264,6 +281,41 @@ func run(args []string) error {
 	defer stop()
 
 	return sweep.Run(ctx, cfg)
+}
+
+// loadPrior loads prior capacity.csv from an explicit path or auto-detects
+// from docs/measurements/current.md.
+func loadPrior(root, explicit string) map[string]result.PriorCapacity {
+	if explicit != "" {
+		prior, err := result.ReadCapacityCSV(explicit)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot read prior %s: %v\n", explicit, err)
+			return nil
+		}
+		return prior
+	}
+	// Auto-detect: find the latest published measurement
+	measureDir := filepath.Join(root, "docs", "measurements")
+	entries, err := os.ReadDir(measureDir)
+	if err != nil {
+		return nil
+	}
+	var latest string
+	for _, e := range entries {
+		if e.IsDir() {
+			latest = e.Name()
+		}
+	}
+	if latest == "" {
+		return nil
+	}
+	capPath := filepath.Join(measureDir, latest, "capacity.csv")
+	prior, err := result.ReadCapacityCSV(capPath)
+	if err != nil {
+		return nil
+	}
+	fmt.Printf("adaptive: auto-detected prior from %s\n", filepath.Join("docs/measurements", latest))
+	return prior
 }
 
 func splitCSV(s string) []string {
