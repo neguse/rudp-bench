@@ -1,171 +1,113 @@
 # 高性能通信ライブラリの実装・ベンチマークチェックリスト
 
-rudp-bench プロジェクトで実際に踏んだ罠と得た知見から構成。
-各項目の末尾 `§X.Y` は [`dev-notes.md`](dev-notes.md) の該当セクション。
+対象読者: **通信ライブラリの実装者**と**ベンチマークアダプタの実装者**。
+rudp-bench で実際に踏んだ罠から抽出した、フレームワーク非依存の知見集。
+各項目の末尾 `§X.Y` は [`dev-notes.md`](dev-notes.md) の事例。
 
 ---
 
-## 1. ライブラリ実装（Adapter）
+## 1. チャネル設計と HoL blocking
 
-### 1.1 API の正しい使い方
-
-- [ ] reliable と unreliable を**別チャネル**で送っているか。同一チャネルだと reliable の retx が unreliable を head-of-line blocking する（§1.3: ENet channel 0 共用バグ）
-- [ ] unreliable 送信に**順序保証解除フラグ**を付けているか（例: `ENET_PACKET_FLAG_UNSEQUENCED`）
-- [ ] 暗号が API で無効化できないライブラリ（gns, msquic/QUIC）はその旨を記録し、**暗号込みの性能として評価**しているか（§5.7）
-- [ ] ライブラリ固有の送受信単位（LiteNetLib `Unreliable` vs ENet `UNSEQUENCED` 等）の**意味の違い**を把握しているか（§5.6）
-
-### 1.2 Tick モデルの整合
-
-- [ ] 固定ティック設計のライブラリ（yojimbo 等）を busy-poll harness に繋ぐとき、**adapter 側で tick cadence を守っている**か。無制限 poll → 空パケット洪水 → CPU 飽和（§1.9: yojimbo 100Hz 修正）
-- [ ] `SendPackets()` / `AdvanceTime()` の呼び出し頻度がライブラリの設計想定と合っているか
-
-### 1.3 ブロッキングと輻輳制御
-
-- [ ] `connect()` がブロッキングのライブラリで、高 conns 時に**接続だけでタイムアウト**しないか（§1.9: UDT4、conn 数に比例したスラック）
-- [ ] 輻輳制御がベンチ条件（ランダムロス）で**過度にレート抑制**しないか確認したか（§1.9: UDT4 CUDTCC → CCC 変更、msquic Cubic → BBR）
-- [ ] blocking send が 1 conn の stall を全 conn に波及させないか（§1.9: UDT4 `UDT_SNDSYN=false` + per-conn queue）
-
-### 1.4 リソース管理
-
-- [ ] conn ごとに socket を作るライブラリで fd 上限に引っかからないか（§1.7: msquic `LimitNOFILE` 1024 問題）
-- [ ] conn ごとに別 socket を使う実装が高 conns で syscall 過多にならないか（§5.8: mini_rudp 単一 fd 多重化）
-- [ ] `close()` が deadlock / double-free しないか。同期 teardown が内部 worker と競合する場合の対処（§5.11: msquic no-op close + `_Exit(0)`）
+- [ ] reliable と unreliable を**別チャネル（または別キュー）** で送っているか。同一チャネルだと reliable の再送が unreliable を head-of-line blocking する（§1.3: ENet channel 0 共用バグ）
+- [ ] unreliable 送信に**順序保証解除フラグ**を付けているか（例: ENet `ENET_PACKET_FLAG_UNSEQUENCED`）。ordered unreliable はライブラリ内部で sequence 管理し、reliable と干渉しうる
+- [ ] HoL blocking の有無を「低負荷で出ないから OK」で判断していないか。低 conns では出ず、**高負荷（200conn〜）で初めて顕在化する**（§1.2: mini_rudp は c10 で ±1%、c200 で 13〜19 倍）
+- [ ] HoL の測り方: **pure unreliable の u99 vs mixed traffic の u99 の差**。combined p99（reliable + unreliable 混合ヒストグラム）は reliable の retx tail に汚染されて結論が反転する（§1.1）
 
 ---
 
-## 2. ベンチマーク設計
+## 2. ライブラリ API の正しい使い方
 
-### 2.1 ワークロード設計
+### 2.1 tick モデルの整合
 
-- [ ] **複数プロファイル**を用意しているか（broadcast unreliable / mixed reliable+unreliable / pure reliable / 高頻度小パケット 等）。1 プロファイルでは強み・弱みが隠れる
-- [ ] 各プロファイルの conn 数スイープが**ブレイクポイント**を超える範囲まで含んでいるか（壊れない範囲だけ測っても capacity はわからない）
-- [ ] ペイロードサイズが UDP MTU (≈1472B) 内に収まっているか。超過時の挙動（フラグメント or ドロップ）を把握しているか
+- [ ] ライブラリが固定ティック設計（yojimbo 等）の場合、**呼び出し側で tick cadence を守っている**か。busy-poll ループから無制限に `SendPackets()` / `AdvanceTime()` すると空パケット洪水 → CPU 飽和 → 受信側崩壊（§1.9: yojimbo を 100Hz に間引いて delivery 0.42→0.989）
+- [ ] ライブラリのドキュメントが想定する呼び出し頻度（10Hz? 60Hz? 自由?）を確認したか
 
-### 2.2 統計的妥当性
+### 2.2 輻輳制御とロス耐性
 
-- [ ] **N ≥ 3** で測って中央値 + IQR を取っているか。N=1 は shape だけ、「lib X > lib Y」は差が IQR を超えたときのみ（§1.5）
-- [ ] Adaptive N を使う場合でも、ブレイクポイント付近はフル N で回しているか
-- [ ] delivery ratio の閾値（例: 0.95）と valid 判定条件（例: 2/3 runs valid）を明示しているか
+- [ ] ライブラリの輻輳制御が**ランダムロス環境で過度にレート抑制しないか**確認したか。バルク転送向け CC（Cubic 等）は 1% ランダムロスで cwnd を絞り、リアルタイム通信の offered rate を維持できない（§1.9: UDT4 CUDTCC → CCC、msquic Cubic → BBR）
+- [ ] CC アルゴリズムを選択できるライブラリなら、ユースケースに合った CC を選んでいるか（バルク転送向け vs リアルタイム向け）
 
-### 2.3 計測窓とライフサイクル
+### 2.3 ブロッキング API
 
-- [ ] client と server の **active window が重なっている**か。ramp-up 時間が server 寿命に含まれているか（§1.7: msquic canonical 崩壊の正体）
-- [ ] warmup 期間の echo が計測に混入しないか（§5.10: measurement bit による除外）
-- [ ] 計測後の tail 時間が reliable retransmit の完了に十分か（§1.6: `--tail-ms`）
-- [ ] multi-proc client の ramp 窓がプロセス間で揃っているか（§1.7: 全 proc が ramp 窓全体を消費してから計測開始）
+- [ ] `connect()` がブロッキングのとき、高 conns で**接続フェーズだけでタイムアウトしないか**。conn 数 × RTT の積算が想定外に大きくなる（§1.9: UDT4 で 100conn = 数百 ms → スクリプトの slack を使い切って kill）
+- [ ] blocking `send()` が 1 conn の stall を**同一プロセスの全 conn に波及**させないか。非ブロッキング化 + per-conn queue で隔離する（§1.9: UDT4 `UDT_SNDSYN=false`）
 
----
+### 2.4 暗号と公平比較
 
-## 3. 計測指標
-
-### 3.1 Delivery Ratio
-
-- [ ] delivery_ratio が**往復 echo 成功率**であることを明記しているか（片道配信率とは別物。§5.1）
-- [ ] 片道を分析するなら `forward_delivery_ratio` / `server_echo_accept_ratio` / `return_delivery_ratio` を使っているか
-- [ ] channel 別（`_r` / `_u`）で分離しているか
-
-### 3.2 RTT
-
-- [ ] reliable と unreliable の RTT を**別ヒストグラム**で記録しているか。combined histogram は混合シナリオで結論を反転させる（§1.1: combined RTT 汚染）
-- [ ] HoL blocking の定義は「pure-u u99 vs mixed u99 の差」であって combined p99 ではないことを守っているか
-- [ ] 高 conns で `recv_drained_p99` が大きい場合に RTT 絶対値を割り引いているか（§5.5: harness drain 遅延）
-
-### 3.3 CPU
-
-- [ ] `idle=spin` の CPU 100% を飽和と誤読していないか。CPU 律速の診断には `idle=adaptive` 必須（§1.6）
-- [ ] シングルスレッド lib（上限 ~100%）とマルチスレッド lib（SMT2 で上限 ~200%）を**スレッドモデル併記**で比較しているか（§5.2）
-- [ ] CPU 計測が warmup を除外しているか
-- [ ] 瞬間ピーク（`cpu_pct_peak`）も見ているか。平均に薄まるスパイクを捕捉
-
-### 3.4 メモリ
-
-- [ ] **server RSS** をライブラリのメモリ効率指標にしているか。client RSS は harness オーバーヘッド（dedup ring, histogram bins）が混じる（§5.4）
+- [ ] 暗号が API で無効化できないライブラリ（gns, QUIC 系）はその旨を記録し、**暗号込みの性能として評価**しているか（§5.7）
+- [ ] ライブラリ間で unreliable の意味が異なる場合（LiteNetLib `Unreliable` vs ENet `UNSEQUENCED` 等）、内部の sequence 処理の違いを把握しているか（§5.6）
 
 ---
 
-## 4. 環境隔離と再現性
+## 3. リソース管理とスケーラビリティ
 
-### 4.1 CPU 隔離
-
-- [ ] ベンチ用 CPU コアを OS / 他プロセスから隔離しているか（systemd slice, cpuset cgroup, taskset）
-- [ ] CPU governor を `performance` 固定しているか（省電力モードで周波数が揺れると計測ノイズ）
-- [ ] NIC IRQ をベンチコアから追い出しているか
-- [ ] SMT の物理コア / 論理コアの対応を把握しているか（§1.6: pin 7,15 は 1 物理コアの 2 スレッド）
-
-### 4.2 ネットワークエミュレーション
-
-- [ ] netem の `limit` を十分大きく設定しているか（既定 1000 packets は高 conns で BDP 超過 → サイレントドロップ。§1.6: `limit=100000`）
-- [ ] loopback netem は send/recv 両方を通ることを把握しているか（片道 25ms 指定 → RTT ~50ms、loss も `1-(1-loss)²`）
-- [ ] ベンチ後に netem を確実にクリアしているか（残留すると後続テストがサイレントに壊れる。§1.9: `test_no_netem_on_lo`）
-
-### 4.3 プロセス実行環境
-
-- [ ] `systemd-run` 経由実行時の fd 上限（`LimitNOFILE`）が十分か（§1.7: 既定 1024 vs 対話 shell 524288）
-- [ ] `systemd-run` の CWD が正しいか（既定 `/` → 相対パスのファイル出力がサイレントに失敗。§2: `--working-directory=$PWD`）
-- [ ] root 実行で SIGABRT する lib がないか（§2: msquic は `-p User=$USER` 必須）
-- [ ] cgroup の AllowedCPUs と taskset が衝突しないか（§2: systemd-run 経由必須）
-
-### 4.4 共有リソースの認識
-
-- [ ] CPU 隔離していても**メモリ帯域・L3 キャッシュは物理共有**であることを認識しているか（§2: AMD CAT 非対応環境）
-- [ ] 「絶対値の信頼度は中、相対順位の指標として使う」運用にしているか
+- [ ] conn ごとに socket を作るライブラリで、**fd 上限**に引っかからないか。1000 conn = 1000 fd で、プロセスの `ulimit -n` やサンドボックスの既定値（1024 等）を超える（§1.7: msquic）
+- [ ] conn ごとに別 socket → 高 conns で **syscall 過多**にならないか。単一 fd で多重化できるなら切り替えを検討（§5.8: mini_rudp は per-conn socket → 単一 fd 化で初めてまともに計測可能に）
+- [ ] `close()` / shutdown が**内部 worker スレッドと競合して deadlock / double-free しないか**。非同期 teardown が必要なライブラリでは graceful close のタイムアウトと強制終了の両方を用意する（§5.11）
+- [ ] 実行環境が変わると fd 上限やスレッドスケジューリングが変わる。**対話シェルでは動くがサンドボックス/コンテナ経由で落ちる**パターンに注意（§1.7: systemd-run 既定 LimitNOFILE=1024）
 
 ---
 
-## 5. 負荷生成（Client Farm）
+## 4. 計測の落とし穴
 
-- [ ] client の `attempted_ratio` が 1.0 か確認しているか。1.0 未満なら**負荷生成側が律速**（§1.6, §1.9）
-- [ ] `client_tick_ok` が valid 判定に組み込まれているか（pacing budget を守れなかった run は invalid）
-- [ ] multi-proc client 数が適切か（少なすぎ → client 律速、多すぎ → scheduler thrashing で valid=0。§2: 論理コア数に対し N=2〜4）
-- [ ] broadcast と echo で client proc 数を分けているか（§1.9: echo=8 proc, broadcast=4 proc。broadcast を 8 にすると thread の多い lib の受信 delivery が落ちる）
-- [ ] pacing budget の閾値が rate-proportional + 絶対値の床になっているか（§1.4: `max(100, interval/10)`）
+### 4.1 ヒストグラムの分離
 
----
+- [ ] mixed traffic（reliable + unreliable）のレイテンシを**チャネル別ヒストグラム**で記録しているか。combined histogram では reliable の retx tail（200ms+）が unreliable の p99 に混入し、「全ライブラリに HoL あり」という偽の結論を導く（§1.1）
+- [ ] 新しい計測指標を追加するとき「mixed で値が変わるか？ 実体か計測アーティファクトか？」を先に問うているか
 
-## 6. 診断と原因切り分け
+### 4.2 計測窓（measurement window）
 
-### 6.1 ブレイクポイント診断
+- [ ] client と server の**計測窓が重なっている**か。ramp-up 時間を server の寿命計算に含めないと、client がまだ送信中に server が退場する → 一定割合の delivery 欠損が出る（§1.7: msquic で `delivery ≈ (duration − ramp) / duration` の理論値と完全一致）
+- [ ] warmup 中に送った echo が計測期間に戻ってきて **delivery > 1.0** にならないか。payload に measurement-window bit を入れてフィルタする（§5.10）
+- [ ] 計測後の tail 時間が **reliable retransmit の完了に十分**か。短すぎると in-flight の reliable メッセージが未達扱いになる
 
-- [ ] delivery < 0.95 のとき、まず以下を切り分けているか：
-  - client 律速（`attempted_ratio < 1.0`, `client_tick_ok = 0`）
-  - server CPU 飽和（`server_cpu_pct` ≈ コア上限）
-  - ネットワーク律速（netem loss / limit 超過）
-  - ライブラリ固有の限界（輻輳制御、retx queue）
-  - **harness バグ**（窓ズレ、fd 上限、ramp 不整合）
+### 4.3 統計
 
-### 6.2 「c1 から壊れている」パターン
+- [ ] 結論に使う数字は **N ≥ 3** 取って中央値 + IQR か。同じ条件で N=1 を 10 回回すと ±10〜20% 振れる。「lib X > lib Y」は差が IQR を超えたときだけ言える（§1.5）
 
-- [ ] c1（最小接続数）で delivery が低い場合、**ライブラリ起因として不自然**なので harness / adapter バグを疑っているか（§1.9: yojimbo, udt4, msquic すべて harness 側の問題だった）
+### 4.4 delivery ratio の定義
 
-### 6.3 duration 依存パターン
-
-- [ ] 「delivery が duration 非依存の一定割合で欠ける」を見たら、**両端のライフサイクル（窓ズレ）を疑う**（§1.7: `delivery ≈ (duration − ramp + 2s) / duration` で理論値と完全一致）
-- [ ] ライブラリのチューニングに走る前に、client/server の active window が重なっているか `connect_ms` と突き合わせる
-
-### 6.4 診断シグナルの活用
-
-- [ ] `server_recv_drained_p99` が大きい行はサーバー drain が ranking に影響する可能性を疑う
-- [ ] `conn_disc_transport` / `conn_disc_peer` でベンチ中の unexpected disconnect を検出しているか
-- [ ] `close_ms` で teardown の健全性を確認しているか
-- [ ] 「手動再現では通るが script 経由で落ちる」ときは **ulimit / cgroup の unit 既定値差**を疑う（§1.7）
+- [ ] delivery ratio が何を測っているか明記しているか。**往復 echo 成功率**（片道でどちらかが落ちれば未達）と**片道配信率**は別物。片道を見るなら forward / return を分離する（§5.1）
 
 ---
 
-## 7. 結果の報告と解釈
+## 5. CPU 計測の罠
 
-- [ ] Capacity の定義を明記しているか（例: 「N=3 で valid ≥ 2/3 かつ delivery ≥ 0.95 を満たす最大 conns」）
-- [ ] break reason を記録しているか（delivery 不足 / client_crash / server_crash / client_tick invalid / unsupported）
-- [ ] 暗号有無・スレッドモデル・conn あたりの socket 数など、**公平比較を妨げる差異を注記**しているか
-- [ ] 「combined p99 が上がった」を HoL の根拠にしていないか（§1.1）
-- [ ] 新メトリクス追加時に「mixed で値が変わるか？ その理由は実体か計測アーティファクトか？」を先に検討しているか（§1.1）
-- [ ] 結果の再現に必要な情報（プロファイル定義、netem パラメータ、CPU ピン配置、N、duration）が全て記録されているか
+- [ ] busy-spin idle（`idle=spin`）で **CPU 100% を「飽和」と誤読**していないか。無負荷でも 100% になる。CPU 律速の診断には adaptive idle 必須（§1.6）
+- [ ] シングルスレッド lib（CPU 上限 ~100%）とマルチスレッド lib（SMT2 なら ~200%）を比較するとき、**スレッドモデルを併記**しているか。CPU% の絶対値だけでは比較できない（§5.2）
+- [ ] CPU 計測の warmup 除外をしているか。起動直後の初期化スパイクが平均を歪める
+- [ ] 平均 CPU だけでなく**瞬間ピーク**も見ているか。平均に薄まるスパイクが実際のボトルネック
 
 ---
 
-## 8. CI / 自動化
+## 6. 負荷生成側の品質
 
-- [ ] build + smoke test を CI で回しているか（canonical ベンチは重すぎるので CI 外）
-- [ ] netem 残留チェック（`test_no_netem_on_lo`）を test 先頭に入れているか（§1.9）
-- [ ] CSV 列順変更時に下流スクリプト（plot, 集約, report）を同時に直しているか（§3）
-- [ ] resume 機能で途中失敗からの再開ができるか
-- [ ] 前回結果（`capacity.csv`）を参照した adaptive N で計測時間を短縮しているか
+- [ ] 負荷生成器が**意図した送信レートを出し切れているか検証する仕組み**があるか。生成側が律速していると、ライブラリの限界ではなく生成器の限界を測ってしまう（§1.9: `attempted_ratio < 1.0` で client 律速を検出）
+- [ ] pacing の精度閾値を**絶対値でなく送信間隔の比率**で設定しているか。固定閾値だと低レートで厳しすぎ、高レートで甘すぎる（§1.4: `max(100us, interval/10)`）
+- [ ] multi-process 負荷生成で、**各プロセスの計測窓が揃っている**か。プロセスごとに conn 数が異なると ramp 消費時間がずれ、delivery が構造的に欠損する（§1.7）
+- [ ] ワークロードの種類（broadcast vs echo）で最適な並列度が異なることを把握しているか。一律に増やすと thread の多い lib で受信側 delivery が落ちる場合がある（§1.9: echo=8proc, broadcast=4proc）
+
+---
+
+## 7. 診断パターン
+
+### 7.1 「c1 から壊れている」→ adapter / harness バグ
+
+- [ ] 最小接続数（c1）で delivery が低い場合、**ライブラリ起因として不自然**。adapter の API 誤用か harness のライフサイクルバグを先に疑う（§1.9: yojimbo, udt4, msquic は全て harness / adapter 側の問題だった）
+
+### 7.2 「delivery が duration に比例して欠ける」→ 窓ズレ
+
+- [ ] delivery が `(duration − X) / duration` のパターンなら、client/server の **active window のズレ**をまず疑う。ライブラリのチューニングに走る前に connect_ms と window の重なりを確認する（§1.7）
+
+### 7.3 結果の解釈
+
+- [ ] 高 conns の RTT には**ハーネスの recv drain 遅延**が混じりうる。1 tick に大量メッセージをドレインすると後方メッセージの RTT が水増しされる（§5.5）
+- [ ] client 側のメモリ使用量には**計測ハーネスのオーバーヘッド**（dedup バッファ, ヒストグラム bins）が混じる。ライブラリのメモリ効率は server 側で見る（§5.4）
+
+---
+
+## 8. ネットワークエミュレーションの注意点
+
+- [ ] netem / tc の **packet limit** を十分大きく設定しているか。既定 1000 packets は高 conns で BDP を超え、サイレントにドロップする（§1.6: `limit=100000` に修正）
+- [ ] loopback で netem を使うとき、**send と recv の両方で netem を通る**ことを把握しているか。片道 25ms 指定 → 実効 RTT ~50ms、loss 1% 指定 → 実効 `1-(1-0.01)² ≈ 2%`
+- [ ] CPU は隔離できても**メモリ帯域・L3 キャッシュは物理共有**。他プロセスのキャッシュ汚染で RTT p99 が跳ねる。絶対値より相対順位で判断する（§2）
