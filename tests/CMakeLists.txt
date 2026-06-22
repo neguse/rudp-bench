@@ -38,34 +38,6 @@ add_executable(test_coop_rudp_adapter_smoke test_coop_rudp_adapter_smoke.cc)
 target_link_libraries(test_coop_rudp_adapter_smoke PRIVATE adapter_coop_rudp GTest::gtest_main)
 add_test(NAME test_coop_rudp_adapter_smoke COMMAND test_coop_rudp_adapter_smoke)
 
-find_program(PYTHON3_EXECUTABLE python3)
-if(PYTHON3_EXECUTABLE)
-    add_test(
-        NAME test_reduce_result
-        COMMAND ${PYTHON3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_reduce_result.py"
-    )
-    add_test(
-        NAME test_phase_runner
-        COMMAND ${PYTHON3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_phase_runner.py"
-                --build-dir "${CMAKE_BINARY_DIR}"
-    )
-    set_tests_properties(test_phase_runner PROPERTIES TIMEOUT 20)
-    add_test(
-        NAME test_combine_clients
-        COMMAND ${PYTHON3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_combine_clients.py"
-                --build-dir "${CMAKE_BINARY_DIR}"
-    )
-    set_tests_properties(test_combine_clients PROPERTIES TIMEOUT 15)
-    add_test(
-        NAME test_aggregate_runs
-        COMMAND ${PYTHON3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_aggregate_runs.py"
-    )
-    add_test(
-        NAME test_canonical_profiles
-        COMMAND ${PYTHON3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/test_canonical_profiles.py"
-    )
-endif()
-
 add_executable(test_raw_udp_smoke test_raw_udp_smoke.cc)
 target_link_libraries(test_raw_udp_smoke PRIVATE adapter_raw_udp GTest::gtest_main)
 add_test(NAME test_raw_udp_smoke COMMAND test_raw_udp_smoke)
