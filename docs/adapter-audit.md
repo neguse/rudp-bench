@@ -35,7 +35,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 |-----|------|------|-------|------|
 | raw_udp | sendto | recvfrom | 1 | — |
 | mini_rudp | sendto | recvfrom | 1 | ACK も個別 sendto（10byte/pkt）。ピギーバックなし |
-| coop_rudp | sendmmsg | recvmmsg | send:256 / recv:64 | 同一 peer 宛を物理バッチ化 |
+| coop_rudp | sendmmsg | recvmmsg | send:256 / recv:256 | 同一 peer 宛を物理バッチ化。論理 batch size は 4096/32768 |
 | apex_rudp | sendmmsg/sendto | recvmmsg | send:256 / recv:64 | 3 経路: inline / batch / async TX |
 | enet | sendmsg | recvmsg | 1（iovec で ACK+data を peer 単位結合） | — |
 | kcp | sendto | recvfrom | 1 | output callback 経由 |
@@ -159,16 +159,16 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | lib | 送信キュー上限 | 受信キュー上限 | 満杯時の挙動 |
 |-----|-------------|-------------|------------|
 | enet | 無制限（unreliable は throttle drop） | 32MB/peer | reliable 滞留 / unreliable throttle |
-| kcp | 無制限（<128 frags で成功） | rcv_wnd(128既定) | window→0 で sender 停止 |
+| kcp | 無制限（<128 frags で成功） | rcv_wnd(256, adapter設定) | window→0 で sender 停止 |
 | coop_rudp | per_conn_queue_cap(min 1024)/ring | max_recv_events | RUDP_SEND_QUEUE_FULL 返却 |
 | apex_rudp | 4096/conn | inbox: 1M | send: -1 / recv: oldest drop |
 | mini_rudp | 65536/conn | なし（直接配信） | send: -1 |
-| yojimbo | 4096/channel/direction | 4096/ch/dir | コネクションエラー（切断） |
+| yojimbo | 4096/channel/direction | 4096/ch/dir | send: -1（adapter が CanSendMessage で事前チェック） |
 | gns | SendBuffer=32MB | RecvBuffer=32MB / Msgs=1M | k_EResultLimitExceeded |
 | msquic | datagram:無制限 / stream:flow control | 16MB flow control | datagram: queue→cancel |
 | quiche | datagram:65536 / stream:flow control | datagram:1200 / inbox:65536 | Error::Done |
-| lsquic | datagram:64(adapter) / stream:flow control | inbox:65536 | datagram: -1(drop) |
-| udt4 | 8192pkt(動的拡張) | 8192pkt | async:EASYNCSND / sync:block |
+| lsquic | datagram:64(adapter) / stream:adapter pending_writes(無制限)→flow control | inbox:65536 | datagram: -1(drop) / stream: adapter が先にバッファ |
+| udt4 | adapter out_pending(無制限)→8192pkt(動的拡張) | 8192pkt | adapter バッファ後に async:EASYNCSND / sync:block |
 | raknet | outgoing:無制限 / resend:512 | 無制限 | resend full→reliable blocked |
 | slikenet | 同上 | 同上 | 同上 |
 | litenetlib | outgoing:無制限 / pending window:64 | 無制限 | window full→outgoing 蓄積 |
@@ -185,7 +185,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | apex_rudp | 0 | 1-8 TX + 0-1 RX | tx_mu,recycled_mu,rx_mu | tx_mu: main↔TX workers |
 | mini_rudp | 0 | 0 | — | なし |
 | yojimbo | 0 | 0 | — | なし |
-| gns | 1(service) | 0 | global recursive_timed_mutex 等 | global lock × crypto で 1000conn collapse |
+| gns | 1(service) | 0 | global recursive_timed_mutex 等 | global lock で 1000conn collapse（既定は暗号なし。gns_encrypted variant のみ crypto 負荷加算） |
 | msquic | N(worker+datapath) | 0 | per-worker,per-conn,per-stream | adapter の単一 mtx_ が全 callback 直列化 |
 | quiche | 0 | 0 | — | なし |
 | lsquic | 0 | 0 | — | なし |
@@ -214,7 +214,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | msquic | QUIC MTU | N/A(stream) | あり | stream segmentation |
 | quiche | QUIC MTU | N/A(stream) | あり(BTreeMap) | datagram: ~1200B 上限 |
 | lsquic | QUIC MTU | N/A(stream) | あり | datagram: ~1200B 上限 |
-| litenetlib | MTU−header | 65535 | あり | — |
+| litenetlib | MTU−header | 65535 | あり | adapter が MaxPayloadBytes=1000 で制限。ベンチマークではそれ以上のサイズは不可 |
 
 ---
 
@@ -245,7 +245,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 1. apex_rudp: シーケンス番号ラップアラウンド未処理。 plain `>` comparison。1M PPS で ~71 分で破綻
 2. coop_rudp, apex_rudp, mini_rudp: 死活検知なし。 crashed peer に無限再送、リソースリーク
 3. kcp: dead_link=20 を adapter が無視。 `kcp->state` が -1 になっても参照されない
-4. yojimbo: send queue full = コネクション切断。 backpressure ではなく即断
+4. yojimbo: send queue full 時、lib 本体はコネクションエラーを起こすが adapter が CanSendMessage で事前チェックし -1 を返却（backpressure）
 5. raknet/slikenet: SO_SNDBUF=16KB のみ。 送信バッファが受信の 1/16
 6. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
 7. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
@@ -261,4 +261,4 @@ adapter コード + third_party ライブラリのソースコードを精読し
 7. quiche BBRv2: beta=0.3（70% 削減）。 標準の 50% multiplicative decrease より攻撃的
 8. raknet/slikenet: loss で cwnd=1MTU（Tahoe 動作）。 min MTU=576 で初期 window=548byte
 9. lsquic: QUIC 実装で唯一 ACK を別 datagram で送信
-10. gns: 1000conn でグローバルロック競合により delivery 崩壊。 poll group で軽減
+10. gns: 1000conn でグローバルロック競合により delivery 崩壊（既定は暗号なし）。 poll group で軽減
