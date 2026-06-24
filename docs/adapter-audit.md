@@ -124,7 +124,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | yojimbo | なし | — | — | — |
 | gns | TFRC(RFC 3448風)+token bucket | 4380byte/assumed_RTT | TFRC formula | Nagle 5ms 結合あり |
 | msquic | BBR（adapter 選択） | 10×MSS≈12KB | Recovery: window=BytesInFlight | lib 既定は Cubic |
-| quiche | BBRv2(Chromium 派生) | 10×MSS=12KB | beta=0.3（70%削減） | 標準の 50% より攻撃的 |
+| quiche | BBRv2(adapter 選択) | 10×MSS=12KB | beta=0.3（70%削減） | 標準の 50% より攻撃的。lib 既定は CUBIC |
 | lsquic | BBR（adapter 選択） | 32×1460=46720byte | Recovery window | lib 既定は Adaptive(BBR→Cubic) |
 | udt4 | BenchCCC（adapter 独自、CC なし） | cwnd=64pkt, period=1μs | なし（空実装） | lib 既定 CUDTCC(DAIMD) を完全置換 |
 | raknet | TCP Reno 風 | 1 MTU(~548byte) | cwnd=1MTU（Tahoe 動作） | 回復が極めて遅い |
@@ -158,15 +158,15 @@ adapter コード + third_party ライブラリのソースコードを精読し
 
 | lib | 送信キュー上限 | 受信キュー上限 | 満杯時の挙動 |
 |-----|-------------|-------------|------------|
-| enet | 無制限（unreliable は throttle drop） | 32MB/peer | reliable 滞留 / unreliable throttle |
+| enet | 無制限（unreliable は throttle drop） | lib 32MB/peer + adapter inbox 65536 | reliable 滞留 / unreliable throttle / adapter inbox 満杯で oldest drop |
 | kcp | 無制限（<128 frags で成功） | rcv_wnd(256, adapter設定) | window→0 で sender 停止 |
 | coop_rudp | per_conn_queue_cap(min 1024)/ring | max_recv_events | RUDP_SEND_QUEUE_FULL 返却 |
-| apex_rudp | 4096/conn | inbox: 1M | send: -1 / recv: oldest drop |
+| apex_rudp | reliable 4096/conn + async TX 1M（server unreliable 既定 ON） | inbox: 1M | send: reliable 満杯で -1 / async TX 満杯で drop / recv: oldest drop |
 | mini_rudp | 65536/conn | なし（直接配信） | send: -1 |
 | yojimbo | 4096/channel/direction | 4096/ch/dir | send: -1（adapter が CanSendMessage で事前チェック） |
 | gns | SendBuffer=32MB | RecvBuffer=32MB / Msgs=1M | k_EResultLimitExceeded |
 | msquic | datagram:無制限 / stream:flow control | 16MB flow control | datagram: queue→cancel |
-| quiche | datagram:65536 / stream:flow control | datagram:1200 / inbox:65536 | Error::Done |
+| quiche | datagram:65536 / stream:flow control（adapter backpressure なし） | datagram:1200 / inbox:65536 | datagram:Error::Done / stream:逼迫時の partial write は破棄（再送・滞留なし） |
 | lsquic | datagram:64(adapter) / stream:adapter pending_writes(無制限)→flow control | inbox:65536 | datagram: -1(drop) / stream: adapter が先にバッファ |
 | udt4 | adapter out_pending(無制限)→8192pkt(動的拡張) | 8192pkt | adapter バッファ後に async:EASYNCSND / sync:block |
 | raknet | outgoing:無制限 / resend:512 | 無制限 | resend full→reliable blocked |
@@ -202,7 +202,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 |-----|-----------|----------------|-----------|------|
 | raw_udp | 65507B | なし | — | — |
 | mini_rudp | 65497B | なし | — | 分割非対応 |
-| coop_rudp | 1200B | 256 | あり(256-bit bitmap) | — |
+| coop_rudp | 1200B(payload=1148) | 256 | あり(256-bit bitmap) | lib は 256-frag 対応だが adapter max_payload=1148B で単一フレーム上限。ベンチマークでは多フラグメント不可 |
 | apex_rudp | 65486B | なし | — | 分割非対応 |
 | enet | 1392B | 1,048,576 | あり(bitmap) | ~32MB まで |
 | kcp | 1400B(MSS=1376) | 127 | なし（in-order のみ） | multi-frag message で HoL |
@@ -211,7 +211,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | udt4 | ~1472B(MSS) | 8192+ | あり(DGRAM) | STREAM は透過 |
 | yojimbo | 1024B(fragment) | pkt:16 / block:256 | あり | block=250ms resend |
 | gns | ~1232B | ~14(unreliable) / 無制限(stream) | あり | unreliable は超過で破棄 |
-| msquic | QUIC MTU | N/A(stream) | あり | stream segmentation |
+| msquic | QUIC MTU / datagram payload 1000B | N/A(stream) | あり | stream segmentation。unreliable は datagram path（adapter 上限 1000B） |
 | quiche | QUIC MTU | N/A(stream) | あり(BTreeMap) | datagram: ~1200B 上限 |
 | lsquic | QUIC MTU | N/A(stream) | あり | datagram: ~1200B 上限 |
 | litenetlib | MTU−header | 65535 | あり | adapter が MaxPayloadBytes=1000 で制限。ベンチマークではそれ以上のサイズは不可 |
@@ -231,6 +231,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | gns | SendBufferSize | 512KB | 32MB | 64 倍 |
 | gns | SendRateMin/Max | 256KB/s | 256MB/s | 1000 倍 |
 | msquic | CC algorithm | Cubic | BBR | ロス耐性が大幅に異なる |
+| quiche | CC algorithm | CUBIC | BBRv2 | `quiche_config_set_cc_algorithm` で上書き |
 | lsquic | CC algorithm | Adaptive(BBR→Cubic) | BBR | 固定 BBR |
 | udt4 | CC algorithm | CUDTCC(DAIMD) | BenchCCC（CC なし） | 輻輳制御が完全に無効 |
 | yojimbo | message queue size | 1024 | 4096 | 4 倍 |
