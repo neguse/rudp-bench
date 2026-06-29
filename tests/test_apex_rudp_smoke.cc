@@ -2,9 +2,15 @@
 
 #include "harness/adapter_registry.h"
 
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -18,6 +24,66 @@ class ApexRudpRegistrar {
 static ApexRudpRegistrar registrar;
 
 using namespace rudp_bench;
+
+namespace {
+
+constexpr uint8_t kFlagReliable = 0x01;
+constexpr size_t kApexHeaderBytes = 1 + 4 + 4 + 4 + 8;
+
+class ScopedEnv {
+ public:
+  ScopedEnv(const char* name, const char* value) : name_(name) {
+    const char* old = std::getenv(name);
+    if (old) {
+      had_old_ = true;
+      old_ = old;
+    }
+    ::setenv(name_.c_str(), value, 1);
+  }
+
+  ~ScopedEnv() {
+    if (had_old_) {
+      ::setenv(name_.c_str(), old_.c_str(), 1);
+    } else {
+      ::unsetenv(name_.c_str());
+    }
+  }
+
+ private:
+  std::string name_;
+  bool had_old_ = false;
+  std::string old_;
+};
+
+void store_u32_le(std::vector<uint8_t>& bytes, size_t off, uint32_t v) {
+  bytes[off + 0] = static_cast<uint8_t>(v & 0xffu);
+  bytes[off + 1] = static_cast<uint8_t>((v >> 8) & 0xffu);
+  bytes[off + 2] = static_cast<uint8_t>((v >> 16) & 0xffu);
+  bytes[off + 3] = static_cast<uint8_t>((v >> 24) & 0xffu);
+}
+
+void send_raw_apex_packet(int fd, uint16_t port, uint32_t seq,
+                          const char* payload) {
+  size_t payload_len = std::strlen(payload) + 1;
+  std::vector<uint8_t> bytes(kApexHeaderBytes + payload_len);
+  bytes[0] = kFlagReliable;
+  store_u32_le(bytes, 1, 1);      // conv
+  store_u32_le(bytes, 5, seq);
+  store_u32_le(bytes, 9, 0);      // ack
+  store_u32_le(bytes, 13, 0);     // ack_bits low
+  store_u32_le(bytes, 17, 0);     // ack_bits high
+  std::memcpy(bytes.data() + kApexHeaderBytes, payload, payload_len);
+
+  sockaddr_in dst{};
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(port);
+  ASSERT_EQ(inet_pton(AF_INET, "127.0.0.1", &dst.sin_addr), 1);
+  ASSERT_EQ(::sendto(fd, bytes.data(), bytes.size(), 0,
+                     reinterpret_cast<sockaddr*>(&dst), sizeof(dst)),
+            static_cast<ssize_t>(bytes.size()));
+}
+
+}  // namespace
 
 TEST(ApexRudpSmoke, ReliableEcho) {
   auto server = create_adapter("apex_rudp");
@@ -146,6 +212,63 @@ TEST(ApexRudpSmoke, ReliableSendBackpressuresWhenPendingQueueIsFull) {
 
   EXPECT_EQ(accepted, 4096u);
   client->close();
+  server->close();
+}
+
+TEST(ApexRudpSmoke, ReliableSendTimesOutDisconnectedPeer) {
+  ScopedEnv timeout("APEX_RELIABLE_TIMEOUT_MS", "20");
+  auto client = create_adapter("apex_rudp");
+  ASSERT_NE(client, nullptr);
+
+  uint32_t cid = client->client_connect("127.0.0.1", 0xC2FD);
+  const char msg[] = "timeout";
+  ASSERT_TRUE(client->is_connected(cid));
+  ASSERT_EQ(client->send(cid, msg, sizeof(msg), true), 0);
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (std::chrono::steady_clock::now() < deadline && client->is_connected(cid)) {
+    client->poll();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  EXPECT_FALSE(client->is_connected(cid));
+  EXPECT_EQ(client->send(cid, msg, sizeof(msg), true), -1);
+  EXPECT_EQ(client->connection_stats().shutdown_by_transport, 1u);
+  client->close();
+}
+
+TEST(ApexRudpSmoke, ReliableSeqWrapDeliversPostWrapPacket) {
+  constexpr uint16_t kPort = 0xC2FC;
+  auto server = create_adapter("apex_rudp");
+  ASSERT_NE(server, nullptr);
+  server->server_listen(kPort);
+
+  int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  ASSERT_GE(fd, 0);
+  send_raw_apex_packet(fd, kPort, 0xFFFF'FFFEu, "before-wrap");
+  send_raw_apex_packet(fd, kPort, 0xFFFF'FFFFu, "at-wrap");
+  send_raw_apex_packet(fd, kPort, 1u, "after-wrap");
+
+  std::vector<std::string> got;
+  char buf[64]{};
+  size_t len = 0;
+  uint32_t cid = 0;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (got.size() < 3 && std::chrono::steady_clock::now() < deadline) {
+    server->poll();
+    while (server->recv(buf, sizeof(buf), &len, &cid) == 1) {
+      got.emplace_back(buf, len > 0 ? len - 1 : 0);
+    }
+    if (got.size() < 3) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  EXPECT_EQ(got.size(), 3u);
+  if (got.size() == 3u) {
+    EXPECT_EQ(got[0], "before-wrap");
+    EXPECT_EQ(got[1], "at-wrap");
+    EXPECT_EQ(got[2], "after-wrap");
+  }
+  ::close(fd);
   server->close();
 }
 

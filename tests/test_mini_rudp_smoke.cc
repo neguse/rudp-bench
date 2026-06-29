@@ -3,7 +3,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -17,6 +19,35 @@ class MiniRudpRegistrar {
 static MiniRudpRegistrar registrar;
 
 using namespace rudp_bench;
+
+namespace {
+
+class ScopedEnv {
+ public:
+  ScopedEnv(const char* name, const char* value) : name_(name) {
+    const char* old = std::getenv(name);
+    if (old) {
+      had_old_ = true;
+      old_ = old;
+    }
+    ::setenv(name_.c_str(), value, 1);
+  }
+
+  ~ScopedEnv() {
+    if (had_old_) {
+      ::setenv(name_.c_str(), old_.c_str(), 1);
+    } else {
+      ::unsetenv(name_.c_str());
+    }
+  }
+
+ private:
+  std::string name_;
+  bool had_old_ = false;
+  std::string old_;
+};
+
+}  // namespace
 
 TEST(MiniRudpSmoke, ReliableEcho) {
   auto server = create_adapter("mini_rudp");
@@ -131,6 +162,28 @@ TEST(MiniRudpSmoke, ReliableSendBackpressuresWhenPendingQueueIsFull) {
   }
 
   EXPECT_EQ(accepted, 65536u);
+  client->close();
+}
+
+TEST(MiniRudpSmoke, ReliableSendTimesOutDisconnectedPeer) {
+  ScopedEnv timeout("MINI_RUDP_RELIABLE_TIMEOUT_MS", "20");
+  auto client = create_adapter("mini_rudp");
+  ASSERT_NE(client, nullptr);
+
+  uint32_t cid = client->client_connect("127.0.0.1", 0xC1FD);
+  const char msg[] = "timeout";
+  ASSERT_TRUE(client->is_connected(cid));
+  ASSERT_EQ(client->send(cid, msg, sizeof(msg), true), 0);
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (std::chrono::steady_clock::now() < deadline && client->is_connected(cid)) {
+    client->poll();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  EXPECT_FALSE(client->is_connected(cid));
+  EXPECT_EQ(client->send(cid, msg, sizeof(msg), true), -1);
+  EXPECT_EQ(client->connection_stats().shutdown_by_transport, 1u);
   client->close();
 }
 

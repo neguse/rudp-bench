@@ -17,8 +17,8 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | apex_rudp | 4MB | 4MB | adapter:146-147 | `APEX_RCVBUF_KB` env で変更可 |
 | enet | 256KB | 256KB | host.c:65-66 + adapter:208-209 | `ENET_RCVBUF_KB` env で変更可 |
 | kcp | 256KB | 256KB | adapter:124-125 | `KCP_RCVBUF_KB` env で変更可。1MB に増やすと delivery 0.78→0.52 に悪化（バッファブロート） |
-| raknet | 256KB | 16KB | RakNetSocket2_Berkley.cpp:39,54 | 送受信非対称。送信ボトルネック |
-| slikenet | 256KB | 16KB | RakNetSocket2_Berkley.cpp:39,54 | 同上 |
+| raknet | 256KB | 256KB | RakNetSocket2_Berkley.cpp:39,54 | vendored SLikeNet patch で送受信を対称化 |
+| slikenet | 256KB | 256KB | RakNetSocket2_Berkley.cpp:39,54 | 同上 |
 | udt4 | 65KB(UDP層) | 65KB(UDP層) | channel.cpp:152-153 | UDT 層 recv buffer: 8192pkt×1500≈12MB |
 | yojimbo | 4MB | 4MB | netcode.c:55-58 | `#define` 固定、変更不可 |
 | gns | 4MB | 4MB | lowlevel.cpp:2065-2073 + adapter:75 | lib 既定 256KB を adapter が 4MB に上書き。`gns_smallbuf` variant で 256KB |
@@ -96,16 +96,16 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | lib | 再送上限 | 死活検知 | keepalive | timeout |
 |-----|---------|---------|-----------|---------|
 | enet | ~5-6回 | reliable timeout chain | 500ms PING | 5-30s |
-| kcp | dead_link=20/seg | `kcp->state=-1` adapter 未参照 | なし | なし |
+| kcp | dead_link=20/seg | adapter が `kcp->state=-1` を切断扱い | なし | dead_link 到達 |
 | coop_rudp | 無制限 | なし | なし | なし |
-| apex_rudp | 無制限 | なし | なし | なし |
-| mini_rudp | 無制限 | なし（`is_connected()`常にtrue） | なし | なし |
+| apex_rudp | 10s reliable pending timeout(adapter) | 未 ACK reliable timeout | なし | 10s (`APEX_RELIABLE_TIMEOUT_MS`) |
+| mini_rudp | 10s reliable pending timeout(adapter) | 未 ACK reliable timeout | なし | 10s (`MINI_RUDP_RELIABLE_TIMEOUT_MS`) |
 | yojimbo | 無制限(msg level) | netcode keepalive | 100ms(10Hz) | 10s |
 | gns | 無制限 | TimeoutConnected | 10s(active)/60s(idle) | 10s |
 | msquic | 無制限(PTO backoff) | DisconnectTimeout | 無効(既定) | idle:30s, disconnect:16s |
 | quiche | 無制限(PTO 2^20 まで) | idle timeout | なし | 30s |
 | lsquic | 無制限(2^10 まで) | idle+no-progress | 15s PING | idle:30s, handshake:10s |
-| udt4 | 無制限 | EXP_COUNT>16 AND >5s | EXP timer 時 | ~5s+ |
+| udt4 | 無制限 | EXP_COUNT>16 AND >5s（adapter 未参照） | EXP timer 時 | ~5s+ |
 | raknet | 無制限 | AckTimeout | timeoutTime/2 | 10s(release)/30s(debug) |
 | slikenet | 同上 | 同上 | 同上 | 同上 |
 | litenetlib | 無制限 | DisconnectTimeout | 1000ms Ping/Pong | 5s |
@@ -140,8 +140,8 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | enet | 16-bit(per-channel) | windowed(16窓×4096seq) | 0.65s | 0.065s |
 | kcp | 32-bit | signed cast half-space | 11.9h | 71.6min |
 | coop_rudp | 32-bit(pkt) / 16-bit(ch) | `seq32_after()`: diff<0x80000000 | 11.9h | 71.6min |
-| apex_rudp | 32-bit | なし（plain `>`） | 11.9h | 71.6min で破綻 |
-| mini_rudp | 32-bit | なし（equality のみ） | 11.9h | 71.6min |
+| apex_rudp | 32-bit | `seq32_after()` half-space + seq 0 skip | 11.9h | 71.6min（wrap 処理済み） |
+| mini_rudp | 32-bit | bounded equality dedup + seq 0 skip + 10s pending timeout | 11.9h | 71.6min |
 | yojimbo | 16-bit(reliable) / 64-bit(netcode) | half-space(32768) | 0.65s | 0.065s |
 | gns | 64-bit(内部) / 16-bit(wire) | 16bit gap→64bit 展開 | 実質なし | 実質なし |
 | msquic | 64-bit(QUIC var-int) | monotonic increasing | 実質なし | 実質なし |
@@ -161,11 +161,11 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | enet | 無制限（unreliable は throttle drop） | lib 32MB/peer + adapter inbox 65536 | reliable 滞留 / unreliable throttle / adapter inbox 満杯で oldest drop |
 | kcp | 無制限（<128 frags で成功） | rcv_wnd(256, adapter設定) | window→0 で sender 停止 |
 | coop_rudp | per_conn_queue_cap(min 1024)/ring | max_recv_events | RUDP_SEND_QUEUE_FULL 返却 |
-| apex_rudp | reliable 4096/conn + async TX 1M（server unreliable 既定 ON） | inbox: 1M | send: reliable 満杯で -1 / async TX 満杯で drop / recv: oldest drop |
-| mini_rudp | 65536/conn | なし（直接配信） | send: -1 |
+| apex_rudp | reliable 4096/conn + 10s timeout + async TX 1M（server unreliable 既定 ON） | inbox: 1M | send: reliable 満杯で -1 / timeout で conn inactive / async TX 満杯で drop / recv: oldest drop |
+| mini_rudp | 65536/conn + 10s timeout | なし（直接配信） | send: -1 / timeout で conn inactive |
 | yojimbo | 4096/channel/direction | 4096/ch/dir | send: -1（adapter が CanSendMessage で事前チェック） |
-| gns | SendBuffer=32MB | RecvBuffer=32MB / Msgs=1M | k_EResultLimitExceeded |
-| msquic | datagram:無制限 / stream:flow control | 16MB flow control | datagram: queue→cancel |
+| gns | SendBuffer=32MB | lib RecvBuffer=32MB/Msgs=1M + adapter inbox 無制限 | k_EResultLimitExceeded |
+| msquic | datagram:無制限 / stream:flow control | 16MB flow control + adapter inbox 無制限 | datagram: queue→cancel |
 | quiche | datagram:65536 / stream:flow control（adapter backpressure なし） | datagram:1200 / inbox:65536 | datagram:Error::Done / stream:逼迫時の partial write は破棄（再送・滞留なし） |
 | lsquic | datagram:64(adapter) / stream:adapter pending_writes(無制限)→flow control | inbox:65536 | datagram: -1(drop) / stream: adapter が先にバッファ |
 | udt4 | adapter out_pending(無制限)→8192pkt(動的拡張) | 8192pkt | adapter バッファ後に async:EASYNCSND / sync:block |
@@ -243,13 +243,20 @@ adapter コード + third_party ライブラリのソースコードを精読し
 
 ### 危険（正確性・安定性リスク）
 
-1. apex_rudp: シーケンス番号ラップアラウンド未処理。 plain `>` comparison。1M PPS で ~71 分で破綻
-2. coop_rudp, apex_rudp, mini_rudp: 死活検知なし。 crashed peer に無限再送、リソースリーク
-3. kcp: dead_link=20 を adapter が無視。 `kcp->state` が -1 になっても参照されない
-4. yojimbo: send queue full 時、lib 本体はコネクションエラーを起こすが adapter が CanSendMessage で事前チェックし -1 を返却（backpressure）
-5. raknet/slikenet: SO_SNDBUF=16KB のみ。 送信バッファが受信の 1/16
-6. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
-7. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
+#### 改善済み
+
+1. apex_rudp: シーケンス番号ラップアラウンドを `seq32_after()` half-space 比較に変更。seq 0 も送信側で skip
+2. apex_rudp, mini_rudp: 未 ACK reliable が 10s 残った接続を inactive 化し、pending buffer を解放
+3. kcp: `dead_link` 到達後の `kcp->state=-1` を adapter が切断扱いに反映
+4. raknet/slikenet: SO_SNDBUF を 16KB から 256KB に上げ、SO_RCVBUF と対称化
+5. yojimbo: send queue full は adapter が `CanSendMessage` で事前チェックし、切断ではなく -1 backpressure として扱う
+
+#### 残存
+
+1. coop_rudp: 死活検知なし。crashed peer に無限再送、リソースリーク
+2. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
+3. udt4: UDT 内部は EXP_COUNT timeout を持つが adapter が切断状態を参照しない
+4. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
 
 ### 意外な設計選択
 

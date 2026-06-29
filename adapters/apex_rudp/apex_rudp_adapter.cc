@@ -65,6 +65,7 @@ constexpr size_t MAX_DRAIN_PACKETS = 4096;
 constexpr size_t MAX_TX_QUEUE = 1u << 20;
 constexpr size_t MAX_RX_QUEUE = 1u << 20;
 constexpr size_t DEFAULT_CLIENT_RECV_BUDGET = 64;
+constexpr int DEFAULT_RELIABLE_TIMEOUT_MS = 10'000;
 
 struct PacketHeader {
   uint8_t flags = 0;
@@ -129,6 +130,10 @@ uint64_t addr_key(const sockaddr_in& a) {
 
 bool same_endpoint(const sockaddr_in& a, const sockaddr_in& b) {
   return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
+}
+
+bool seq32_after(uint32_t a, uint32_t b) {
+  return static_cast<int32_t>(a - b) > 0;
 }
 
 void set_nonblock(int fd) {
@@ -253,6 +258,14 @@ std::chrono::milliseconds ack_delay() {
   return delay;
 }
 
+std::chrono::milliseconds reliable_timeout() {
+  const char* v = std::getenv("APEX_RELIABLE_TIMEOUT_MS");
+  if (!v || !*v) return std::chrono::milliseconds(DEFAULT_RELIABLE_TIMEOUT_MS);
+  int parsed = std::atoi(v);
+  if (parsed <= 0) return std::chrono::milliseconds(DEFAULT_RELIABLE_TIMEOUT_MS);
+  return std::chrono::milliseconds(parsed);
+}
+
 class RecvSackWindow {
  public:
   bool insert(uint32_t seq) {
@@ -262,7 +275,7 @@ class RecvSackWindow {
       bits_ = 1;
       return true;
     }
-    if (seq > highest_) {
+    if (seq32_after(seq, highest_)) {
       uint32_t shift = seq - highest_;
       bits_ = (shift >= 64) ? 1 : ((bits_ << shift) | 1);
       highest_ = seq;
@@ -288,6 +301,7 @@ class RecvSackWindow {
 struct PendingSend {
   uint32_t seq = 0;
   std::vector<uint8_t> bytes;
+  clock_type::time_point first_sent_at{};
   clock_type::time_point sent_at{};
 };
 
@@ -335,7 +349,7 @@ struct FanoutJob {
 };
 
 bool ack_covers(uint32_t ack, uint64_t ack_bits, uint32_t seq) {
-  if (ack == 0 || seq > ack) return false;
+  if (ack == 0 || seq == 0 || seq32_after(seq, ack)) return false;
   uint32_t delta = ack - seq;
   if (delta >= 64) return false;
   return (ack_bits & (uint64_t{1} << delta)) != 0;
@@ -440,7 +454,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     if (!c) return -1;
     if (reliable && c->pending.size() >= MAX_PENDING_RELIABLE_PER_CONN) return -1;
 
-    uint32_t seq = reliable ? c->next_seq++ : 0;
+    uint32_t seq = reliable ? next_packet_seq(*c) : 0;
     std::vector<uint8_t> pkt = take_buffer();
     pkt.resize(HEADER_BYTES + len);
     PacketHeader h;
@@ -455,7 +469,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
 
     if (reliable) {
       auto now = clock_type::now();
-      c->pending.push_back(PendingSend{seq, std::move(pkt), now});
+      c->pending.push_back(PendingSend{seq, std::move(pkt), now, now});
       PendingSend& pending = c->pending.back();
       if (!queue_send_ref(*c, pending.bytes.data(), pending.bytes.size())) {
         recycle_buffer(std::move(pending.bytes));
@@ -577,6 +591,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     batch_recv_seen_ = false;
     next_id_ = 1;
     connected_peak_ = 0;
+    shutdown_by_transport_ = 0;
     hinted_connections_ = 0;
     earliest_ack_ = clock_type::time_point::max();
     earliest_retx_ = clock_type::time_point::max();
@@ -594,6 +609,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   rudp_bench::ConnectionStats connection_stats() const override {
     rudp_bench::ConnectionStats s;
     s.connected_peak = connected_peak_;
+    s.shutdown_by_transport = shutdown_by_transport_;
     return s;
   }
 
@@ -612,6 +628,12 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   int send_fd_for(const TxDatagram& d) const {
     if (d.fd >= 0) return d.fd;
     return is_server_ ? server_fd_ : client_fd_;
+  }
+
+  uint32_t next_packet_seq(Conn& c) {
+    uint32_t seq = c.next_seq++;
+    if (seq == 0) seq = c.next_seq++;
+    return seq;
   }
 
   bool client_sharding_enabled() const {
@@ -636,7 +658,11 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
       Peer& peer = peer_it->second;
       if (conv < peer.id_by_conv.size()) {
         uint32_t existing = peer.id_by_conv[conv];
-        if (existing != 0) return find_conn(existing);
+        if (existing != 0) {
+          Conn* existing_conn = find_conn(existing);
+          if (existing_conn) return existing_conn;
+          if (!create) return nullptr;
+        }
       }
     }
     if (!create) return nullptr;
@@ -1129,7 +1155,6 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   void process_ack(Conn& c, uint32_t ack, uint64_t ack_bits) {
     if (ack == 0 || c.pending.empty()) return;
     for (auto it = c.pending.begin(); it != c.pending.end();) {
-      if (it->seq > ack) break;
       if (ack_covers(ack, ack_bits, it->seq)) {
         recycle_buffer(std::move(it->bytes));
         it = c.pending.erase(it);
@@ -1276,9 +1301,15 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
 
   void service_retransmits(clock_type::time_point now) {
     auto next_due = clock_type::time_point::max();
+    auto timeout = reliable_timeout();
     for (Conn& c : conns_) {
       if (!c.active) continue;
+      bool conn_timed_out = false;
       for (PendingSend& p : c.pending) {
+        if (now - p.first_sent_at >= timeout) {
+          conn_timed_out = true;
+          break;
+        }
         auto due = p.sent_at + RETX_TIMEOUT;
         if (now >= due) {
           PacketHeader h = parse_header(p.bytes.data());
@@ -1293,8 +1324,34 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
         }
         if (due < next_due) next_due = due;
       }
+      if (conn_timed_out) expire_conn(c);
     }
     earliest_retx_ = next_due;
+  }
+
+  void expire_conn(Conn& c) {
+    if (!c.active) return;
+    c.active = false;
+    drop_direct_refs_for(c);
+    for (PendingSend& p : c.pending) {
+      recycle_buffer(std::move(p.bytes));
+    }
+    c.pending.clear();
+    c.ack_dirty = false;
+    c.ack_due = clock_type::time_point::max();
+    ++shutdown_by_transport_;
+  }
+
+  void drop_direct_refs_for(const Conn& c) {
+    for (const PendingSend& p : c.pending) {
+      const uint8_t* pending_data = p.bytes.data();
+      direct_batch_.erase(
+          std::remove_if(direct_batch_.begin(), direct_batch_.end(),
+                         [&](const TxDatagram& d) {
+                           return d.external == pending_data;
+                         }),
+          direct_batch_.end());
+    }
   }
 
   void service_standalone_acks(clock_type::time_point now) {
@@ -1397,6 +1454,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   std::atomic<bool> rx_stop_{false};
   uint32_t next_id_ = 1;
   uint32_t connected_peak_ = 0;
+  uint32_t shutdown_by_transport_ = 0;
   uint32_t hinted_connections_ = 0;
   clock_type::time_point earliest_ack_ = clock_type::time_point::max();
   clock_type::time_point earliest_retx_ = clock_type::time_point::max();
