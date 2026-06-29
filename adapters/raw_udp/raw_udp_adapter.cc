@@ -1,6 +1,7 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
 #include "harness/inbound_queue.h"
+#include "harness/socket_buffer.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -52,16 +53,16 @@ void set_nonblock(int fd) {
   if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) die_errno("fcntl(F_SETFL)");
 }
 
-void tune_socket_buffers(int fd) {
-  int bytes = UDP_SOCKET_BUFFER_BYTES;
-  ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
-  ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
+void tune_socket_buffers(int fd, const char* socket_role) {
+  rudp_bench::tune_udp_socket_buffers(fd, UDP_SOCKET_BUFFER_BYTES,
+                                      UDP_SOCKET_BUFFER_BYTES, "raw_udp",
+                                      socket_role);
 }
 
-int make_udp_socket() {
+int make_udp_socket(const char* socket_role) {
   int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
   if (fd < 0) die_errno("socket(AF_INET, SOCK_DGRAM)");
-  tune_socket_buffers(fd);
+  tune_socket_buffers(fd, socket_role);
   set_nonblock(fd);
   return fd;
 }
@@ -101,7 +102,7 @@ int send_datagram(int fd, const sockaddr_in& peer, const void* data, size_t len)
 class RawUdpAdapter : public rudp_bench::Adapter {
  public:
   void server_listen(uint16_t port) override {
-    server_fd_ = make_udp_socket();
+    server_fd_ = make_udp_socket("server");
     int reuse = 1;
     if (::setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) != 0) {
       die_errno("setsockopt(SO_REUSEADDR)");
@@ -123,7 +124,7 @@ class RawUdpAdapter : public rudp_bench::Adapter {
     // baseline. Reviewed: acceptable, kept as-is. Socket buffers are 256KB
     // (make_udp_socket -> tune_socket_buffers), matching the other adapters.
     Conn c;
-    c.fd = make_udp_socket();
+    c.fd = make_udp_socket("client");
     c.peer.sin_family = AF_INET;
     c.peer.sin_port = htons(port);
     if (inet_pton(AF_INET, host, &c.peer.sin_addr) != 1) {

@@ -1,6 +1,7 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
 #include "harness/inbound_queue.h"
+#include "harness/socket_buffer.h"
 
 extern "C" {
 #include "ikcp.h"
@@ -159,15 +160,14 @@ static void set_nonblock(int fd) {
 // buffer HURTS kcp — a 2026-05-31 A/B at 1000conn showed 1MB bufferbloats the
 // ARQ (more queued segments -> spurious RTO retransmits), dropping 0.78 -> 0.52.
 // 256KB is best for kcp. KCP_RCVBUF_KB overrides (sweeps only).
-static void tune_socket_buffers(int fd) {
+static void tune_socket_buffers(int fd, const char* socket_role) {
   int kb = 256;
   if (const char* v = std::getenv("KCP_RCVBUF_KB"); v && *v) {
     int e = std::atoi(v);
     if (e > 0) kb = e;
   }
   int bytes = kb * 1024;
-  ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
-  ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
+  rudp_bench::tune_udp_socket_buffers(fd, bytes, bytes, "kcp", socket_role);
 }
 
 static uint64_t addr_key(const sockaddr_in& a) {
@@ -258,7 +258,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     a.sin_port = htons(port);
     if (::bind(server_fd_, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0)
       std::abort();
-    tune_socket_buffers(server_fd_);  // L17
+    tune_socket_buffers(server_fd_, "server");  // L17
     set_nonblock(server_fd_);
   }
 
@@ -271,7 +271,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     if (client_fd_ < 0) {
       client_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
       if (client_fd_ < 0) std::abort();
-      tune_socket_buffers(client_fd_);  // L17
+      tune_socket_buffers(client_fd_, "client");  // L17
       set_nonblock(client_fd_);
       sockaddr_in srv{};
       srv.sin_family = AF_INET;

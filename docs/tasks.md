@@ -3,7 +3,7 @@
 `docs/adapter-audit.md` の改善で、adapter 変更だけでは完了しない残作業。
 
 - [x] `coop_rudp` core に per-conn close/abort と max retransmit/idle timeout を追加し、crashed peer の reliable retransmit queue を解放できるようにする。
-- [ ] 全 native adapter で `setsockopt(SO_RCVBUF/SO_SNDBUF)` 後に `getsockopt` で実値を確認し、sysctl clamp を run metadata または diagnostics に出す。
+- [ ] 全 native adapter で `setsockopt(SO_RCVBUF/SO_SNDBUF)` 後に `getsockopt` で実値を確認し、sysctl clamp を run metadata または diagnostics に出す。（対応済み: `raw_udp`, `mini_rudp`, `coop_rudp`, `apex_rudp`, `enet`, `kcp`, `raknet`/`slikenet`, `yojimbo`, `gns`, `quiche`, `lsquic`。残: `udt4`; `msquic` は下の専用タスク）
 - [ ] `msquic` datapath の UDP socket buffer 要求を現実的な値にし、SO_SNDBUF も明示設定する。adapter から制御できない場合は vendored MsQuic patch として管理する。
 - [x] `udt4` adapter が UDT 内部の EXP timeout / broken 状態を `is_connected()` と `send()` に反映する。
 - [x] `udt4` adapter `out_pending` に byte cap と backpressure を追加する。

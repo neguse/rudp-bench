@@ -26,6 +26,10 @@ add_executable(test_proc_sampler test_proc_sampler.cc)
 target_link_libraries(test_proc_sampler PRIVATE rudp_bench_harness GTest::gtest_main)
 add_test(NAME test_proc_sampler COMMAND test_proc_sampler)
 
+add_executable(test_socket_buffer test_socket_buffer.cc)
+target_link_libraries(test_socket_buffer PRIVATE rudp_bench_harness GTest::gtest_main)
+add_test(NAME test_socket_buffer COMMAND test_socket_buffer)
+
 add_executable(test_inbound_queue test_inbound_queue.cc)
 target_link_libraries(test_inbound_queue PRIVATE rudp_bench_harness GTest::gtest_main)
 add_test(NAME test_inbound_queue COMMAND test_inbound_queue)

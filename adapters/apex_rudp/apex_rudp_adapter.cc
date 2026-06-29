@@ -1,6 +1,7 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
 #include "harness/inbound_queue.h"
+#include "harness/socket_buffer.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -141,15 +142,15 @@ void set_nonblock(int fd) {
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-void tune_socket_buffers(int fd) {
+void tune_socket_buffers(int fd, const char* socket_role) {
   int kb = DEFAULT_SOCKET_BUFFER_KB;
   if (const char* v = std::getenv("APEX_RCVBUF_KB"); v && *v) {
     int parsed = std::atoi(v);
     if (parsed > 0) kb = parsed;
   }
   int bytes = kb * 1024;
-  ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
-  ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
+  rudp_bench::tune_udp_socket_buffers(fd, bytes, bytes, "apex_rudp",
+                                      socket_role);
 }
 
 bool async_send_enabled_for(bool is_server) {
@@ -379,7 +380,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     if (server_fd_ < 0) std::abort();
     int reuse = 1;
     ::setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    tune_socket_buffers(server_fd_);
+    tune_socket_buffers(server_fd_, "server");
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -392,7 +393,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
       server_ack_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
       if (server_ack_fd_ < 0) std::abort();
       ::setsockopt(server_ack_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-      tune_socket_buffers(server_ack_fd_);
+      tune_socket_buffers(server_ack_fd_, "server_ack");
       sockaddr_in ack_addr = a;
       ack_addr.sin_port = htons(static_cast<uint16_t>(port + 1));
       if (::bind(server_ack_fd_, reinterpret_cast<sockaddr*>(&ack_addr),
@@ -427,7 +428,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
       for (size_t i = 0; i < shards; ++i) {
         int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (fd < 0) std::abort();
-        tune_socket_buffers(fd);
+        tune_socket_buffers(fd, "client");
         set_nonblock(fd);
         client_fds_.push_back(fd);
       }

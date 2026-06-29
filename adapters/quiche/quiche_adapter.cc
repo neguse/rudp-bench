@@ -1,6 +1,7 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
 #include "harness/inbound_queue.h"
+#include "harness/socket_buffer.h"
 
 #include <quiche.h>
 
@@ -81,8 +82,8 @@ int make_nonblocking_udp(uint16_t port, bool bind_it) {
   int flags = ::fcntl(fd, F_GETFL, 0);
   ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
   int buf = 256 * 1024;
-  ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
-  ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
+  rudp_bench::tune_udp_socket_buffers(fd, buf, buf, "quiche",
+                                      bind_it ? "server" : "client");
   if (bind_it) {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;

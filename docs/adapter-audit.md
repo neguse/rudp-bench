@@ -7,7 +7,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 
 ## 1. ソケットバッファ
 
-全ライブラリで `getsockopt` による設定後確認なし。 `net.core.rmem_max`（既定 ~208KB）を超えた要求はサイレントにクランプされている可能性が高い。
+`raw_udp`, `mini_rudp`, `coop_rudp`, `apex_rudp`, `enet`, `kcp`, `raknet`/`slikenet`, `yojimbo`, `gns`, `quiche`, `lsquic` は `SO_RCVBUF`/`SO_SNDBUF` 設定直後に `getsockopt` の raw actual / Linux effective / clamp 判定を stderr diagnostics へ `socket_buffer ...` 行として出す。 `udt4` は FetchContent 取得の UDT4 `channel.cpp`、`msquic` は datapath patch が残作業。
 
 | lib | SO_RCVBUF | SO_SNDBUF | 設定箇所 | 備考 |
 |-----|-----------|-----------|---------|------|
@@ -259,11 +259,13 @@ adapter コード + third_party ライブラリのソースコードを精読し
 12. raknet/slikenet: outgoing queue に byte cap/backpressure を追加
 13. litenetlib: reliable outgoing queue に byte cap/backpressure を追加
 14. coop_rudp: per-conn abort と max retransmit/idle timeout で crashed peer の reliable queue を解放
+15. native UDP socket buffer: `raw_udp`, `mini_rudp`, `coop_rudp`, `apex_rudp`, `enet`, `kcp`, `raknet`/`slikenet`, `yojimbo`, `gns`, `quiche`, `lsquic` は設定直後の `getsockopt` 実値と clamp 判定を stderr diagnostics に出力
 
 #### 残存
 
-1. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
-2. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
+1. udt4: UDT4 SDK は FetchContent tarball の `channel.cpp` が UDP socket buffer を設定しており、実値 diagnostics patch が未適用
+2. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
+3. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
 
 ### 意外な設計選択
 

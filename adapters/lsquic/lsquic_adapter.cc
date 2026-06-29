@@ -1,6 +1,7 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
 #include "harness/inbound_queue.h"
+#include "harness/socket_buffer.h"
 
 #include <lsquic.h>
 #include "lsquic_cert_helper.h"
@@ -247,8 +248,8 @@ class LsquicAdapter : public rudp_bench::Adapter {
     int flags = ::fcntl(fd, F_GETFL, 0);
     ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     int buf = 256 * 1024;
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
-    ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
+    rudp_bench::tune_udp_socket_buffers(fd, buf, buf, "lsquic",
+                                        bind_it ? "server" : "client");
     if (bind_it) {
       sockaddr_in addr{};
       addr.sin_family = AF_INET;

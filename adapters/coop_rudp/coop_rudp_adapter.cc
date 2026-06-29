@@ -1,6 +1,7 @@
 #include "coop_rudp/rudp.h"
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
+#include "harness/socket_buffer.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -82,10 +83,10 @@ void set_nonblock(int fd) {
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-void tune_socket_buffers(int fd) {
-  int bytes = UDP_SOCKET_BUFFER_BYTES;
-  ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
-  ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
+void tune_socket_buffers(int fd, const char* socket_role) {
+  rudp_bench::tune_udp_socket_buffers(fd, UDP_SOCKET_BUFFER_BYTES,
+                                      UDP_SOCKET_BUFFER_BYTES, "coop_rudp",
+                                      socket_role);
 }
 
 rudp_addr to_rudp_addr(const sockaddr_in& in) {
@@ -474,7 +475,7 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     if (ctx_.fd < 0) std::abort();
     int reuse = 1;
     ::setsockopt(ctx_.fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    tune_socket_buffers(ctx_.fd);
+    tune_socket_buffers(ctx_.fd, "server");
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -501,7 +502,7 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     if (ctx_.fd < 0) {
       ctx_.fd = ::socket(AF_INET, SOCK_DGRAM, 0);
       if (ctx_.fd < 0) std::abort();
-      tune_socket_buffers(ctx_.fd);
+      tune_socket_buffers(ctx_.fd, "client");
       set_nonblock(ctx_.fd);
       create_endpoint();
     }
