@@ -97,7 +97,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 |-----|---------|---------|-----------|---------|
 | enet | ~5-6回 | reliable timeout chain | 500ms PING | 5-30s |
 | kcp | dead_link=20/seg | adapter が `kcp->state=-1` を切断扱い | なし | dead_link 到達 |
-| coop_rudp | 無制限 | なし | なし | なし |
+| coop_rudp | adapter既定64回(`COOP_MAX_RETRANSMITS`) | max retransmit / idle timeout | なし | 10s(`COOP_IDLE_TIMEOUT_MS`) |
 | apex_rudp | 10s reliable pending timeout(adapter) | 未 ACK reliable timeout | なし | 10s (`APEX_RELIABLE_TIMEOUT_MS`) |
 | mini_rudp | 10s reliable pending timeout(adapter) | 未 ACK reliable timeout | なし | 10s (`MINI_RUDP_RELIABLE_TIMEOUT_MS`) |
 | yojimbo | 無制限(msg level) | netcode keepalive | 100ms(10Hz) | 10s |
@@ -258,12 +258,12 @@ adapter コード + third_party ライブラリのソースコードを精読し
 11. kcp: send queue に byte cap/backpressure を追加
 12. raknet/slikenet: outgoing queue に byte cap/backpressure を追加
 13. litenetlib: reliable outgoing queue に byte cap/backpressure を追加
+14. coop_rudp: per-conn abort と max retransmit/idle timeout で crashed peer の reliable queue を解放
 
 #### 残存
 
-1. coop_rudp: 死活検知なし。crashed peer に無限再送、リソースリーク
-2. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
-3. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
+1. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
+2. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
 
 ### 意外な設計選択
 

@@ -295,13 +295,19 @@ struct Pair {
                 uint32_t send_batch_size = 16,
                 uint32_t max_recv_events = 64,
                 uint32_t max_ordered_holds = 32,
-                uint32_t sent_packet_count = 128) {
+                uint32_t sent_packet_count = 128,
+                uint32_t max_retransmits = 0,
+                uint32_t idle_timeout_ms = 0) {
     auto ca_cfg = config_for(&a, mtu, max_payload, send_batch_size,
                              max_recv_events, max_ordered_holds,
                              sent_packet_count);
     auto cb_cfg = config_for(&b, mtu, max_payload, send_batch_size,
                              max_recv_events, max_ordered_holds,
                              sent_packet_count);
+    ca_cfg.max_retransmits = max_retransmits;
+    ca_cfg.idle_timeout_ms = idle_timeout_ms;
+    cb_cfg.max_retransmits = max_retransmits;
+    cb_cfg.idle_timeout_ms = idle_timeout_ms;
     EXPECT_EQ(rudp_endpoint_create(&ea, &ca_cfg), 0);
     EXPECT_EQ(rudp_endpoint_create(&eb, &cb_cfg), 0);
     auto baddr = addr(2);
@@ -1135,6 +1141,86 @@ TEST(CoopRudp, ReliableRetransmitsAfterLostPacket) {
   ASSERT_EQ(rudp_recv(p.eb, out, sizeof(out), &len, &info), 1);
   EXPECT_STREQ(out, msg);
   EXPECT_EQ(info.reliability, RUDP_RELIABLE_UNORDERED);
+}
+
+TEST(CoopRudp, ConnAbortReleasesQueuedReliableMessages) {
+  Pair p;
+  const char msg[] = "abort-me";
+  rudp_send_opts opts{};
+  opts.reliability = RUDP_RELIABLE_UNORDERED;
+  ASSERT_EQ(rudp_send(p.ca, msg, sizeof(msg), &opts), RUDP_SEND_QUEUED);
+
+  rudp_status st{};
+  rudp_get_status(p.ca, &st);
+  ASSERT_EQ(st.send_queue_bytes, sizeof(msg));
+
+  rudp_conn_abort(p.ca);
+  EXPECT_EQ(rudp_endpoint_find_conn(p.ea, 42), nullptr);
+  rudp_get_status(p.ca, &st);
+  EXPECT_EQ(st.usable, 0u);
+  EXPECT_EQ(st.send_queue_bytes, 0u);
+  EXPECT_EQ(st.inflight_bytes, 0u);
+  EXPECT_EQ(st.retransmit_queue_bytes, 0u);
+  EXPECT_EQ(rudp_send(p.ca, msg, sizeof(msg), &opts), RUDP_SEND_UNUSABLE);
+
+  rudp_endpoint_flush(p.ea, p.net.now_ns);
+  EXPECT_TRUE(p.net.packets.empty());
+}
+
+TEST(CoopRudp, MaxRetransmitsAbortsConnectionAndFreesInflight) {
+  Pair p(/*mtu=*/512, /*max_payload=*/0, /*send_batch_size=*/16,
+         /*max_recv_events=*/64, /*max_ordered_holds=*/32,
+         /*sent_packet_count=*/128, /*max_retransmits=*/1);
+  const char msg[] = "retry-timeout";
+  rudp_send_opts opts{};
+  opts.reliability = RUDP_RELIABLE_UNORDERED;
+  ASSERT_EQ(rudp_send(p.ca, msg, sizeof(msg), &opts), RUDP_SEND_QUEUED);
+
+  p.net.drop_next = true;
+  rudp_endpoint_flush(p.ea, p.net.now_ns);
+  rudp_status st{};
+  rudp_get_status(p.ca, &st);
+  ASSERT_EQ(st.inflight_bytes, sizeof(msg));
+
+  p.net.now_ns += 25'000'000ull;
+  rudp_endpoint_flush(p.ea, p.net.now_ns);
+  p.net.packets.clear();
+  rudp_get_status(p.ca, &st);
+  ASSERT_EQ(st.usable, 1u);
+  ASSERT_EQ(st.inflight_bytes, sizeof(msg));
+
+  p.net.now_ns += 25'000'000ull;
+  rudp_endpoint_flush(p.ea, p.net.now_ns);
+  EXPECT_EQ(rudp_endpoint_find_conn(p.ea, 42), nullptr);
+  rudp_get_status(p.ca, &st);
+  EXPECT_EQ(st.usable, 0u);
+  EXPECT_EQ(st.inflight_bytes, 0u);
+  EXPECT_EQ(st.retransmit_queue_bytes, 0u);
+}
+
+TEST(CoopRudp, IdleTimeoutAbortsConnectionAndFreesInflight) {
+  Pair p(/*mtu=*/512, /*max_payload=*/0, /*send_batch_size=*/16,
+         /*max_recv_events=*/64, /*max_ordered_holds=*/32,
+         /*sent_packet_count=*/128, /*max_retransmits=*/0,
+         /*idle_timeout_ms=*/10);
+  const char msg[] = "idle-timeout";
+  rudp_send_opts opts{};
+  opts.reliability = RUDP_RELIABLE_UNORDERED;
+  ASSERT_EQ(rudp_send(p.ca, msg, sizeof(msg), &opts), RUDP_SEND_QUEUED);
+
+  p.net.drop_next = true;
+  rudp_endpoint_flush(p.ea, p.net.now_ns);
+  rudp_status st{};
+  rudp_get_status(p.ca, &st);
+  ASSERT_EQ(st.inflight_bytes, sizeof(msg));
+
+  p.net.now_ns += 11'000'000ull;
+  rudp_endpoint_flush(p.ea, p.net.now_ns);
+  EXPECT_EQ(rudp_endpoint_find_conn(p.ea, 42), nullptr);
+  rudp_get_status(p.ca, &st);
+  EXPECT_EQ(st.usable, 0u);
+  EXPECT_EQ(st.inflight_bytes, 0u);
+  EXPECT_EQ(st.retransmit_queue_bytes, 0u);
 }
 
 TEST(CoopRudp, ReliableRetransmitsWhenRecvQueueWasFull) {

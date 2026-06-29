@@ -47,6 +47,8 @@ constexpr uint32_t MESSAGES_PER_CONNECTION = 64;
 constexpr uint32_t BROAD_RECV_EVENTS_PER_CONNECTION = 64;
 constexpr uint32_t NARROW_RECV_EVENTS_PER_CONNECTION = 16;
 constexpr uint64_t DEFAULT_IDLE_POLL_MIN_NS = 100'000;
+constexpr uint32_t DEFAULT_MAX_RETRANSMITS = 64;
+constexpr uint32_t DEFAULT_IDLE_TIMEOUT_MS = 10'000;
 
 using clock_type = std::chrono::steady_clock;
 
@@ -172,6 +174,19 @@ size_t size_env_or_default(const char* name, size_t default_value) {
   size_t max_size = std::numeric_limits<size_t>::max();
   if (parsed > max_size) return max_size;
   return static_cast<size_t>(parsed);
+}
+
+uint32_t u32_env_or_default(const char* name, uint32_t default_value) {
+  const char* v = std::getenv(name);
+  if (!v || !*v) return default_value;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE) return default_value;
+  if (parsed > std::numeric_limits<uint32_t>::max()) {
+    return std::numeric_limits<uint32_t>::max();
+  }
+  return static_cast<uint32_t>(parsed);
 }
 
 uint64_t coop_idle_poll_min_ns() {
@@ -715,14 +730,26 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
 
   rudp_conn* find_conn(uint32_t conn_id) {
     auto it = conn_by_id_.find(conn_id);
-    if (it != conn_by_id_.end()) return it->second;
+    if (it != conn_by_id_.end()) {
+      if (conn_is_usable(it->second)) return it->second;
+      conn_by_id_.erase(it);
+      ++conn_cache_generation_;
+      conn_cache_complete_ = false;
+      return nullptr;
+    }
     rudp_conn* c = rudp_endpoint_find_conn(ep_, conn_id);
     if (c) remember_conn(conn_id, c);
     return c;
   }
 
+  bool conn_is_usable(rudp_conn* conn) const {
+    rudp_status st{};
+    rudp_get_status(conn, &st);
+    return st.usable != 0;
+  }
+
   void remember_conn(uint32_t conn_id, rudp_conn* conn) {
-    if (!conn) return;
+    if (!conn || !conn_is_usable(conn)) return;
     auto [it, inserted] = conn_by_id_.try_emplace(conn_id, conn);
     if (!inserted && it->second == conn) {
       refresh_conn_cache_complete();
@@ -785,6 +812,10 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
         std::min<uint32_t>(cfg.max_recv_events, broad_recv ? 32768 : 4096);
     cfg.send_batch_size = 256;
     cfg.rto_ms = 100;
+    cfg.max_retransmits =
+        u32_env_or_default("COOP_MAX_RETRANSMITS", DEFAULT_MAX_RETRANSMITS);
+    cfg.idle_timeout_ms =
+        u32_env_or_default("COOP_IDLE_TIMEOUT_MS", DEFAULT_IDLE_TIMEOUT_MS);
     cfg.skip_unreliable_acks = 1;
     if (rudp_endpoint_create(&ep_, &cfg) != 0) std::abort();
     ensure_physical_buffers(&ctx_);

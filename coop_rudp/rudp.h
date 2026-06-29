@@ -49,6 +49,8 @@ typedef struct rudp_endpoint_config {
   uint32_t recv_batch_size;
   uint32_t send_batch_size;
   uint32_t rto_ms;
+  uint32_t max_retransmits;
+  uint32_t idle_timeout_ms;
   uint32_t initial_safe_bps;
   uint8_t skip_unreliable_acks;
 } rudp_endpoint_config;
@@ -67,6 +69,7 @@ int rudp_endpoint_connect(
 
 rudp_conn* rudp_endpoint_find_conn(rudp_endpoint* ep, uint64_t conn_id);
 uint64_t rudp_conn_id(const rudp_conn* conn);
+void rudp_conn_abort(rudp_conn* conn);
 
 typedef struct rudp_status {
   uint32_t safe_bps;

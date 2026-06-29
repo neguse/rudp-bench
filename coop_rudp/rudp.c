@@ -182,10 +182,13 @@ struct rudp_conn {
   uint8_t rx_seen_used[RUDP_RX_SEEN_COUNT];
   uint8_t rx_seen_next[RUDP_RX_SEEN_BUCKETS];
   uint64_t next_retx_ns;
+  uint64_t last_rx_ns;
+  uint64_t last_tx_ns;
   uint64_t srtt_ns;
   uint64_t min_rtt_ns;
   uint64_t acked_packets;
   uint64_t lost_packets;
+  uint32_t retransmits_since_rx;
   uint64_t recv_packets;
   uint64_t reordered_packets;
   uint32_t inflight_bytes;
@@ -843,6 +846,103 @@ static void release_late_acked_messages(rudp_conn* c, uint32_t ack,
   } while (changed);
 }
 
+static void remove_msg_from_current_queue(rudp_conn* c, uint32_t mi,
+                                          rudp_msg* m) {
+  rudp_flow_state* f = flow_for(c, m->flow_id);
+  if (!f) return;
+  if (m->queued_kind == RUDP_QUEUE_UNRELIABLE) {
+    if (ring_remove_value(&f->unreliable_q, mi)) {
+      account_unsent_queue_removed(c, f, m);
+    }
+  } else if (m->queued_kind == RUDP_QUEUE_RELIABLE) {
+    if (ring_remove_value(&f->reliable_q, mi)) {
+      account_unsent_queue_removed(c, f, m);
+    }
+  } else if (m->queued_kind == RUDP_QUEUE_RETRY || m->in_retry) {
+    (void)remove_msg_from_retry_queue(c, mi, m);
+  }
+}
+
+static void drop_conn_recv_events(rudp_conn* c) {
+  rudp_endpoint* ep = c->ep;
+  uint32_t old_count = ep->recv_count;
+  uint32_t old_head = ep->recv_head;
+  uint32_t write = old_head;
+  uint32_t kept = 0;
+  for (uint32_t i = 0; i < old_count; ++i) {
+    uint32_t read = (old_head + i) % ep->cfg.max_recv_events;
+    rudp_recv_event_i* src = &ep->recv_events[read];
+    if (!src->used || src->conn_index == c->index) {
+      src->used = 0;
+      continue;
+    }
+    if (read != write) {
+      rudp_recv_event_i* dst = &ep->recv_events[write];
+      *dst = *src;
+      dst->data = ep->recv_event_data + ((size_t)write * ep->max_payload);
+      if (dst->len > 0) memcpy(dst->data, src->data, dst->len);
+      src->used = 0;
+    }
+    write = (write + 1u) % ep->cfg.max_recv_events;
+    ++kept;
+  }
+  ep->recv_head = old_head;
+  ep->recv_tail = write;
+  ep->recv_count = kept;
+}
+
+static void drop_conn_ordered_holds(rudp_conn* c) {
+  rudp_endpoint* ep = c->ep;
+  for (uint32_t i = 0; i < ep->cfg.max_ordered_holds; ++i) {
+    rudp_ordered_hold* h = &ep->holds[i];
+    if (!h->used || h->conn_index != c->index) continue;
+    h->used = 0;
+    if (ep->ordered_hold_count > 0) --ep->ordered_hold_count;
+  }
+}
+
+static void drop_conn_reassembly(rudp_conn* c) {
+  rudp_endpoint* ep = c->ep;
+  for (uint32_t i = 0; i < ep->reasm_count; ++i) {
+    rudp_rx_reasm* r = &ep->reasm[i];
+    if (r->used && r->conn_index == c->index) r->used = 0;
+  }
+}
+
+static void abort_conn_internal(rudp_conn* c) {
+  if (!c || !c->active) return;
+  rudp_endpoint* ep = c->ep;
+  for (uint32_t mi = 0; mi < ep->cfg.max_messages; ++mi) {
+    rudp_msg* m = &ep->msgs[mi];
+    if (!m->used || m->owner_conn_p1 != c->index + 1u) continue;
+    remove_msg_from_current_queue(c, mi, m);
+    remove_msg_from_inflight_packets(c, mi, m);
+    free_msg(ep, mi);
+  }
+  size_t base = (size_t)c->index * ep->cfg.sent_packet_count;
+  for (uint32_t i = 0; i < ep->cfg.sent_packet_count; ++i) {
+    rudp_sent_packet* sp = &ep->sent_packets[base + i];
+    if (sp->conn_index == c->index) memset(sp, 0, sizeof(*sp));
+    ep->sent_seq_queue[base + i] = 0;
+  }
+  drop_conn_recv_events(c);
+  drop_conn_ordered_holds(c);
+  drop_conn_reassembly(c);
+  c->inflight_bytes = 0;
+  c->send_queue_bytes = 0;
+  c->retransmit_queue_bytes = 0;
+  c->sent_seq_head = 0;
+  c->sent_seq_tail = 0;
+  c->sent_seq_count = 0;
+  c->late_ack_msg_count = 0;
+  c->next_retx_ns = 0;
+  c->active = 0;
+}
+
+void rudp_conn_abort(rudp_conn* conn) {
+  abort_conn_internal(conn);
+}
+
 static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp);
 
 static void prune_sent_seq_queue(rudp_conn* c) {
@@ -925,6 +1025,9 @@ static int create_conn_at(rudp_endpoint* ep, uint32_t idx, const rudp_addr* peer
   c->conn_id = conn_id;
   c->next_packet_seq = 1;
   c->next_msg_id = 1;
+  uint64_t now_ns = endpoint_now_ns(ep);
+  c->last_rx_ns = now_ns;
+  c->last_tx_ns = now_ns;
   c->safe_bps = ep->cfg.initial_safe_bps;
   c->pacing_bps = ep->cfg.initial_safe_bps;
   c->flows = ep->flow_storage + ((size_t)idx * ep->cfg.max_flows);
@@ -1519,6 +1622,12 @@ static int queue_retransmit(rudp_conn* c, uint32_t mi) {
 
 static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp) {
   if (!c || !sp || sp->lost) return;
+  if (c->ep->cfg.max_retransmits > 0 &&
+      c->retransmits_since_rx >= c->ep->cfg.max_retransmits) {
+    abort_conn_internal(c);
+    return;
+  }
+  ++c->retransmits_since_rx;
   sp->lost = 1;
   ++c->lost_packets;
   if (c->safe_bps > 64000u) c->safe_bps /= 2u;
@@ -1537,6 +1646,7 @@ static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp) {
     if (!queue_retransmit(c, mi)) {
       drop_msg(c, mi, RUDP_QUEUE_NONE, 1);
     }
+    if (!c->active) return;
   }
   sp->used = 0;
 }
@@ -1558,6 +1668,7 @@ static void service_retransmits(rudp_conn* c, uint64_t now_ns) {
       continue;
     }
     mark_packet_lost(c, sp);
+    if (!c->active) return;
   }
   c->next_retx_ns = next_retx_ns;
 }
@@ -1567,6 +1678,7 @@ static void record_sent_packet(rudp_endpoint* ep, uint32_t batch_index, uint64_t
   if (refs == 0) return;
   rudp_conn* c = conn_by_index(ep, ep->send_batch_conn[batch_index]);
   if (!c) return;
+  c->last_tx_ns = now_ns;
   const uint8_t* data = ep->send_batch[batch_index].data;
   uint32_t seq = load_u32(data + 12);
   size_t slot = (size_t)c->index * ep->cfg.sent_packet_count +
@@ -1640,7 +1752,10 @@ static int flush_send_batch(rudp_endpoint* ep, uint64_t now_ns) {
   if ((uint32_t)sent > old_count) sent = (int)old_count;
   for (uint32_t i = 0; i < (uint32_t)sent; ++i) {
     rudp_conn* c = conn_by_index(ep, ep->send_batch_conn[i]);
-    if (c) c->ack_dirty = 0;
+    if (c) {
+      c->ack_dirty = 0;
+      c->last_tx_ns = now_ns;
+    }
     record_sent_packet(ep, i, now_ns);
     if (!ep->send_batch_ack_only[i]) {
       uint16_t msg_count = ep->send_batch_msg_counts[i];
@@ -1793,6 +1908,12 @@ static void append_ack_only(rudp_conn* c, uint64_t now_ns) {
   ++ep->send_count;
 }
 
+static int conn_idle_expired(const rudp_conn* c, uint64_t now_ns) {
+  if (c->ep->cfg.idle_timeout_ms == 0 || c->last_rx_ns == 0) return 0;
+  uint64_t idle_ns = (uint64_t)c->ep->cfg.idle_timeout_ms * RUDP_NS_PER_MS;
+  return now_ns >= add_ns_saturating(c->last_rx_ns, idle_ns);
+}
+
 void rudp_endpoint_flush(rudp_endpoint* ep, uint64_t now_ns) {
   if (!ep) return;
   ep->now_ns = now_ns;
@@ -1800,7 +1921,12 @@ void rudp_endpoint_flush(rudp_endpoint* ep, uint64_t now_ns) {
   for (uint32_t i = 0; i < ep->cfg.max_conns; ++i) {
     rudp_conn* c = &ep->conns[i];
     if (!c->active) continue;
+    if (conn_idle_expired(c, now_ns)) {
+      abort_conn_internal(c);
+      continue;
+    }
     service_retransmits(c, now_ns);
+    if (!c->active) continue;
     uint32_t mi;
     uint8_t source = RUDP_QUEUE_NONE;
     uint32_t guard = ep->cfg.max_messages;
@@ -2210,6 +2336,8 @@ static void process_packet(rudp_endpoint* ep, const rudp_in_packet* in, uint64_t
   if (!c) return;
   if (ack_only && !addr_is_valid(&in->addr)) return;
   if (ack_only && !addr_equal(&c->peer, &in->addr)) return;
+  c->last_rx_ns = now_ns;
+  c->retransmits_since_rx = 0;
   if (ack_only) {
     if (ack_seq != 0) release_acked_packets(c, ack_seq, ack_bits, now_ns);
     return;
