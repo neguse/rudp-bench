@@ -15,9 +15,11 @@ extern int g_cbUDPSocketBufferSize;
 }
 
 #include <arpa/inet.h>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -27,6 +29,22 @@ namespace {
 
 // Larger batch now that one ReceiveMessagesOnPollGroup call drains all conns.
 constexpr int GNS_RECV_BATCH = 256;
+constexpr size_t kDefaultGnsInboxLimit = 1u << 16;
+
+size_t gns_inbox_limit() {
+  const char* v = std::getenv("GNS_INBOX_MESSAGES");
+  if (!v || !*v) return kDefaultGnsInboxLimit;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return kDefaultGnsInboxLimit;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
+}
 
 struct GnsOptions {
   // Nagle ON by default: the canonical broadcast profiles are syscall-bound
@@ -91,6 +109,7 @@ class GnsAdapter : public rudp_bench::Adapter {
   explicit GnsAdapter(GnsOptions options = {}) : options_(options) {
     ensure_gns_init(options_.socket_buffer_bytes);
     iface_ = SteamNetworkingSockets();
+    inbox_.set_limit(gns_inbox_limit());
     // One poll group for ALL connections so receive draining is a few
     // ReceiveMessagesOnPollGroup calls per tick instead of one
     // ReceiveMessagesOnConnection per conn. The per-conn path took the global
@@ -271,8 +290,10 @@ class GnsAdapter : public rudp_bench::Adapter {
     }
 
     std::vector<HSteamNetConnection> to_close;
+    uint64_t inbox_dropped = 0;
     {
       std::lock_guard<std::mutex> lock(mtx_);
+      inbox_dropped = inbox_.dropped();
       for (auto& [id, hConn] : id_to_conn_) to_close.push_back(hConn);
       id_to_conn_.clear();
       conn_to_id_.clear();
@@ -287,6 +308,11 @@ class GnsAdapter : public rudp_bench::Adapter {
     if (poll_group_ != k_HSteamNetPollGroup_Invalid) {
       iface_->DestroyPollGroup(poll_group_);
       poll_group_ = k_HSteamNetPollGroup_Invalid;
+    }
+    if (inbox_dropped > 0) {
+      std::fprintf(stderr, "gns_inbox_dropped: %llu\n",
+                   (unsigned long long)inbox_dropped);
+      std::fflush(stderr);
     }
   }
 

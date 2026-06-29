@@ -164,8 +164,8 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | apex_rudp | reliable 4096/conn + 10s timeout + async TX 1M（server unreliable 既定 ON） | inbox: 1M | send: reliable 満杯で -1 / timeout で conn inactive / async TX 満杯で drop / recv: oldest drop |
 | mini_rudp | 65536/conn + 10s timeout | なし（直接配信） | send: -1 / timeout で conn inactive |
 | yojimbo | 4096/channel/direction | 4096/ch/dir | send: -1（adapter が CanSendMessage で事前チェック） |
-| gns | SendBuffer=32MB | lib RecvBuffer=32MB/Msgs=1M + adapter inbox 無制限 | k_EResultLimitExceeded |
-| msquic | datagram:無制限 / stream:flow control | 16MB flow control + adapter inbox 無制限 | datagram: queue→cancel |
+| gns | SendBuffer=32MB | lib RecvBuffer=32MB/Msgs=1M + adapter inbox 65536(`GNS_INBOX_MESSAGES`) | send:k_EResultLimitExceeded / inbox oldest drop + stderr |
+| msquic | datagram:無制限 / stream:flow control | 16MB flow control + adapter inbox 65536(`MSQUIC_INBOX_MESSAGES`) | datagram: queue→cancel / inbox oldest drop + stderr |
 | quiche | datagram:65536 / stream:adapter pending 32MiB(`QUICHE_STREAM_PENDING_BYTES`)→flow control | datagram:1200 / inbox:65536 | datagram:Error::Done / stream:adapter cap で -1 / partial write は pending |
 | lsquic | datagram:64(adapter) / stream:adapter pending_writes 32MiB(`LSQUIC_PENDING_WRITE_BYTES`)→flow control | inbox:65536 | datagram: -1(drop) / stream:adapter cap で -1 / partial write は pending |
 | udt4 | adapter out_pending 32MiB(`UDT4_OUT_PENDING_BYTES`)→8192pkt(動的拡張) | 8192pkt | adapter cap で -1 / async:EASYNCSND なら保持 |
@@ -253,6 +253,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 6. udt4: UDT `BROKEN`/`CLOSED`/`NONEXIST` を切断扱いにし、adapter `out_pending` に byte cap/backpressure を追加
 7. quiche: stream partial write の残りを adapter pending に保持し、cap 超過は -1 backpressure として扱う
 8. lsquic: stream `pending_writes` に byte cap/backpressure を追加
+9. gns/msquic: adapter inbox に message cap と oldest-drop diagnostics を追加
 
 #### 残存
 

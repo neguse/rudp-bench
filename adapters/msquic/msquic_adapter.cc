@@ -12,12 +12,14 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -27,6 +29,7 @@
 namespace {
 
 const QUIC_API_TABLE* MsQuic = nullptr;
+constexpr size_t kDefaultMsquicInboxLimit = 1u << 16;
 
 #define MSQUIC_DIE(msg, status) do { \
   std::fprintf(stderr, "msquic_adapter: " msg " status=0x%x at %s:%d\n", \
@@ -44,6 +47,21 @@ void ensure_msquic_init() {
     // callbacks and triggers double-free in glibc. We rely on the OS to
     // reclaim resources at process exit.
   });
+}
+
+size_t msquic_inbox_limit() {
+  const char* v = std::getenv("MSQUIC_INBOX_MESSAGES");
+  if (!v || !*v) return kDefaultMsquicInboxLimit;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return kDefaultMsquicInboxLimit;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
 }
 
 struct MsquicCertPaths {
@@ -128,7 +146,10 @@ struct StreamCtx {
 
 class MsquicAdapter : public rudp_bench::Adapter {
  public:
-  MsquicAdapter() { ensure_msquic_init(); }
+  MsquicAdapter() {
+    ensure_msquic_init();
+    inbox_.set_limit(msquic_inbox_limit());
+  }
   ~MsquicAdapter() override { close(); }
 
   void server_listen(uint16_t port) override {
@@ -276,6 +297,16 @@ class MsquicAdapter : public rudp_bench::Adapter {
     // "sent but not delivered" mass that the flat ~0.58 delivery hides.
     if (!closed_) {
       closed_ = true;
+      uint64_t inbox_dropped = 0;
+      {
+        std::lock_guard<std::mutex> lock(mtx_);
+        inbox_dropped = inbox_.dropped();
+      }
+      if (inbox_dropped > 0) {
+        std::fprintf(stderr, "msquic_inbox_dropped: %llu\n",
+                     (unsigned long long)inbox_dropped);
+        std::fflush(stderr);
+      }
       uint64_t offered = dgram_offered_.load();
       uint64_t submit_failed = dgram_submit_failed_.load();
       if (offered > 0 || submit_failed > 0) {
