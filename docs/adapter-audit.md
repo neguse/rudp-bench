@@ -169,8 +169,8 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | quiche | datagram:65536 / stream:adapter pending 32MiB(`QUICHE_STREAM_PENDING_BYTES`)→flow control | datagram:1200 / inbox:65536 | datagram:Error::Done / stream:adapter cap で -1 / partial write は pending |
 | lsquic | datagram:64(adapter) / stream:adapter pending_writes 32MiB(`LSQUIC_PENDING_WRITE_BYTES`)→flow control | inbox:65536 | datagram: -1(drop) / stream:adapter cap で -1 / partial write は pending |
 | udt4 | adapter out_pending 32MiB(`UDT4_OUT_PENDING_BYTES`)→8192pkt(動的拡張) | 8192pkt | adapter cap で -1 / async:EASYNCSND なら保持 |
-| raknet | outgoing:無制限 / resend:512 | 無制限 | resend full→reliable blocked |
-| slikenet | 同上 | 同上 | 同上 |
+| raknet | outgoing adapter cap 32MiB(`RAKNET_OUTGOING_BYTES`/`RAK_FAMILY_OUTGOING_BYTES`) / resend:512 | 無制限 | adapter cap で -1 / resend full→reliable blocked |
+| slikenet | outgoing adapter cap 32MiB(`SLIKENET_OUTGOING_BYTES`/`RAK_FAMILY_OUTGOING_BYTES`) / resend:512 | 無制限 | adapter cap で -1 / resend full→reliable blocked |
 | litenetlib | outgoing:無制限 / pending window:64 | 無制限 | window full→outgoing 蓄積 |
 
 ---
@@ -256,6 +256,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 9. gns/msquic: adapter inbox に message cap と oldest-drop diagnostics を追加
 10. enet: reliable queue に byte cap/backpressure を追加
 11. kcp: send queue に byte cap/backpressure を追加
+12. raknet/slikenet: outgoing queue に byte cap/backpressure を追加
 
 #### 残存
 

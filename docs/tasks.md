@@ -12,7 +12,8 @@
 - [x] `gns` / `msquic` adapter inbox に message cap と oldest-drop diagnostics を追加する。
 - [x] `enet` reliable queue に byte cap と backpressure を追加する。
 - [x] `kcp` send queue に byte cap と backpressure を追加する。
-- [ ] adapter inbox / pending queue が無制限または実質無制限の経路に上限と backpressure を入れる: `raknet`/`slikenet` outgoing, `litenetlib` outgoing。
+- [x] `raknet`/`slikenet` outgoing queue に byte cap と backpressure を追加する。
+- [ ] adapter inbox / pending queue が無制限または実質無制限の経路に上限と backpressure を入れる: `litenetlib` outgoing。
 - [x] `quiche` stream path の partial write を破棄せず、残りを pending 化するか明示 backpressure として返す。
 - [ ] 固定 RTO かつ backoff なしの adapter（`coop_rudp`, `apex_rudp`, `mini_rudp`, `yojimbo`）に RTT ベース RTO/backoff を入れるか、固定 RTO を使うベンチ前提を結果 metadata に明示する。
 - [ ] `mini_rudp` の per-packet 専用 ACK を piggyback / cumulative ACK に置き換え、ACK traffic と syscall 数を下げる。
