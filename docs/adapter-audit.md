@@ -105,7 +105,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | msquic | 無制限(PTO backoff) | DisconnectTimeout | 無効(既定) | idle:30s, disconnect:16s |
 | quiche | 無制限(PTO 2^20 まで) | idle timeout | なし | 30s |
 | lsquic | 無制限(2^10 まで) | idle+no-progress | 15s PING | idle:30s, handshake:10s |
-| udt4 | 無制限 | EXP_COUNT>16 AND >5s（adapter 未参照） | EXP timer 時 | ~5s+ |
+| udt4 | 無制限 | adapter が UDT `BROKEN`/`CLOSED`/`NONEXIST` を切断扱い | EXP timer 時 | ~5s+ |
 | raknet | 無制限 | AckTimeout | timeoutTime/2 | 10s(release)/30s(debug) |
 | slikenet | 同上 | 同上 | 同上 | 同上 |
 | litenetlib | 無制限 | DisconnectTimeout | 1000ms Ping/Pong | 5s |
@@ -168,7 +168,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | msquic | datagram:無制限 / stream:flow control | 16MB flow control + adapter inbox 無制限 | datagram: queue→cancel |
 | quiche | datagram:65536 / stream:flow control（adapter backpressure なし） | datagram:1200 / inbox:65536 | datagram:Error::Done / stream:逼迫時の partial write は破棄（再送・滞留なし） |
 | lsquic | datagram:64(adapter) / stream:adapter pending_writes(無制限)→flow control | inbox:65536 | datagram: -1(drop) / stream: adapter が先にバッファ |
-| udt4 | adapter out_pending(無制限)→8192pkt(動的拡張) | 8192pkt | adapter バッファ後に async:EASYNCSND / sync:block |
+| udt4 | adapter out_pending 32MiB(`UDT4_OUT_PENDING_BYTES`)→8192pkt(動的拡張) | 8192pkt | adapter cap で -1 / async:EASYNCSND なら保持 |
 | raknet | outgoing:無制限 / resend:512 | 無制限 | resend full→reliable blocked |
 | slikenet | 同上 | 同上 | 同上 |
 | litenetlib | outgoing:無制限 / pending window:64 | 無制限 | window full→outgoing 蓄積 |
@@ -250,13 +250,13 @@ adapter コード + third_party ライブラリのソースコードを精読し
 3. kcp: `dead_link` 到達後の `kcp->state=-1` を adapter が切断扱いに反映
 4. raknet/slikenet: SO_SNDBUF を 16KB から 256KB に上げ、SO_RCVBUF と対称化
 5. yojimbo: send queue full は adapter が `CanSendMessage` で事前チェックし、切断ではなく -1 backpressure として扱う
+6. udt4: UDT `BROKEN`/`CLOSED`/`NONEXIST` を切断扱いにし、adapter `out_pending` に byte cap/backpressure を追加
 
 #### 残存
 
 1. coop_rudp: 死活検知なし。crashed peer に無限再送、リソースリーク
 2. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
-3. udt4: UDT 内部は EXP_COUNT timeout を持つが adapter が切断状態を参照しない
-4. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
+3. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
 
 ### 意外な設計選択
 
