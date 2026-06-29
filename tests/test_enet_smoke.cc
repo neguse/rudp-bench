@@ -2,6 +2,8 @@
 #include "harness/adapter_registry.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <string>
 #include <thread>
 
 namespace rudp_bench { void register_enet_adapter(); }
@@ -13,6 +15,31 @@ class EnetRegistrar {
 static EnetRegistrar registrar;
 
 using namespace rudp_bench;
+
+class ScopedEnv {
+ public:
+  ScopedEnv(const char* name, const char* value) : name_(name) {
+    const char* old = ::getenv(name);
+    if (old) {
+      had_old_ = true;
+      old_ = old;
+    }
+    ::setenv(name_.c_str(), value, 1);
+  }
+
+  ~ScopedEnv() {
+    if (had_old_) {
+      ::setenv(name_.c_str(), old_.c_str(), 1);
+    } else {
+      ::unsetenv(name_.c_str());
+    }
+  }
+
+ private:
+  std::string name_;
+  std::string old_;
+  bool had_old_ = false;
+};
 
 TEST(EnetSmoke, ReliableEcho) {
   auto server = create_adapter("enet");
@@ -67,6 +94,35 @@ TEST(EnetSmoke, ReliableEcho) {
   }
   EXPECT_TRUE(got);
   server_thread.join();
+  client->close();
+  server->close();
+}
+
+TEST(EnetSmoke, ReliableQueueCapReturnsBackpressure) {
+  ScopedEnv limit("ENET_RELIABLE_QUEUE_BYTES", "8");
+  auto server = create_adapter("enet");
+  auto client = create_adapter("enet");
+  ASSERT_NE(server, nullptr);
+  ASSERT_NE(client, nullptr);
+  server->server_listen(0xC103);
+
+  uint32_t cid = client->client_connect("127.0.0.1", 0xC103);
+
+  auto connect_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < connect_deadline && !client->is_connected(cid)) {
+    server->poll();
+    client->poll();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  ASSERT_TRUE(client->is_connected(cid));
+
+  const char too_large[] = "too-large";
+  EXPECT_EQ(client->send(cid, too_large, sizeof(too_large), true), -1);
+  EXPECT_TRUE(client->is_connected(cid));
+
+  const char ok[] = "ok";
+  EXPECT_EQ(client->send(cid, ok, sizeof(ok), true), 0);
+
   client->close();
   server->close();
 }
