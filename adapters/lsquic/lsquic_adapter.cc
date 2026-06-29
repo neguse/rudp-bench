@@ -12,10 +12,12 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -27,6 +29,22 @@ namespace {
 constexpr size_t kMaxDatagramSize = 1350;
 constexpr size_t kInboxLimit = 1u << 16;
 constexpr size_t kDgramQueueLimit = 64;
+constexpr size_t kDefaultPendingWriteByteLimit = 32u * 1024u * 1024u;
+
+size_t pending_write_byte_limit() {
+  const char* v = std::getenv("LSQUIC_PENDING_WRITE_BYTES");
+  if (!v || !*v) return kDefaultPendingWriteByteLimit;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return kDefaultPendingWriteByteLimit;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
+}
 
 struct CertPaths {
   std::string cert;
@@ -67,6 +85,7 @@ struct ConnCtx {
   lsquic_stream_t* reliable_stream;
   // Pending reliable send queue
   std::deque<std::vector<uint8_t>> pending_writes;
+  size_t pending_write_bytes;
   bool want_write;
   // Per-connection datagram send queue (avoids global linear scan)
   std::deque<std::vector<uint8_t>> dgram_queue;
@@ -135,6 +154,7 @@ class LsquicAdapter : public rudp_bench::Adapter {
     cctx->id = id;
     cctx->established = false;
     cctx->reliable_stream = nullptr;
+    cctx->pending_write_bytes = 0;
     cctx->want_write = false;
     cctx->stream_recv_offset = 0;
     cctx->frame_len = 0;
@@ -164,6 +184,7 @@ class LsquicAdapter : public rudp_bench::Adapter {
 
   int send(uint32_t conn_id, const void* data, size_t len,
            bool reliable) override {
+    if (len > max_payload_bytes(reliable)) return -1;
     auto it = conn_by_id_.find(conn_id);
     if (it == conn_by_id_.end()) return -1;
     ConnCtx* cctx = it->second;
@@ -318,10 +339,18 @@ class LsquicAdapter : public rudp_bench::Adapter {
 
   int send_reliable(ConnCtx* cctx, const void* data, size_t len) {
     // Queue the length-prefixed frame
-    std::vector<uint8_t> frame(4 + len);
+    size_t frame_size = 4 + len;
+    size_t limit = pending_write_byte_limit();
+    if (cctx->pending_write_bytes > limit ||
+        frame_size > limit - cctx->pending_write_bytes) {
+      return -1;
+    }
+
+    std::vector<uint8_t> frame(frame_size);
     uint32_t nlen = htonl(static_cast<uint32_t>(len));
     std::memcpy(frame.data(), &nlen, 4);
     std::memcpy(frame.data() + 4, data, len);
+    cctx->pending_write_bytes += frame.size();
     cctx->pending_writes.push_back(std::move(frame));
 
     if (cctx->reliable_stream && !cctx->want_write) {
@@ -389,6 +418,7 @@ class LsquicAdapter : public rudp_bench::Adapter {
       cctx->conn = conn;
       cctx->established = true;
       cctx->reliable_stream = nullptr;
+      cctx->pending_write_bytes = 0;
       cctx->want_write = false;
       cctx->stream_recv_offset = 0;
       cctx->frame_len = 0;
@@ -470,10 +500,14 @@ class LsquicAdapter : public rudp_bench::Adapter {
       ssize_t written =
           lsquic_stream_write(stream, frame.data(), frame.size());
       if (written <= 0) break;
+      size_t consumed = static_cast<size_t>(written);
       if (static_cast<size_t>(written) < frame.size()) {
-        frame.erase(frame.begin(), frame.begin() + written);
+        cctx->pending_write_bytes -= consumed;
+        frame.erase(frame.begin(),
+                    frame.begin() + static_cast<std::ptrdiff_t>(consumed));
         break;
       }
+      cctx->pending_write_bytes -= frame.size();
       cctx->pending_writes.pop_front();
     }
     lsquic_stream_flush(stream);

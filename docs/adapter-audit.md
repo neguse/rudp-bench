@@ -167,7 +167,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | gns | SendBuffer=32MB | lib RecvBuffer=32MB/Msgs=1M + adapter inbox 無制限 | k_EResultLimitExceeded |
 | msquic | datagram:無制限 / stream:flow control | 16MB flow control + adapter inbox 無制限 | datagram: queue→cancel |
 | quiche | datagram:65536 / stream:adapter pending 32MiB(`QUICHE_STREAM_PENDING_BYTES`)→flow control | datagram:1200 / inbox:65536 | datagram:Error::Done / stream:adapter cap で -1 / partial write は pending |
-| lsquic | datagram:64(adapter) / stream:adapter pending_writes(無制限)→flow control | inbox:65536 | datagram: -1(drop) / stream: adapter が先にバッファ |
+| lsquic | datagram:64(adapter) / stream:adapter pending_writes 32MiB(`LSQUIC_PENDING_WRITE_BYTES`)→flow control | inbox:65536 | datagram: -1(drop) / stream:adapter cap で -1 / partial write は pending |
 | udt4 | adapter out_pending 32MiB(`UDT4_OUT_PENDING_BYTES`)→8192pkt(動的拡張) | 8192pkt | adapter cap で -1 / async:EASYNCSND なら保持 |
 | raknet | outgoing:無制限 / resend:512 | 無制限 | resend full→reliable blocked |
 | slikenet | 同上 | 同上 | 同上 |
@@ -252,6 +252,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 5. yojimbo: send queue full は adapter が `CanSendMessage` で事前チェックし、切断ではなく -1 backpressure として扱う
 6. udt4: UDT `BROKEN`/`CLOSED`/`NONEXIST` を切断扱いにし、adapter `out_pending` に byte cap/backpressure を追加
 7. quiche: stream partial write の残りを adapter pending に保持し、cap 超過は -1 backpressure として扱う
+8. lsquic: stream `pending_writes` に byte cap/backpressure を追加
 
 #### 残存
 
