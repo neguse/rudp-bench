@@ -171,7 +171,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | udt4 | adapter out_pending 32MiB(`UDT4_OUT_PENDING_BYTES`)→8192pkt(動的拡張) | 8192pkt | adapter cap で -1 / async:EASYNCSND なら保持 |
 | raknet | outgoing adapter cap 32MiB(`RAKNET_OUTGOING_BYTES`/`RAK_FAMILY_OUTGOING_BYTES`) / resend:512 | 無制限 | adapter cap で -1 / resend full→reliable blocked |
 | slikenet | outgoing adapter cap 32MiB(`SLIKENET_OUTGOING_BYTES`/`RAK_FAMILY_OUTGOING_BYTES`) / resend:512 | 無制限 | adapter cap で -1 / resend full→reliable blocked |
-| litenetlib | outgoing:無制限 / pending window:64 | 無制限 | window full→outgoing 蓄積 |
+| litenetlib | reliable outgoing adapter cap 32MiB(`LNL_OUTGOING_BYTES`) / pending window:64 | 無制限 | adapter cap で backpressure / window full→outgoing 蓄積 |
 
 ---
 
@@ -257,6 +257,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 10. enet: reliable queue に byte cap/backpressure を追加
 11. kcp: send queue に byte cap/backpressure を追加
 12. raknet/slikenet: outgoing queue に byte cap/backpressure を追加
+13. litenetlib: reliable outgoing queue に byte cap/backpressure を追加
 
 #### 残存
 

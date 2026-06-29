@@ -264,15 +264,18 @@ static CsvRow RunServer(Config cfg)
         var payload = new ReadOnlySpan<byte>(raw, off, len);
         if (broadcast)
         {
-            ulong targetCount = (ulong)connectedPeers.Count;
-            if (targetCount == 0) return;
-            manager.SendToAll(payload, deliveryMethod);
-            if (measured) CountEchoAccepted(reliable, targetCount);
+            ulong accepted = 0;
+            foreach (var target in connectedPeers)
+            {
+                if (LnlOutgoing.TrySend(target, payload, deliveryMethod))
+                    accepted++;
+            }
+            if (measured && accepted > 0) CountEchoAccepted(reliable, accepted);
         }
         else
         {
-            peer.Send(payload, 0, deliveryMethod);
-            if (measured && peer.ConnectionState == ConnectionState.Connected)
+            bool accepted = LnlOutgoing.TrySend(peer, payload, deliveryMethod);
+            if (measured && accepted)
                 CountEchoAccepted(reliable, 1);
         }
     };
@@ -474,15 +477,12 @@ static CsvRow RunClient(Config cfg)
         var method = sched.Reliable
             ? DeliveryMethod.ReliableOrdered
             : DeliveryMethod.Unreliable;
-        peers[i].Send(payload, method);
+        bool accepted = LnlOutgoing.TrySend(peers[i], payload, method);
         // D1: count accepted only when the peer is actually connected, matching
         // the C++ harness which marks accepted only on a.send()==0. NetPeer.Send
-        // is void (cannot fail-return), so the connected state is the closest
-        // "the transport accepted this send" signal. In steady state every peer
-        // is connected (we waited for all before measuring), so this normally
-        // agrees with the old unconditional count — it only differs if a peer
-        // drops mid-run, which should not inflate accepted.
-        if (inActive && peers[i].ConnectionState == ConnectionState.Connected)
+        // is void, so LnlOutgoing supplies the adapter-side backpressure check
+        // before delegating to the transport.
+        if (inActive && accepted)
         {
             tick.RecordAccepted(expectedPerSend);
             for (uint k = 0; k < expectedPerSend; k++) delivery.MarkAccepted(globalSeq, i);
@@ -1154,6 +1154,52 @@ static class LnlTune
         if (dtMs < ManualUpdateMs) return;
         s_lastManualTicks = now;
         for (uint i = 0; i < count; i++) managers[i].ManualUpdate(dtMs);
+    }
+}
+
+static class LnlOutgoing
+{
+    public const ulong DefaultByteLimit = 32UL * 1024UL * 1024UL;
+    public static readonly ulong ByteLimit = GetULong("LNL_OUTGOING_BYTES", DefaultByteLimit);
+
+    public static bool TrySend(NetPeer peer, ReadOnlySpan<byte> payload,
+                               DeliveryMethod method)
+    {
+        if (peer.ConnectionState != ConnectionState.Connected) return false;
+        if (IsReliable(method) && !ReliableQueueHasRoom(peer, payload.Length, method))
+            return false;
+        peer.Send(payload, method);
+        return peer.ConnectionState == ConnectionState.Connected;
+    }
+
+    private static bool ReliableQueueHasRoom(NetPeer peer, int payloadBytes,
+                                             DeliveryMethod method)
+    {
+        if (payloadBytes < 0) return false;
+        ulong nextBytes = (ulong)payloadBytes;
+        if (nextBytes > ByteLimit) return false;
+        if (nextBytes == 0) return true;
+
+        bool ordered = method != DeliveryMethod.ReliableUnordered;
+        ulong queuedPackets = (ulong)peer.GetPacketsCountInReliableQueue(ordered);
+        if (queuedPackets > ByteLimit / nextBytes) return false;
+        ulong queuedBytes = queuedPackets * nextBytes;
+        return queuedBytes <= ByteLimit && nextBytes <= ByteLimit - queuedBytes;
+    }
+
+    private static bool IsReliable(DeliveryMethod method) =>
+        method == DeliveryMethod.ReliableOrdered ||
+        method == DeliveryMethod.ReliableUnordered ||
+        method == DeliveryMethod.ReliableSequenced;
+
+    private static ulong GetULong(string key, ulong fallback)
+    {
+        string? value = Environment.GetEnvironmentVariable(key);
+        if (string.IsNullOrEmpty(value)) return fallback;
+        return ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture,
+                              out ulong parsed) && parsed > 0
+            ? parsed
+            : fallback;
     }
 }
 
