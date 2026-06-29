@@ -159,7 +159,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | lib | 送信キュー上限 | 受信キュー上限 | 満杯時の挙動 |
 |-----|-------------|-------------|------------|
 | enet | reliable adapter cap 32MiB(`ENET_RELIABLE_QUEUE_BYTES`) / unreliable は throttle drop | lib 32MB/peer + adapter inbox 65536 | reliable cap で -1 / unreliable throttle / adapter inbox 満杯で oldest drop |
-| kcp | 無制限（<128 frags で成功） | rcv_wnd(256, adapter設定) | window→0 で sender 停止 |
+| kcp | adapter cap 32MiB(`KCP_SEND_QUEUE_BYTES`)（1 message は <128 frags） | rcv_wnd(256, adapter設定) | adapter cap で -1 / window→0 で sender 停止 |
 | coop_rudp | per_conn_queue_cap(min 1024)/ring | max_recv_events | RUDP_SEND_QUEUE_FULL 返却 |
 | apex_rudp | reliable 4096/conn + 10s timeout + async TX 1M（server unreliable 既定 ON） | inbox: 1M | send: reliable 満杯で -1 / timeout で conn inactive / async TX 満杯で drop / recv: oldest drop |
 | mini_rudp | 65536/conn + 10s timeout | なし（直接配信） | send: -1 / timeout で conn inactive |
@@ -255,6 +255,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 8. lsquic: stream `pending_writes` に byte cap/backpressure を追加
 9. gns/msquic: adapter inbox に message cap と oldest-drop diagnostics を追加
 10. enet: reliable queue に byte cap/backpressure を追加
+11. kcp: send queue に byte cap/backpressure を追加
 
 #### 残存
 

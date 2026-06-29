@@ -13,11 +13,13 @@ extern "C" {
 #include <unistd.h>
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -42,6 +44,7 @@ static constexpr uint8_t PREFIX_RAW = 0x00;
 static constexpr int KCP_MTU     = 1400;
 static constexpr int KCP_MAX_FRAME = KCP_MTU + 32;
 static constexpr size_t RECV_BUF_SIZE = 65536 + 8;
+static constexpr size_t kDefaultSendQueueByteLimit = 32u * 1024u * 1024u;
 
 // kcp tuning. Defaults are the config chosen by the 2026-05-31 tuning sweep
 // (see docs/measurements/2026-05-31-kcp-tuning). Env overrides exist only to
@@ -86,6 +89,37 @@ inline IUINT32 kcp_dead_link_override() {
   if (!v || !*v) return 0;
   int parsed = std::atoi(v);
   return parsed > 0 ? static_cast<IUINT32>(parsed) : 0;
+}
+
+size_t kcp_send_queue_limit() {
+  const char* v = std::getenv("KCP_SEND_QUEUE_BYTES");
+  if (!v || !*v) return kDefaultSendQueueByteLimit;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return kDefaultSendQueueByteLimit;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
+}
+
+size_t kcp_segment_queue_bytes(iqueue_head* queue) {
+  size_t bytes = 0;
+  iqueue_head* it = queue->next;
+  while (it != queue) {
+    auto* seg = iqueue_entry(it, IKCPSEG, node);
+    bytes += seg->len;
+    it = it->next;
+  }
+  return bytes;
+}
+
+size_t kcp_pending_send_bytes(ikcpcb* kcp) {
+  return kcp_segment_queue_bytes(&kcp->snd_queue) +
+         kcp_segment_queue_bytes(&kcp->snd_buf);
 }
 
 inline IUINT32 now_ms() {
@@ -286,6 +320,9 @@ class KcpAdapter : public rudp_bench::Adapter {
 
     if (reliable) {
       ensure_kcp(conn);
+      size_t limit = kcp_send_queue_limit();
+      size_t pending = kcp_pending_send_bytes(conn->kcp);
+      if (pending > limit || len > limit - pending) return -1;
       if (ikcp_send(conn->kcp, static_cast<const char*>(data),
                     static_cast<int>(len)) < 0) {
         return -1;

@@ -68,6 +68,23 @@ TEST(KcpSmoke, DeadLinkStateMarksConnectionDisconnected) {
   client->close();
 }
 
+TEST(KcpSmoke, ReliableSendQueueCapReturnsBackpressure) {
+  ScopedEnv cap("KCP_SEND_QUEUE_BYTES", "8");
+  auto client = create_adapter("kcp");
+  ASSERT_NE(client, nullptr);
+
+  uint32_t cid = client->client_connect("127.0.0.1", 0xC1FE);
+  ASSERT_TRUE(client->is_connected(cid));
+
+  const char too_large[] = "too-large";
+  EXPECT_EQ(client->send(cid, too_large, sizeof(too_large), true), -1);
+  EXPECT_TRUE(client->is_connected(cid));
+
+  const char ok[] = "ok";
+  EXPECT_EQ(client->send(cid, ok, sizeof(ok), true), 0);
+  client->close();
+}
+
 TEST(KcpSmoke, ReliableEcho) {
   auto server = create_adapter("kcp");
   auto client = create_adapter("kcp");
