@@ -12,10 +12,12 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <string>
@@ -27,6 +29,22 @@ namespace {
 
 constexpr size_t MAX_DATAGRAM_SIZE = 1350;
 constexpr size_t kInboxLimit = 1u << 16;
+constexpr size_t kDefaultStreamPendingByteLimit = 32u * 1024u * 1024u;
+
+size_t stream_pending_byte_limit() {
+  const char* v = std::getenv("QUICHE_STREAM_PENDING_BYTES");
+  if (!v || !*v) return kDefaultStreamPendingByteLimit;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return kDefaultStreamPendingByteLimit;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
+}
 
 struct CertPaths {
   std::string cert;
@@ -95,6 +113,8 @@ struct QuicheConn {
   size_t stream_recv_offset = 0;
   uint32_t frame_len = 0;
   bool have_frame_len = false;
+  std::vector<uint8_t> stream_send_buf;
+  size_t stream_send_offset = 0;
 };
 
 class QuicheAdapter : public rudp_bench::Adapter {
@@ -160,6 +180,7 @@ class QuicheAdapter : public rudp_bench::Adapter {
 
   int send(uint32_t conn_id, const void* data, size_t len,
            bool reliable) override {
+    if (len > max_payload_bytes(reliable)) return -1;
     auto it = conn_by_id_.find(conn_id);
     if (it == conn_by_id_.end()) return -1;
     QuicheConn* c = it->second;
@@ -464,6 +485,7 @@ class QuicheAdapter : public rudp_bench::Adapter {
 
     for (auto& c : conns_) {
       if (!c->conn || c->closed) continue;
+      flush_stream_pending(c.get());
       for (;;) {
         quiche_send_info send_info{};
         ssize_t written =
@@ -486,19 +508,19 @@ class QuicheAdapter : public rudp_bench::Adapter {
 
   int send_stream(QuicheConn* c, const void* data, size_t len) {
     // Length-prefix framing (4-byte big-endian + payload), same as msquic
-    uint64_t stream_id = c->next_stream_id;
-    uint64_t err_code = 0;
+    compact_stream_send_buf(c);
+    size_t frame_size = 4 + len;
+    size_t pending = stream_pending_size(*c);
+    size_t limit = stream_pending_byte_limit();
+    if (pending > limit || frame_size > limit - pending) return -1;
 
-    // Combine header + payload into single buffer to avoid partial writes
-    std::vector<uint8_t> frame(4 + len);
+    size_t start = c->stream_send_buf.size();
+    c->stream_send_buf.resize(start + frame_size);
     uint32_t nlen = htonl(static_cast<uint32_t>(len));
-    std::memcpy(frame.data(), &nlen, 4);
-    std::memcpy(frame.data() + 4, data, len);
+    std::memcpy(c->stream_send_buf.data() + start, &nlen, 4);
+    std::memcpy(c->stream_send_buf.data() + start + 4, data, len);
 
-    ssize_t sent = quiche_conn_stream_send(
-        c->conn, stream_id, frame.data(), frame.size(), false, &err_code);
-    if (sent < 0) return -1;
-    return 0;
+    return flush_stream_pending(c) ? 0 : -1;
   }
 
   int send_dgram(QuicheConn* c, const void* data, size_t len) {
@@ -534,6 +556,46 @@ class QuicheAdapter : public rudp_bench::Adapter {
                    static_cast<std::ptrdiff_t>(c->stream_recv_offset));
       c->stream_recv_offset = 0;
     }
+  }
+
+  static size_t stream_pending_size(const QuicheConn& c) {
+    return c.stream_send_buf.size() - c.stream_send_offset;
+  }
+
+  static void compact_stream_send_buf(QuicheConn* c) {
+    if (c->stream_send_offset == 0) return;
+    if (c->stream_send_offset == c->stream_send_buf.size()) {
+      c->stream_send_buf.clear();
+      c->stream_send_offset = 0;
+      return;
+    }
+    if (c->stream_send_offset > 4096 &&
+        c->stream_send_offset * 2 >= c->stream_send_buf.size()) {
+      c->stream_send_buf.erase(
+          c->stream_send_buf.begin(),
+          c->stream_send_buf.begin() +
+              static_cast<std::ptrdiff_t>(c->stream_send_offset));
+      c->stream_send_offset = 0;
+    }
+  }
+
+  bool flush_stream_pending(QuicheConn* c) {
+    while (stream_pending_size(*c) > 0) {
+      uint64_t err_code = 0;
+      const uint8_t* data = c->stream_send_buf.data() + c->stream_send_offset;
+      size_t len = stream_pending_size(*c);
+      ssize_t sent = quiche_conn_stream_send(
+          c->conn, c->next_stream_id, data, len, false, &err_code);
+      if (sent == QUICHE_ERR_DONE || sent == 0) break;
+      if (sent < 0) {
+        c->stream_send_buf.clear();
+        c->stream_send_offset = 0;
+        return false;
+      }
+      c->stream_send_offset += static_cast<size_t>(sent);
+      compact_stream_send_buf(c);
+    }
+    return true;
   }
 
   bool is_server_ = false;

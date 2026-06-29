@@ -86,6 +86,10 @@ add_executable(test_msquic_smoke test_msquic_smoke.cc)
 target_link_libraries(test_msquic_smoke PRIVATE adapter_msquic GTest::gtest_main)
 add_test(NAME test_msquic_smoke COMMAND test_msquic_smoke)
 
+add_executable(test_quiche_smoke test_quiche_smoke.cc)
+target_link_libraries(test_quiche_smoke PRIVATE adapter_quiche GTest::gtest_main)
+add_test(NAME test_quiche_smoke COMMAND test_quiche_smoke)
+
 # LiteNetLib smoke test — shell script (NOT a C++ GTest; invokes the .NET binary on loopback)
 find_program(DOTNET_EXECUTABLE dotnet)
 find_program(BASH_EXECUTABLE bash)
