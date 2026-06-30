@@ -7,7 +7,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 
 ## 1. ソケットバッファ
 
-`raw_udp`, `mini_rudp`, `coop_rudp`, `apex_rudp`, `enet`, `kcp`, `raknet`/`slikenet`, `yojimbo`, `gns`, `quiche`, `lsquic` は `SO_RCVBUF`/`SO_SNDBUF` 設定直後に `getsockopt` の raw actual / Linux effective / clamp 判定を stderr diagnostics へ `socket_buffer ...` 行として出す。 `udt4` は FetchContent 取得の UDT4 `channel.cpp`、`msquic` は datapath patch が残作業。
+`raw_udp`, `mini_rudp`, `coop_rudp`, `apex_rudp`, `kcp`, `quiche`, `lsquic` は `SO_RCVBUF`/`SO_SNDBUF` 設定直後に `getsockopt` の raw actual / Linux effective / clamp 判定を stderr diagnostics へ `socket_buffer ...` 行として出す。 `enet`, `raknet`/`slikenet`, `yojimbo`, `gns`, `udt4`, `msquic` は library-owned socket 側の diagnostics patch が残作業。
 
 | lib | SO_RCVBUF | SO_SNDBUF | 設定箇所 | 備考 |
 |-----|-----------|-----------|---------|------|
@@ -15,13 +15,13 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | mini_rudp | 256KB | 256KB | adapter:95-96 | — |
 | coop_rudp | 4MB | 4MB | adapter:85-86 | — |
 | apex_rudp | 4MB | 4MB | adapter:146-147 | `APEX_RCVBUF_KB` env で変更可 |
-| enet | 256KB | 256KB | host.c:65-66 + adapter:208-209 | `ENET_RCVBUF_KB` env で変更可 |
+| enet | 256KB | 256KB | host.c:65-66 + adapter:208-209 | `ENET_RCVBUF_KB` env で変更可。library-owned socket diagnostics は未適用 |
 | kcp | 256KB | 256KB | adapter:124-125 | `KCP_RCVBUF_KB` env で変更可。1MB に増やすと delivery 0.78→0.52 に悪化（バッファブロート） |
-| raknet | 256KB | 256KB | RakNetSocket2_Berkley.cpp:39,54 | vendored SLikeNet patch で送受信を対称化 |
-| slikenet | 256KB | 256KB | RakNetSocket2_Berkley.cpp:39,54 | 同上 |
+| raknet | 256KB | 16KB | RakNetSocket2_Berkley.cpp:39,54 | 送受信非対称。送信ボトルネック |
+| slikenet | 256KB | 16KB | RakNetSocket2_Berkley.cpp:39,54 | 同上 |
 | udt4 | 65KB(UDP層) | 65KB(UDP層) | channel.cpp:152-153 | UDT 層 recv buffer: 8192pkt×1500≈12MB |
-| yojimbo | 4MB | 4MB | netcode.c:55-58 | `#define` 固定、変更不可 |
-| gns | 4MB | 4MB | lowlevel.cpp:2065-2073 + adapter:75 | lib 既定 256KB を adapter が 4MB に上書き。`gns_smallbuf` variant で 256KB |
+| yojimbo | 4MB | 4MB | netcode.c:55-58 | `#define` 固定、変更不可。library-owned socket diagnostics は未適用 |
+| gns | 4MB | 4MB | lowlevel.cpp:2065-2073 + adapter:75 | lib 既定 256KB を adapter が 4MB に上書き。`gns_smallbuf` variant で 256KB。library-owned socket diagnostics は未適用 |
 | msquic | INT32_MAX | 未設定 | datapath_epoll.c:702-709 | 2.1GB を要求。確実にクランプされている |
 | quiche | 256KB | 256KB | adapter:66-67 | — |
 | lsquic | 256KB | 256KB | adapter:228-230 | — |
@@ -248,24 +248,25 @@ adapter コード + third_party ライブラリのソースコードを精読し
 1. apex_rudp: シーケンス番号ラップアラウンドを `seq32_after()` half-space 比較に変更。seq 0 も送信側で skip
 2. apex_rudp, mini_rudp: 未 ACK reliable が 10s 残った接続を inactive 化し、pending buffer を解放
 3. kcp: `dead_link` 到達後の `kcp->state=-1` を adapter が切断扱いに反映
-4. raknet/slikenet: SO_SNDBUF を 16KB から 256KB に上げ、SO_RCVBUF と対称化
-5. yojimbo: send queue full は adapter が `CanSendMessage` で事前チェックし、切断ではなく -1 backpressure として扱う
-6. udt4: UDT `BROKEN`/`CLOSED`/`NONEXIST` を切断扱いにし、adapter `out_pending` に byte cap/backpressure を追加
-7. quiche: stream partial write の残りを adapter pending に保持し、cap 超過は -1 backpressure として扱う
-8. lsquic: stream `pending_writes` に byte cap/backpressure を追加
-9. gns/msquic: adapter inbox に message cap と oldest-drop diagnostics を追加
-10. enet: reliable queue に byte cap/backpressure を追加
-11. kcp: send queue に byte cap/backpressure を追加
-12. raknet/slikenet: outgoing queue に byte cap/backpressure を追加
-13. litenetlib: reliable outgoing queue に byte cap/backpressure を追加
-14. coop_rudp: per-conn abort と max retransmit/idle timeout で crashed peer の reliable queue を解放
-15. native UDP socket buffer: `raw_udp`, `mini_rudp`, `coop_rudp`, `apex_rudp`, `enet`, `kcp`, `raknet`/`slikenet`, `yojimbo`, `gns`, `quiche`, `lsquic` は設定直後の `getsockopt` 実値と clamp 判定を stderr diagnostics に出力
+4. yojimbo: send queue full は adapter が `CanSendMessage` で事前チェックし、切断ではなく -1 backpressure として扱う
+5. udt4: UDT `BROKEN`/`CLOSED`/`NONEXIST` を切断扱いにし、adapter `out_pending` に byte cap/backpressure を追加
+6. quiche: stream partial write の残りを adapter pending に保持し、cap 超過は -1 backpressure として扱う
+7. lsquic: stream `pending_writes` に byte cap/backpressure を追加
+8. gns/msquic: adapter inbox に message cap と oldest-drop diagnostics を追加
+9. enet: reliable queue に byte cap/backpressure を追加
+10. kcp: send queue に byte cap/backpressure を追加
+11. raknet/slikenet: outgoing queue に byte cap/backpressure を追加
+12. litenetlib: reliable outgoing queue に byte cap/backpressure を追加
+13. coop_rudp: per-conn abort と max retransmit/idle timeout で crashed peer の reliable queue を解放
+14. native UDP socket buffer: `raw_udp`, `mini_rudp`, `coop_rudp`, `apex_rudp`, `kcp`, `quiche`, `lsquic` は設定直後の `getsockopt` 実値と clamp 判定を stderr diagnostics に出力
 
 #### 残存
 
-1. udt4: UDT4 SDK は FetchContent tarball の `channel.cpp` が UDP socket buffer を設定しており、実値 diagnostics patch が未適用
-2. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
-3. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
+1. enet, raknet/slikenet, yojimbo, gns: library-owned UDP socket の `getsockopt` diagnostics patch が未適用
+2. udt4: UDT4 SDK は FetchContent tarball の `channel.cpp` が UDP socket buffer を設定しており、実値 diagnostics patch が未適用
+3. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
+4. raknet/slikenet: SO_SNDBUF=16KB のみ。送信バッファが受信の 1/16
+5. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
 
 ### 意外な設計選択
 
