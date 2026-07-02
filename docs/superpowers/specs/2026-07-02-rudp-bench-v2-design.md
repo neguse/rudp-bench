@@ -195,13 +195,26 @@ v1 で `unsupported_unreliable` として排除されていた udt4 も、この
 
 「TCP でいいのはどの条件までか」は staleness の regime 依存カーブとして読める。
 
-**ネットワーク条件は DoE の要因**: TCP 系 vs RUDP の優劣は netem 条件で反転するため、
-条件は固定背景ではなくスイープ要因とする。regime は clean(0 loss / ~0ms)、
-wired(0.1% / 片道 10ms)、mobile(1-3% / 片道 40ms + jitter + **帯域上限**
-(netem rate + queue limit で制約付き last-mile を近似))の3点を基本とする。
-AQM/bufferbloat の忠実な再現は非目標(本ワークロードの per-conn 帯域は細く、
-支配要因は loss/delay。ただし mobile の帯域上限がないと HoL/CC の結論が
-無限帯域前提になるため上限だけは入れる)。
+**ネットワーク条件は DoE の要因(現象で命名し、「mobile」等の地名を使わない)**:
+TCP 系 vs RUDP の優劣は netem 条件で反転するため、条件は固定背景ではなく
+スイープ要因とする。「mobile = ランダム loss 数%」という通俗モデルは採らない —
+現代セルラーは HARQ/RLC がリンク層で再送するため IP 層のランダム loss は僅少で、
+実際に起きるのは遅延の暴れとバースト断。ランダム loss を盛る条件付けは TCP の
+HoL を人工的に頻発させ、RUDP に有利な藁人形になる。
+
+- **clean**(netem なし): 校正・floor
+- **wired**(片道 10ms + 0.1%): 固定網の代表
+- **loss 平面(boundary スイープの X-Y 軸)**: Gilbert-Elliott(netem `gemodel`)で
+  **平均 loss 率 {0.1, 1, 3}% × 平均 burst 長 {1, 4, 16} packets** の2次元グリッド
+  (2状態モデルで loss率 = p/(p+r)、burst長 = 1/r から逆算。delay は固定)。
+  単発 loss は fast retransmit で回復するがバーストは RTO 落ちするため、TCP の
+  HoL コストは loss 率より burst 構造に敏感。一方バーストは transport 非依存に
+  連続 update を消すので、burst が長いほど差は縮むはず — 境界線はこの平面上の
+  等高線であり、1次元では形が分からない
+- **congested**(帯域上限 + 高 jitter、loss なし): bufferbloat 型の現実性チェック1点
+
+主張はすべて「loss p%・burst 長 b なら」という条件付きで行う(地名ラベルの
+外的妥当性論争を構造的に回避)。AQM の忠実な再現は非目標。
 
 **lifecycle バリアプロトコル(two-phase)**: 各プロセスが自分の起動時刻から窓を
 計算する方式を全廃する。orchestrator が control channel(Unix domain socket,
@@ -323,17 +336,19 @@ publish は複数ブロックの確認実験、と2段階に分ける。
 regime)は全格子を埋めず、答えるべき2つの質問が住むスライスだけを測る:
 
 1. **capacity スライス**(Q: server はどこまで張れるか): conns スイープ(二分探索)を
-   **wired + mobile の2 regime** で全 profile に対して行う(v1 で loss 条件が break を
-   1桁動かした実績 — msquic の CC、udt4 — があるため wired 単独は仮定が強すぎる。
-   clean は wired と実質同等なので省く)
-2. **boundary スライス**(Q: どの条件まで TCP でいいか): regime スイープを
-   **代表 conns 固定**で、latest-value 系 profile(media_relay / game_server)に
-   対して行う。staleness p99 が一次指標
-3. **交互作用プローブ**: スライス仮定の検証として、capacity の break 付近 × 残 regime
+   **wired + loss 平面の最悪点(3% × burst 16)の2条件**で全 profile に対して行う
+   (v1 で loss 条件が break を1桁動かした実績 — msquic の CC、udt4 — があるため
+   wired 単独は仮定が強すぎる。clean は wired と実質同等なので省く)
+2. **boundary スライス**(Q: どの条件まで TCP でいいか): **loss 平面 3×3 グリッド**を
+   代表 conns 固定で、latest-value 系 profile(media_relay / game_server)に対して
+   行う(+ congested 1点)。staleness p99 が一次指標。境界の等高線が通る近傍だけ
+   グリッドを局所細分する(逐次実験 — 面全体を細かくしない)
+3. **交互作用プローブ**: スライス仮定の検証として、capacity の break 付近 × loss 平面
    の数セルを publish 時のみ実測。スライスの結論と矛盾したらその近傍だけ局所的に
-   格子を広げる(逐次実験)
+   格子を広げる
 
-これで 1 ブロックあたりの run 数は full factorial の ~1/5(概算 ~300 run)になり、
+これで 1 ブロックあたりの run 数は概算 ~380(capacity ~240 + boundary
+6 transport × 2 profile × 10 条件 = 120 + プローブ ~20)。full factorial 比 ~1/4 で、
 AWS ブロック並列なら publish の wall-clock は 1 ブロック分で済む。
 
 **rig 抽象**: rig = 実行環境の記述(コア割当・隔離方式・環境 metadata)であり、
@@ -419,7 +434,7 @@ benchkit)は削らず**、横幅を削る:
 |---|---|---|
 | transport | enet + msquic + magiconion | 必須セット残り 3(gns, litenetlib, websocket) |
 | profile | echo(mixed)+ 縮小 broadcast(media 型、少 conns)の2本 | 残り profile |
-| ネット条件 | wired + mobile の2 regime | 3 regime(capacity/boundary スライス方式) |
+| ネット条件 | wired + loss 平面の代表1点(1% × burst 4) | loss 平面 3×3 + congested(スライス方式) |
 | conn sweep | 1 / 50 / 500 程度の3点 | full sweep |
 | 統計 | N=3 中央値のみ | 曲線 + bootstrap CI、適応サンプリング |
 | 校正 | 会計零点(null)/ 故障注入 / netem 実効値(ping/iperf3)/ 必達会計(TCP 系)/ duration 不変性 の5本 | 回帰テスト群、pps 天井、syscalls/msg |
