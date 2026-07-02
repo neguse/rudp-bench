@@ -1,0 +1,49 @@
+name: v2
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  calibration-and-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # v2 が必要とする submodule のみ(全 recursive は v1 の資産で重い)
+      - name: Init required submodules
+        run: git submodule update --init third_party/enet
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: orchestrator vet + test
+        run: |
+          go vet ./orchestrator/...
+          go test -count=1 ./orchestrator/...
+
+      # 校正スイート(会計零点・既知故障注入を含む。sudo/netns 不要)
+      - name: benchkit build + calibration tests
+        run: |
+          cmake -S benchkit -B build-v2
+          cmake --build build-v2 -j
+          ctest --test-dir build-v2 --output-on-failure
+
+      - name: enet transport build + smoke
+        run: |
+          cmake -S servers/enet -B build-v2-enet
+          cmake --build build-v2-enet -j
+          ctest --test-dir build-v2-enet --output-on-failure
+
+      # 校正: duration 不変性(loopback、netem なし)
+      - name: calibration duration invariance
+        run: ./calibration/duration_invariance.sh
