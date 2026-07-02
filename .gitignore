@@ -12,3 +12,5 @@ __pycache__/
 adapters/litenetlib/bin/
 adapters/litenetlib/obj/
 results-v2/
+servers/magiconion/**/bin/
+servers/magiconion/**/obj/
