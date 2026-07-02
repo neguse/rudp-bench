@@ -62,8 +62,14 @@ must-deliver class の欠落・並べ替え・重複は不可。
 
 ## lifecycle と control channel
 
-control channel は **Unix domain socket**(orchestrator が path を環境変数
-`BENCH_CONTROL_SOCK` で渡す)。netns をファイルシステム経由で越えるため、被測定経路の
+orchestrator からプロセスへの受け渡しは環境変数で行う:
+
+| 変数 | 意味 |
+|---|---|
+| `BENCH_CONTROL_SOCK` | control channel の UDS path |
+| `BENCH_METRICS_OUT` | このプロセスが metrics JSON を書き出すファイル path。プロセスは drain 完了後・`done` 送信前に書く |
+
+control channel は **Unix domain socket**。netns をファイルシステム経由で越えるため、被測定経路の
 netem の影響を受けない out-of-band 経路になる。プロトコルは line-delimited JSON:
 
 ```

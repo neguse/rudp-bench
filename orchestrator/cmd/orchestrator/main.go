@@ -13,9 +13,15 @@ import (
 
 	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/netops"
+	orun "github.com/neguse/rudp-bench/orchestrator/run"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "run" {
+		runMain(os.Args[2:])
+		return
+	}
+
 	var (
 		sock       = flag.String("sock", filepath.Join(os.TempDir(), fmt.Sprintf("rudp-bench-%d.sock", os.Getpid())), "control Unix domain socket path")
 		expected   = flag.Int("expected", 1, "expected process count")
@@ -68,6 +74,36 @@ func main() {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	exitOnErr(enc.Encode(result))
+}
+
+func runMain(args []string) {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	configPath := fs.String("config", "", "run config JSON path")
+	exitOnErr(fs.Parse(args))
+	if *configPath == "" {
+		fmt.Fprintln(os.Stderr, "run -config is required")
+		os.Exit(1)
+	}
+
+	cfg, err := orun.LoadConfig(*configPath)
+	exitOnErr(err)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	result, err := orun.Run(ctx, cfg)
+	exitOnErr(err)
+	if result != nil {
+		if path := result.Artifacts["result_json"]; path != "" {
+			fmt.Fprintf(os.Stderr, "result: %s\n", path)
+		}
+		if path := result.Artifacts["summary"]; path != "" {
+			fmt.Fprintf(os.Stderr, "summary: %s\n", path)
+		}
+		if result.Verdict != orun.VerdictValid {
+			os.Exit(2)
+		}
+	}
 }
 
 func exitOnErr(err error) {

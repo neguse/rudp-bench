@@ -66,6 +66,11 @@ int bk_control_ready(bk_control *c, int conns);
 // schedule をブロッキングで待ち、受信直後に sched_ack(margin 付き)を返信する。
 // margin_ns = start_at − 受信時刻(負になりうる。gate 判定は orchestrator 側)。
 int bk_control_wait_schedule(bk_control *c, bk_schedule *out);
+// schedule の非ブロッキング確認。受信済みなら sched_ack を返信して 1、未着なら 0、
+// エラーは -1。自前の event loop を持つ server は ready 後、これを service の合間に
+// 呼ぶこと(wait_schedule でブロックすると接続受付が止まり、client が ready に
+// なれず全体がデッドロックする)。
+int bk_control_poll_schedule(bk_control *c, bk_schedule *out);
 // done を送る。stats_json は bk_metrics_dump_json の出力等。
 int bk_control_done(bk_control *c, const char *stats_json);
 
@@ -127,6 +132,8 @@ void bk_metrics_on_slot(bk_metrics *m, const bk_header *h, bool submitted);
 void bk_metrics_on_recv(bk_metrics *m, const bk_header *h, uint64_t recv_ts_ns);
 // staleness サンプラを駆動する。受信ループから高頻度で呼んでよい
 // (staleness_period_ns 未満の呼び出しは内部で間引く)。
+// 計測窓 [start_at, stop_at) 内でのみ呼ぶこと。warmup 中(measured update が
+// まだない)や drain 中(送信停止後で age が伸びるだけ)のサンプルは分布を汚染する。
 void bk_metrics_tick(bk_metrics *m, uint64_t now_ns);
 
 // 集計結果を JSON で path に書く(orchestrator がマージする)。

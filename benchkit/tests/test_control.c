@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct {
@@ -173,10 +174,21 @@ int main(void) {
 
   bk_control *c = bk_control_connect(path);
   CHECK(c != NULL);
+  bk_schedule schedule;
+  // schedule 未着なら非ブロッキングで 0 が返る
+  CHECK(bk_control_poll_schedule(c, &schedule) == 0);
   CHECK(bk_control_hello(c, "client", "null", 2) == 0);
   CHECK(bk_control_ready(c, 3) == 0);
-  bk_schedule schedule;
-  CHECK(bk_control_wait_schedule(c, &schedule) == 0);
+  // server 実装が使うポーリング経路(service ループの合間に呼ぶ形)で受信する
+  for (;;) {
+    const int r = bk_control_poll_schedule(c, &schedule);
+    CHECK(r >= 0);
+    if (r == 1) {
+      break;
+    }
+    struct timespec ts = {0, 1000000};  // 1ms
+    nanosleep(&ts, NULL);
+  }
   CHECK(schedule.start_at_ns == args.start_at_ns);
   CHECK(schedule.stop_at_ns == args.stop_at_ns);
   CHECK(schedule.drain_until_ns == args.drain_until_ns);

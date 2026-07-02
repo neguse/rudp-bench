@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -15,6 +16,9 @@
 
 struct bk_control {
   int fd;
+  // poll_schedule 用の行バッファ(部分受信を跨いで保持する)
+  char rbuf[1024];
+  size_t rlen;
 };
 
 static int fill_sockaddr(const char *sock_path, struct sockaddr_un *addr,
@@ -70,30 +74,21 @@ static int write_all(int fd, const char *buf, size_t len) {
   return 0;
 }
 
-static int read_line(int fd, char *buf, size_t cap) {
-  if (cap == 0) {
-    return -1;
-  }
-  size_t len = 0;
-  while (len + 1 < cap) {
-    char ch;
-    ssize_t n = read(fd, &ch, 1);
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
+// rbuf から1行取り出す。1=行あり / 0=まだ / -1=行が cap 超過。
+static int extract_line(bk_control *c, char *line, size_t cap) {
+  for (size_t i = 0; i < c->rlen; ++i) {
+    if (c->rbuf[i] == '\n') {
+      if (i >= cap) {
+        return -1;
       }
-      return -1;
+      memcpy(line, c->rbuf, i);
+      line[i] = '\0';
+      memmove(c->rbuf, c->rbuf + i + 1u, c->rlen - i - 1u);
+      c->rlen -= i + 1u;
+      return 1;
     }
-    if (n == 0) {
-      return -1;
-    }
-    if (ch == '\n') {
-      buf[len] = '\0';
-      return 0;
-    }
-    buf[len++] = ch;
   }
-  return -1;
+  return 0;
 }
 
 static bool json_has_type(const char *line, const char *type) {
@@ -228,16 +223,8 @@ int bk_control_ready(bk_control *c, int conns) {
   return write_all(c->fd, line, (size_t)n);
 }
 
-int bk_control_wait_schedule(bk_control *c, bk_schedule *out) {
-  if (c == NULL || out == NULL) {
-    return -1;
-  }
-
-  char line[1024];
-  if (read_line(c->fd, line, sizeof(line)) != 0) {
-    return -1;
-  }
-  const uint64_t recv_ns = bk_now_ns();
+static int parse_schedule_and_ack(bk_control *c, const char *line,
+                                  uint64_t recv_ns, bk_schedule *out) {
   if (!json_has_type(line, "\"schedule\"")) {
     return -1;
   }
@@ -256,6 +243,67 @@ int bk_control_wait_schedule(bk_control *c, bk_schedule *out) {
     return -1;
   }
   return write_all(c->fd, ack, (size_t)n);
+}
+
+int bk_control_poll_schedule(bk_control *c, bk_schedule *out) {
+  if (c == NULL || out == NULL) {
+    return -1;
+  }
+
+  char line[1024];
+  for (;;) {
+    const int has = extract_line(c, line, sizeof(line));
+    if (has < 0) {
+      return -1;
+    }
+    if (has == 1) {
+      break;
+    }
+    if (c->rlen == sizeof(c->rbuf)) {
+      return -1;  // 改行なしで行バッファが溢れた
+    }
+    const ssize_t n = recv(c->fd, c->rbuf + c->rlen, sizeof(c->rbuf) - c->rlen,
+                           MSG_DONTWAIT);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return 0;
+      }
+      return -1;
+    }
+    if (n == 0) {
+      return -1;  // orchestrator 切断
+    }
+    c->rlen += (size_t)n;
+  }
+
+  const uint64_t recv_ns = bk_now_ns();
+  if (parse_schedule_and_ack(c, line, recv_ns, out) != 0) {
+    return -1;
+  }
+  return 1;
+}
+
+int bk_control_wait_schedule(bk_control *c, bk_schedule *out) {
+  if (c == NULL || out == NULL) {
+    return -1;
+  }
+
+  for (;;) {
+    const int r = bk_control_poll_schedule(c, out);
+    if (r != 0) {
+      return r == 1 ? 0 : -1;
+    }
+    struct pollfd pfd;
+    pfd.fd = c->fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    if (poll(&pfd, 1, -1) < 0 && errno != EINTR) {
+      return -1;
+    }
+  }
 }
 
 int bk_control_done(bk_control *c, const char *stats_json) {

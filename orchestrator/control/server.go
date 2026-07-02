@@ -380,7 +380,7 @@ func sendEvent(ctx context.Context, events chan<- event, ev event) {
 type runState struct {
 	expected     int
 	participants map[int]*Participant
-	procIndex    map[int]int
+	procIndex    map[string]int
 	invalid      []string
 	schedule     ScheduleMessage
 	scheduleSent bool
@@ -390,7 +390,7 @@ func newRunState(expected int) *runState {
 	return &runState{
 		expected:     expected,
 		participants: make(map[int]*Participant),
-		procIndex:    make(map[int]int),
+		procIndex:    make(map[string]int),
 	}
 }
 
@@ -404,10 +404,13 @@ func (s *runState) apply(ev event) error {
 			return fmt.Errorf("received more than %d hello messages", s.expected)
 		}
 		if ev.hello.ProcIndex >= 0 {
-			if other, ok := s.procIndex[ev.hello.ProcIndex]; ok {
-				return fmt.Errorf("duplicate proc_index %d on connections %d and %d", ev.hello.ProcIndex, other, ev.connID)
+			// proc_index の一意性は role 内でのみ要求する
+			// (server と client 0 は同じ proc_index 0 を名乗る)
+			key := fmt.Sprintf("%s#%d", ev.hello.Role, ev.hello.ProcIndex)
+			if other, ok := s.procIndex[key]; ok {
+				return fmt.Errorf("duplicate %s proc_index %d on connections %d and %d", ev.hello.Role, ev.hello.ProcIndex, other, ev.connID)
 			}
-			s.procIndex[ev.hello.ProcIndex] = ev.connID
+			s.procIndex[key] = ev.connID
 		}
 		s.participants[ev.connID] = &Participant{ConnID: ev.connID, Hello: ev.hello}
 	case eventReady:
