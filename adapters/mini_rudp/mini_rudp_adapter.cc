@@ -9,9 +9,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -33,7 +35,9 @@ namespace {
 constexpr uint16_t FLAG_ACK = 1;
 constexpr uint16_t FLAG_REL = 2;
 constexpr size_t MAX_UDP_PAYLOAD = 65507;
-constexpr size_t MAX_PENDING_RELIABLE_PER_CONN = 65'536;
+// §3.1: 未 ACK reliable のバックプレッシャはバイト基準 32MiB(他 adapter と統一。
+// 以前はメッセージ数基準 65536 件で、accepted_ratio の意味が lib 毎に違った)。
+constexpr size_t DEFAULT_PENDING_RELIABLE_BYTES = 32u * 1024u * 1024u;
 constexpr auto RETX_TIMEOUT = std::chrono::milliseconds(50);
 constexpr int DEFAULT_RELIABLE_TIMEOUT_MS = 10'000;
 // L17: 256KB, uniform across the UDP adapters. A 2026-05-31 A/B confirmed a
@@ -60,6 +64,7 @@ struct Conn {
   uint32_t next_seq = 1;
   bool active = true;
   std::unordered_map<uint32_t, PendingSend> pending;  // 未 ACK (reliable)
+  size_t pending_bytes = 0;                           // 未 ACK バイト合計
   rudp_bench::SlidingDedupWindow received_seq;        // bounded duplicate suppress
 };
 
@@ -99,6 +104,21 @@ void tune_socket_buffers(int fd, const char* socket_role) {
   rudp_bench::tune_udp_socket_buffers(fd, UDP_SOCKET_BUFFER_BYTES,
                                       UDP_SOCKET_BUFFER_BYTES, "mini_rudp",
                                       socket_role);
+}
+
+size_t pending_reliable_byte_limit() {
+  const char* v = std::getenv("MINI_RUDP_PENDING_BYTES");
+  if (!v || !*v) return DEFAULT_PENDING_RELIABLE_BYTES;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return DEFAULT_PENDING_RELIABLE_BYTES;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
 }
 
 std::chrono::milliseconds reliable_timeout() {
@@ -152,8 +172,12 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     if (len > max_payload_bytes(reliable)) return -1;
     auto* c = find_conn(conn_id);
     if (!c || !c->active) return -1;
-    if (reliable && c->pending.size() >= MAX_PENDING_RELIABLE_PER_CONN) {
-      return -1;
+    if (reliable) {
+      size_t limit = pending_reliable_byte_limit();
+      size_t pkt_size = sizeof(Header) + len;
+      if (c->pending_bytes > limit || pkt_size > limit - c->pending_bytes) {
+        return -1;
+      }
     }
     Header h;
     h.flags = reliable ? FLAG_REL : 0;
@@ -172,6 +196,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
         return -1;
       }
       auto now = clock_type::now();
+      c->pending_bytes += pkt.size();
       c->pending[h.seq] = PendingSend{std::move(pkt), now, now};
       schedule_retx(now);
       return 0;
@@ -294,6 +319,8 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     return reliable ? "immediate_retransmit_poll" : "immediate";
   }
   bool encryption_on() const override { return false; }
+  const char* congestion_control() const override { return "none"; }
+  const char* thread_model() const override { return "single"; }
   rudp_bench::ConnectionStats connection_stats() const override {
     rudp_bench::ConnectionStats s;
     s.shutdown_by_transport = shutdown_by_transport_;
@@ -321,6 +348,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
       recycle_buffer(std::move(ps.bytes));
     }
     it->second.pending.clear();
+    it->second.pending_bytes = 0;
     ++shutdown_by_transport_;
     for (auto map_it = id_by_key_.begin(); map_it != id_by_key_.end();) {
       if (map_it->second == id) {
@@ -364,6 +392,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
   void ack_pending(Conn& c, uint32_t seq) {
     auto it = c.pending.find(seq);
     if (it == c.pending.end()) return;
+    c.pending_bytes -= it->second.bytes.size();
     recycle_buffer(std::move(it->second.bytes));
     c.pending.erase(it);
   }

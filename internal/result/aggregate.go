@@ -97,6 +97,8 @@ func medianStr(values []float64, places int) string {
 }
 
 // dominant returns the most frequent non-empty string in a slice.
+// Ties are broken lexicographically so the result is deterministic
+// regardless of map iteration order.
 func dominant(values []string) string {
 	counts := map[string]int{}
 	for _, v := range values {
@@ -110,7 +112,7 @@ func dominant(values []string) string {
 	var best string
 	bestCount := 0
 	for v, c := range counts {
-		if c > bestCount {
+		if c > bestCount || (c == bestCount && v < best) {
 			bestCount = c
 			best = v
 		}
@@ -118,9 +120,18 @@ func dominant(values []string) string {
 	return best
 }
 
-// loadConns builds a map of (library, scenario_id) -> conns from a scenarios CSV.
-func loadConns(scenariosPath string) map[[2]string]string {
-	out := map[[2]string]string{}
+// scenarioMeta holds per-(library, scenario_id) metadata from a scenarios CSV.
+type scenarioMeta struct {
+	conns       string
+	profile     string
+	ccAlgo      string
+	threadModel string
+}
+
+// loadScenarioMeta builds a map of (library, scenario_id) -> metadata
+// (conns, profile) from a scenarios CSV.
+func loadScenarioMeta(scenariosPath string) map[[2]string]scenarioMeta {
+	out := map[[2]string]scenarioMeta{}
 	if scenariosPath == "" {
 		return out
 	}
@@ -130,15 +141,31 @@ func loadConns(scenariosPath string) map[[2]string]string {
 	}
 	for _, r := range rows {
 		key := [2]string{r["library"], r["scenario_id"]}
-		out[key] = r["conns"]
+		out[key] = scenarioMeta{
+			conns:       r["conns"],
+			profile:     r["profile"],
+			ccAlgo:      r["cc_algo"],
+			threadModel: r["thread_model"],
+		}
 	}
 	return out
 }
 
+// MinValidPolicy returns the minimum number of valid runs required for a
+// (library, scenario_id) group to be marked valid in the aggregate output.
+// adaptive skip で run 数を減らした lib だけ閾値を緩和するために使う。
+type MinValidPolicy func(library, scenarioID string) int
+
+// FixedMinValid returns a MinValidPolicy that applies the same threshold to
+// every group.
+func FixedMinValid(n int) MinValidPolicy {
+	return func(string, string) int { return n }
+}
+
 // Aggregate groups result rows by (library, scenario_id), selects valid rows,
 // computes median of each metric column, and writes the output CSV.
-func Aggregate(resultsPath, scenariosPath, outPath string, minValid int) error {
-	connsMap := loadConns(scenariosPath)
+func Aggregate(resultsPath, scenariosPath, outPath string, minValid MinValidPolicy) error {
+	metaMap := loadScenarioMeta(scenariosPath)
 
 	allRows, err := ReadCSVRows(resultsPath)
 	if err != nil {
@@ -164,7 +191,10 @@ func Aggregate(resultsPath, scenariosPath, outPath string, minValid int) error {
 	})
 
 	// Build output fields.
-	fields := []string{"library", "scenario_id", "conns", "n_total", "n_valid", "valid"}
+	// cc_algo / thread_model は公平性メタデータ（improvements §3.2-3.3）。
+	// summary を CC 無効群/BBR 群・single/multi スレッドで分離して読める。
+	fields := []string{"library", "scenario_id", "profile", "conns",
+		"cc_algo", "thread_model", "n_total", "n_valid", "valid"}
 	for _, c := range metricCols {
 		fields = append(fields, c+"_median")
 	}
@@ -182,14 +212,18 @@ func Aggregate(resultsPath, scenariosPath, outPath string, minValid int) error {
 			}
 		}
 
+		meta := metaMap[[2]string{lib, sid}]
 		agg := map[string]string{
-			"library":     lib,
-			"scenario_id": sid,
-			"conns":       connsMap[[2]string{lib, sid}],
-			"n_total":     strconv.Itoa(len(rows)),
-			"n_valid":     strconv.Itoa(len(validRows)),
+			"library":      lib,
+			"scenario_id":  sid,
+			"profile":      meta.profile,
+			"conns":        meta.conns,
+			"cc_algo":      meta.ccAlgo,
+			"thread_model": meta.threadModel,
+			"n_total":      strconv.Itoa(len(rows)),
+			"n_valid":      strconv.Itoa(len(validRows)),
 		}
-		if len(validRows) >= minValid {
+		if len(validRows) >= minValid(lib, sid) {
 			agg["valid"] = "1"
 		} else {
 			agg["valid"] = "0"

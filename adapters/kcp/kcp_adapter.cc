@@ -333,6 +333,11 @@ class KcpAdapter : public rudp_bench::Adapter {
     }
 
     // unreliable bypass: raw UDP with conv header
+    // §3.1 backpressure 注記: unreliable は KCP を経由せず生 sendto で即時送出
+    // するため、adapter/KCP 側に送信キューが存在しない。よって
+    // KCP_SEND_QUEUE_BYTES (32MiB) の cap 対象は reliable のみで、unreliable は
+    // カウント対象外(= cap 不要)という設計判断。ソケットバッファ満杯時は
+    // sendto が失敗して -1 を返すので、backpressure はカーネル側で完結する。
     raw_send_scratch_.resize(5 + len);
     raw_send_scratch_[0] = PREFIX_RAW;
     std::memcpy(raw_send_scratch_.data() + 1, &conn->conv, 4);

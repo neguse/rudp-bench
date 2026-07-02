@@ -112,7 +112,22 @@ func Run(ctx context.Context, cfg RunConfig) error {
 	// Capacity tracker
 	tracker := result.NewCapacityTracker()
 
-	// 5. Isolate setup
+	// 5. 前回実行の残留環境を冪等にクリアする。teardown は defer でしか走らない
+	// ため、前回が異常終了 (os.Exit / kill) だと netem qdisc や CPU 隔離が残る。
+	// エラーは warning 扱いで続行する。
+	if !cfg.DryRun {
+		if cfg.Isolate == "systemd" {
+			if err := runner.IsolateTeardown(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: pre-run isolate teardown failed: %v\n", err)
+			}
+		}
+		if cfg.Netem {
+			// ログは残さない（qdisc 未設定時の del 失敗は正常系）。
+			runner.ClearNetem("")
+		}
+	}
+
+	// 5b. Isolate setup
 	if cfg.Isolate == "systemd" && !cfg.DryRun {
 		if err := runner.IsolateSetup(); err != nil {
 			return fmt.Errorf("isolate setup: %w", err)
@@ -129,6 +144,16 @@ func Run(ctx context.Context, cfg RunConfig) error {
 	}
 
 	// 7. Sweep loop
+	// adaptive skip で run 数を 1 に減らした (library, scenario_id) の集合。
+	// 集計時の minValid 緩和を skip した lib のグループのみに限定するために使う。
+	adaptiveSkipped := make(map[[2]string]bool)
+	minValidFor := func(lib, scenarioID string) int {
+		if adaptiveSkipped[[2]string{lib, scenarioID}] {
+			return 1
+		}
+		return cfg.MinValid
+	}
+
 	for _, profile := range cfg.Profiles {
 		if len(profile.Conns) == 0 {
 			fmt.Printf("profile=%s skipped (empty conns schedule)\n", profile.Name)
@@ -187,23 +212,32 @@ func Run(ctx context.Context, cfg RunConfig) error {
 
 			// lib-outer / run-inner: each lib runs its N runs consecutively.
 			// Adaptive mode can break early after run=1 if prior+current both OK.
-			anyAdaptiveSkip := false
 			for _, lib := range active {
 				for ri, r := range cfg.Runs {
 					runID := fmt.Sprintf("%s_c%d_r%s", profile.Name, conns, r)
+					scenarioID := fmt.Sprintf("%s_r%d_u%d_%d_%d_%s_0_%s",
+						lib, profile.RateR, profile.RateU,
+						profile.Size, conns, profile.Mode, cfg.Idle)
+					resultsPath := filepath.Join(cfg.Out, fmt.Sprintf("res_%s.csv", runID))
 
-					if cfg.Resume && completed[runID+"/"+lib] {
+					if cfg.Resume && completed[CompletedKey(runID, lib)] {
 						fmt.Printf("[%s] %s %s c=%d run=%s SKIP (completed)\n",
 							time.Now().Format("15:04:05"), profile.Name, lib, conns, r)
+						// resume 時も run=1 完了直後と同じ adaptive skip 判定を行う。
+						// 前回 adaptive skip した lib で残り run を無駄に再実行しないため。
+						if cfg.Adaptive && ri == 0 && len(cfg.Runs) > 1 && !cfg.DryRun &&
+							result.PriorWasOK(cfg.Prior, profile.Name, lib, conns) &&
+							checkRun1Delivery(resultsPath, lib, scenarioID, cfg.MinDelivery) {
+							fmt.Printf("  %s %s c=%d adaptive: prior+run1 OK, skip runs %s\n",
+								profile.Name, lib, conns, strings.Join(cfg.Runs[1:], ","))
+							adaptiveSkipped[[2]string{lib, scenarioID}] = true
+							break
+						}
 						continue
 					}
 
 					fmt.Printf("[%s] %s %s c=%d run=%s START\n",
 						time.Now().Format("15:04:05"), profile.Name, lib, conns, r)
-
-					scenarioID := fmt.Sprintf("%s_r%d_u%d_%d_%d_%s_0_%s",
-						lib, profile.RateR, profile.RateU,
-						profile.Size, conns, profile.Mode, cfg.Idle)
 
 					execOpts := runner.ExecOpts{
 						BuildDir:      cfg.BuildDir,
@@ -224,12 +258,33 @@ func Run(ctx context.Context, cfg RunConfig) error {
 						OutDir:        filepath.Join(cfg.Out, fmt.Sprintf("raw_%s", runID)),
 						RunID:         runID,
 						ScenarioID:    scenarioID,
+						Profile:       profile.Name,
 						RampUpMs:      -1,
 						LitenetlibBin: cfg.LitenetlibBin,
 						DryRun:        cfg.DryRun,
-						Results:       filepath.Join(cfg.Out, fmt.Sprintf("res_%s.csv", runID)),
+						Results:       resultsPath,
 						Diagnostics:   filepath.Join(cfg.Out, fmt.Sprintf("diag_%s.csv", runID)),
 						Scenarios:     filepath.Join(cfg.Out, fmt.Sprintf("scen_%s.csv", runID)),
+					}
+
+					// 再実行時に result.Append の追記で同一 (run_id, library) の
+					// 行が重複しないよう、既存行を除去してから Exec する。
+					// diagnostics には library 列がないため scenario_id でも照合する
+					// (scenario_id は lib を含み lib ごとに一意)。
+					if !cfg.DryRun {
+						staleMatch := func(row map[string]string) bool {
+							return row["run_id"] == runID &&
+								(row["library"] == lib || row["scenario_id"] == scenarioID)
+						}
+						for _, p := range []string{execOpts.Results, execOpts.Diagnostics, execOpts.Scenarios} {
+							removed, err := result.RemoveRows(p, staleMatch)
+							if err != nil {
+								fmt.Fprintf(os.Stderr, "warning: removing stale rows from %s: %v\n", p, err)
+							} else if removed > 0 {
+								fmt.Printf("  removed %d stale row(s) for %s from %s\n",
+									removed, lib, filepath.Base(p))
+							}
+						}
 					}
 
 					if err := runner.Exec(ctx, execOpts); err != nil {
@@ -244,7 +299,7 @@ func Run(ctx context.Context, cfg RunConfig) error {
 							if run1OK := checkRun1Delivery(execOpts.Results, lib, scenarioID, cfg.MinDelivery); run1OK {
 								fmt.Printf("  %s %s c=%d adaptive: prior+run1 OK, skip runs %s\n",
 									profile.Name, lib, conns, strings.Join(cfg.Runs[1:], ","))
-								anyAdaptiveSkip = true
+								adaptiveSkipped[[2]string{lib, scenarioID}] = true
 								break
 							}
 						}
@@ -256,15 +311,10 @@ func Run(ctx context.Context, cfg RunConfig) error {
 				continue
 			}
 
-			// When adaptive skip occurred, some libs have N=1 data.
-			// Use min_valid=1 so single-run results are still valid.
-			minValid := cfg.MinValid
-			if anyAdaptiveSkip && minValid > 1 {
-				minValid = 1
-			}
-
-			// After all libs complete their runs for this conns point: combine and aggregate
-			summaryPath, err := connSummary(cfg.Out, profile.Name, conns, minValid)
+			// After all libs complete their runs for this conns point: combine and aggregate.
+			// adaptive skip した lib は N=1 でも valid になるよう、
+			// minValidFor がその lib のグループだけ min_valid=1 を返す。
+			summaryPath, err := connSummary(cfg.Out, profile.Name, conns, minValidFor)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "connSummary failed for profile=%s conns=%d: %v\n",
 					profile.Name, conns, err)
@@ -317,7 +367,7 @@ func Run(ctx context.Context, cfg RunConfig) error {
 	}
 
 	// 8. Combine all
-	if err := combineAll(cfg.Out, cfg.MinValid); err != nil {
+	if err := combineAll(cfg.Out, minValidFor); err != nil {
 		return fmt.Errorf("combineAll: %w", err)
 	}
 
@@ -386,7 +436,7 @@ func writeProfiles(path string, profiles []bench.Profile) error {
 
 // connSummary combines per-run CSVs for a single (profile, conns) point
 // into combined results/scenarios CSVs, then aggregates into a summary.
-func connSummary(outDir, profileName string, conns, minValid int) (string, error) {
+func connSummary(outDir, profileName string, conns int, minValid result.MinValidPolicy) (string, error) {
 	resPattern := filepath.Join(outDir, fmt.Sprintf("res_%s_c%d_r*.csv", profileName, conns))
 	scenPattern := filepath.Join(outDir, fmt.Sprintf("scen_%s_c%d_r*.csv", profileName, conns))
 
@@ -408,7 +458,7 @@ func connSummary(outDir, profileName string, conns, minValid int) (string, error
 
 // combineAll combines all per-point result/scenario CSVs into combined files
 // and aggregates into summary.csv.
-func combineAll(outDir string, minValid int) error {
+func combineAll(outDir string, minValid result.MinValidPolicy) error {
 	resPattern := filepath.Join(outDir, "res_*_c*_r*.csv")
 	scenPattern := filepath.Join(outDir, "scen_*_c*_r*.csv")
 

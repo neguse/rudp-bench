@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/neguse/rudp-bench/internal/result"
 )
 
 // Manifest records sweep parameters so a resumed run can verify consistency.
@@ -130,8 +132,17 @@ func ValidateResume(outDir string, cfg RunConfig) error {
 	return nil
 }
 
+// CompletedKey builds the lookup key used by CompletedPoints and the sweep
+// loop for a (run_id, library) point.
+func CompletedKey(runID, lib string) string {
+	return runID + "/" + lib
+}
+
 // CompletedPoints scans the output directory for existing res_*_c*_r*.csv
-// files and returns a set of completed run IDs (e.g. "media_relay_c50_r1").
+// files and returns a set of completed (run_id, library) points keyed by
+// CompletedKey (e.g. "media_relay_c50_r1/enet").
+// ファイルの存在だけでなく、CSV 内に (run_id, library) の行が実在することを
+// 完了条件とする（途中で落ちた run の空ファイルを完了扱いしないため）。
 func CompletedPoints(outDir string) map[string]bool {
 	completed := make(map[string]bool)
 	matches, err := filepath.Glob(filepath.Join(outDir, "res_*_c*_r*.csv"))
@@ -139,18 +150,18 @@ func CompletedPoints(outDir string) map[string]bool {
 		return completed
 	}
 	for _, path := range matches {
-		base := filepath.Base(path)
-		// Strip "res_" prefix and ".csv" suffix to get the run ID.
-		if !strings.HasPrefix(base, "res_") || !strings.HasSuffix(base, ".csv") {
+		rows, err := result.ReadCSVRows(path)
+		if err != nil {
 			continue
 		}
-		runID := base[len("res_"):len(base)-len(".csv")]
-		// Verify the file is non-empty (has at least a header + 1 data row).
-		info, err := os.Stat(path)
-		if err != nil || info.Size() < 10 {
-			continue
+		for _, row := range rows {
+			runID := row["run_id"]
+			lib := row["library"]
+			if runID == "" || lib == "" {
+				continue
+			}
+			completed[CompletedKey(runID, lib)] = true
 		}
-		completed[runID] = true
 	}
 	return completed
 }

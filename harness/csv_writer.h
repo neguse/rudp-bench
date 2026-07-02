@@ -64,6 +64,22 @@ struct CsvRow {
   std::string delivery_dedup_policy = "sliding_window_65536_per_conn";
   double cpu_pct_peak = 0.0;         // periodic-sampled peak CPU% (M1)
   uint64_t close_ms = 0;             // teardown(close()) 所要時間 ms (L6)
+  // §5.3: coordinated omission 診断。スケジュール時刻（sched.next_send）基準の
+  // corrected RTT。実送信時刻基準の rtt_* に対し、送信ループの停滞
+  // （pacing lag）ぶんだけ大きく出る。差が大きい run は送信側が飽和している。
+  uint64_t rtt_sched_r_p50_us = 0;
+  uint64_t rtt_sched_r_p95_us = 0;
+  uint64_t rtt_sched_r_p99_us = 0;
+  uint64_t rtt_sched_u_p50_us = 0;
+  uint64_t rtt_sched_u_p95_us = 0;
+  uint64_t rtt_sched_u_p99_us = 0;
+  // §6.2: adapter 内 inbound queue が上限到達で落とした受信メッセージ累計
+  // （プロセス全体、ReusableInboundQueue の drop 合計）。delivery 低下の
+  // 切り分け用診断値。
+  uint64_t inbox_dropped = 0;
+  // §3.2-3.3: 公平性メタデータ。実効 CC アルゴリズムとスレッドモデル。
+  std::string cc_algo = "unknown";
+  std::string thread_model = "unknown";
 };
 
 void write_header(std::ostream& os);

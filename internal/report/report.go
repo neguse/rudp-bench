@@ -92,6 +92,14 @@ func loadProfiles(runDir string) ([]map[string]string, map[profileKey]string) {
 			rateU: row["rate_u"],
 			size:  row["size"],
 		}
+		// shape ベースの対応付けは profile 列がない旧データの fallback 専用。
+		// 同一 shape の profile が複数あると曖昧なので warning を出す。
+		if prev, ok := keyMap[k]; ok && prev != row["profile"] {
+			fmt.Fprintf(os.Stderr,
+				"warning: profiles %q and %q share the same shape (mode=%s r=%s u=%s size=%s); "+
+					"scenario_id fallback mapping is ambiguous\n",
+				prev, row["profile"], k.mode, k.rateR, k.rateU, k.size)
+		}
 		keyMap[k] = row["profile"]
 	}
 	return rows, keyMap
@@ -113,25 +121,29 @@ func annotatedRows(summaryRows []map[string]string, profileByShape map[profileKe
 			Library: row["library"],
 			Values:  row,
 		}
-		m := scenarioRE.FindStringSubmatch(row["scenario_id"])
-		if m != nil {
-			k := profileKey{
-				mode:  m[6],
-				rateR: m[2],
-				rateU: m[3],
-				size:  m[4],
-			}
-			ar.Profile = profileByShape[k]
-			if c, ok := toInt(m[5]); ok {
-				ar.Conns = c
-			}
+		// summary.csv の明示的な profile / conns 列を最優先で使う。
+		ar.Profile = row["profile"]
+		if c, ok := toInt(row["conns"]); ok {
+			ar.Conns = c
 		}
-		if ar.Profile == "" {
-			ar.Profile = ""
-		}
-		if ar.Conns == 0 {
-			if c, ok := toInt(row["conns"]); ok {
-				ar.Conns = c
+		// profile 列がない旧データは scenario_id の正規表現 + shape 一致で復元する。
+		if ar.Profile == "" || ar.Conns == 0 {
+			m := scenarioRE.FindStringSubmatch(row["scenario_id"])
+			if m != nil {
+				if ar.Profile == "" {
+					k := profileKey{
+						mode:  m[6],
+						rateR: m[2],
+						rateU: m[3],
+						size:  m[4],
+					}
+					ar.Profile = profileByShape[k]
+				}
+				if ar.Conns == 0 {
+					if c, ok := toInt(m[5]); ok {
+						ar.Conns = c
+					}
+				}
 			}
 		}
 		out = append(out, ar)

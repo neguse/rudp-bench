@@ -131,6 +131,17 @@ func RunIsolated(ctx context.Context, opts RunOpts, name string, args ...string)
 	cmd.Stdout = opts.Stdout
 	cmd.Stderr = opts.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// context cancel (Ctrl-C 等) 時、既定の SIGKILL は直下の timeout(1) にしか
+	// 届かず孫の harness が孤児化する。Setpgid: true により pgid == 子の pid
+	// なので、プロセスグループ全体へ SIGKILL を送って孫ごと確実に落とす。
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// Cancel 後に I/O パイプ等が残っても Wait が永久ブロックしないよう猶予を設定。
+	cmd.WaitDelay = 5 * time.Second
 
 	if err := cmd.Start(); err != nil {
 		return nil, err

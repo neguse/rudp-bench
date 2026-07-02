@@ -664,7 +664,12 @@ static string CsvHeader() =>
     "client_outstanding_max,client_tick_ok," +
     "conn_peak,conn_disc_transport,conn_disc_peer," +
     "delivery_dedup_policy," +
-    "cpu_pct_peak,close_ms";
+    "cpu_pct_peak,close_ms," +
+    // C# 側では rtt_sched（スケジュール時刻基準 RTT）と inbox_dropped は
+    // 未計測なので 0 を出す。cc_algo/thread_model は公平性メタデータ。
+    "rtt_sched_r_p50_us,rtt_sched_r_p95_us,rtt_sched_r_p99_us," +
+    "rtt_sched_u_p50_us,rtt_sched_u_p95_us,rtt_sched_u_p99_us," +
+    "inbox_dropped,cc_algo,thread_model";
 
 static string FormatRow(CsvRow r) =>
     $"{r.Library},{r.Encryption},{r.Phase}," +
@@ -693,7 +698,11 @@ static string FormatRow(CsvRow r) =>
     $"{r.ClientOutstandingMax},{r.ClientTickOk}," +
     $"{r.ConnPeak},{r.ConnDiscTransport},{r.ConnDiscPeer}," +
     $"{r.DeliveryDedupPolicy}," +
-    $"{r.CpuPctPeak.ToString("F2", CultureInfo.InvariantCulture)},{r.CloseMs}";
+    $"{r.CpuPctPeak.ToString("F2", CultureInfo.InvariantCulture)},{r.CloseMs}," +
+    // rtt_sched_* と inbox_dropped は C# 側未計測（0 固定）。
+    // LiteNetLib は輻輳制御なし（固定 64pkt window）、NetManager が内部
+    // スレッドを持つ（manual mode でも受信処理は lib 内部実装）。
+    $"0,0,0,0,0,0,0,none,internal_worker";
 
 // ---------------------------------------------------------------------------
 // Config

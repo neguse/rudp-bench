@@ -27,18 +27,17 @@
 namespace {
 
 constexpr uint16_t DEFAULT_MTU = 1200;
-constexpr size_t RUDP_PACKET_HEADER_BYTES = 32;
-constexpr size_t RUDP_DATA_FRAME_HEADER_BYTES = 20;
+// ワイヤ定数はコア（rudp.h）の公開定義を使う。二重定義するとコアの
+// フォーマット変更がサイレントに adapter を壊す。
 constexpr size_t MAX_ADAPTER_PAYLOAD_BYTES =
-    DEFAULT_MTU - RUDP_PACKET_HEADER_BYTES - RUDP_DATA_FRAME_HEADER_BYTES;
+    DEFAULT_MTU - RUDP_WIRE_PACKET_HEADER_BYTES -
+    RUDP_WIRE_DATA_FRAME_HEADER_BYTES;
 constexpr int UDP_SOCKET_BUFFER_BYTES = 4 * 1024 * 1024;
 constexpr size_t IO_BATCH_MAX = 256;
 constexpr size_t PHYSICAL_MTU = 65507;
 constexpr uint32_t PHYSICAL_BATCH_MAGIC = 0x31425243u;  // "CRB1" little-endian.
 constexpr size_t PHYSICAL_BATCH_HEADER = 4;
 constexpr size_t PHYSICAL_BATCH_LEN = 2;
-constexpr uint32_t RUDP_PACKET_MAGIC = 0x52554400u;
-constexpr uint32_t RUDP_PACKET_MAGIC_MASK = 0xffffff00u;
 constexpr size_t ASYNC_TX_PACKET_LIMIT = 65536;
 constexpr size_t ASYNC_TX_BYTE_LIMIT = 64u * 1024u * 1024u;
 constexpr size_t RX_PENDING_PACKET_LIMIT = 65536;
@@ -69,6 +68,10 @@ struct SockCtx {
   std::mutex tx_mu;
   std::condition_variable tx_cv;
   std::deque<AsyncTxPacket> tx_queue;
+  // 送信済みバッファの再利用プール（tx_mu 保護）。パケット毎の
+  // std::vector heap 確保が高スループット時のアロケーション churn に
+  // なるのを避ける。
+  std::vector<std::vector<uint8_t>> tx_free;
   size_t tx_queue_bytes = 0;
   std::deque<AsyncTxPacket> rx_pending;
   std::vector<AsyncTxPacket> rx_pending_delivered;
@@ -133,20 +136,13 @@ uint32_t load_u32(const uint8_t* p) {
          (static_cast<uint32_t>(p[3]) << 24);
 }
 
-uint64_t load_u64(const uint8_t* p) {
-  uint64_t v = 0;
-  for (size_t i = 0; i < 8; ++i) {
-    v |= static_cast<uint64_t>(p[i]) << (i * 8);
-  }
-  return v;
-}
-
 bool rudp_packet_can_enter_core(const uint8_t* data, size_t len) {
-  if (!data && len != 0) return false;
-  if (len < RUDP_PACKET_HEADER_BYTES) return false;
-  if (len > DEFAULT_MTU) return false;
-  if ((load_u32(data) & RUDP_PACKET_MAGIC_MASK) != RUDP_PACKET_MAGIC) return false;
-  return load_u64(data + 4) <= std::numeric_limits<uint32_t>::max();
+  uint64_t conn_id = 0;
+  if (!rudp_packet_precheck(data, len, DEFAULT_MTU, &conn_id)) return false;
+  // コアの conn_id は 64bit だが、この adapter は harness の 32bit conn_id を
+  // そのままワイヤ ID に使う設計のため 32bit 超を境界で弾く（adapter 都合の
+  // 制限であって、コア API は 64bit のまま）。
+  return conn_id <= std::numeric_limits<uint32_t>::max();
 }
 
 void ensure_physical_buffers(SockCtx* ctx) {
@@ -305,6 +301,10 @@ int enqueue_async_tx(SockCtx* ctx, const rudp_out_packet* packets, size_t count)
       if (ctx->tx_queue_bytes >= byte_limit) break;
       if (packets[i].len > byte_limit - ctx->tx_queue_bytes) break;
       AsyncTxPacket p;
+      if (!ctx->tx_free.empty()) {
+        p.bytes = std::move(ctx->tx_free.back());
+        ctx->tx_free.pop_back();
+      }
       p.addr = packets[i].addr;
       p.bytes.resize(packets[i].len);
       if (packets[i].len != 0) {
@@ -639,6 +639,12 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     return reliable ? "coop_flush_sack_retransmit" : "coop_flush_unreliable";
   }
   bool encryption_on() const override { return false; }
+  // safe_bps の AIMD を pacing トークンとして送信ゲートに接続済み。
+  // 初期レートは実質無制限（initial_safe_bps 既定 UINT32_MAX）。
+  const char* congestion_control() const override { return "rate_aimd_paced"; }
+  const char* thread_model() const override {
+    return ctx_.async_tx ? "adapter_worker" : "single";
+  }
   rudp_bench::ConnectionStats connection_stats() const override {
     rudp_bench::ConnectionStats s;
     s.connected_peak = connected_peak_;
@@ -674,6 +680,7 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     {
       std::lock_guard<std::mutex> lock(ctx_.tx_mu);
       ctx_.tx_queue.clear();
+      ctx_.tx_free.clear();
       ctx_.tx_queue_bytes = 0;
       ctx_.tx_stop = false;
     }
@@ -726,13 +733,28 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
         out[i].len = batch[i].bytes.size();
       }
       (void)send_packets_batched_now(&ctx_, out.data(), batch.size());
+      {
+        // 送り終わったバッファをプールへ返す（上限付き）。
+        constexpr size_t kTxFreePoolMax = 4096;
+        std::lock_guard<std::mutex> lock(ctx_.tx_mu);
+        for (auto& p : batch) {
+          if (ctx_.tx_free.size() >= kTxFreePoolMax) break;
+          ctx_.tx_free.push_back(std::move(p.bytes));
+        }
+      }
     }
   }
 
   rudp_conn* find_conn(uint32_t conn_id) {
     auto it = conn_by_id_.find(conn_id);
     if (it != conn_by_id_.end()) {
-      if (conn_is_usable(it->second)) return it->second;
+      // usable だけでなく conn_id も照合する。コア側でスロットが別の
+      // コネクションに再利用されていた場合、生ポインタは「usable な別人」を
+      // 指すことがあり、照合しないと誤送信になる。
+      if (conn_is_usable(it->second) &&
+          rudp_conn_id(it->second) == conn_id) {
+        return it->second;
+      }
       conn_by_id_.erase(it);
       ++conn_cache_generation_;
       conn_cache_complete_ = false;
@@ -812,11 +834,20 @@ class CoopRudpAdapter : public rudp_bench::Adapter {
     cfg.recv_batch_size =
         std::min<uint32_t>(cfg.max_recv_events, broad_recv ? 32768 : 4096);
     cfg.send_batch_size = 256;
-    cfg.rto_ms = 100;
+    cfg.rto_ms = 100;  // RTT サンプル取得前の初期 RTO。以後は適応 RTO。
+    cfg.min_rto_ms = u32_env_or_default("COOP_MIN_RTO_MS", 0);  // 0 = core 既定
+    cfg.max_rto_ms = u32_env_or_default("COOP_MAX_RTO_MS", 0);  // 0 = core 既定
     cfg.max_retransmits =
         u32_env_or_default("COOP_MAX_RETRANSMITS", DEFAULT_MAX_RETRANSMITS);
     cfg.idle_timeout_ms =
         u32_env_or_default("COOP_IDLE_TIMEOUT_MS", DEFAULT_IDLE_TIMEOUT_MS);
+    // adapter は単一フレーム運用（多フラグメント送信をしない）ので再組立
+    // スロットは最小限でよい。既定の max_recv_events と同数だと ~37MB が
+    // 死蔵される。
+    cfg.max_reassemblies = 256;
+    // ベンチではハンドシェイクなしの高速 ramp が必要なので既定は無制限。
+    cfg.max_incoming_conns_per_poll =
+        u32_env_or_default("COOP_INCOMING_CONN_LIMIT", 0);
     cfg.skip_unreliable_acks = 1;
     if (rudp_endpoint_create(&ep_, &cfg) != 0) std::abort();
     ensure_physical_buffers(&ctx_);

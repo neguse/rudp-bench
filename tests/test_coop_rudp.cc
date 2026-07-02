@@ -1182,6 +1182,8 @@ TEST(CoopRudp, MaxRetransmitsAbortsConnectionAndFreesInflight) {
   rudp_get_status(p.ca, &st);
   ASSERT_EQ(st.inflight_bytes, sizeof(msg));
 
+  // max_retransmits は「受信なしで許容する RTO 再送ラウンド数」。ラウンド 1
+  // （t=25ms、rto=20ms）は再送して usable のまま。
   p.net.now_ns += 25'000'000ull;
   rudp_endpoint_flush(p.ea, p.net.now_ns);
   p.net.packets.clear();
@@ -1189,7 +1191,9 @@ TEST(CoopRudp, MaxRetransmitsAbortsConnectionAndFreesInflight) {
   ASSERT_EQ(st.usable, 1u);
   ASSERT_EQ(st.inflight_bytes, sizeof(msg));
 
-  p.net.now_ns += 25'000'000ull;
+  // ラウンド 1 で RTO は指数バックオフ（20ms→40ms）するので、ラウンド 2 の
+  // 判定は t=25+40ms 以降。max_retransmits=1 を超過して abort する。
+  p.net.now_ns += 45'000'000ull;
   rudp_endpoint_flush(p.ea, p.net.now_ns);
   EXPECT_EQ(rudp_endpoint_find_conn(p.ea, 42), nullptr);
   rudp_get_status(p.ca, &st);
@@ -2552,4 +2556,194 @@ TEST(CoopRudp, ReliableOrderedRetransmitsWhenHoldQueueWasFull) {
   p.pump();
   ASSERT_EQ(rudp_recv(p.eb, out, sizeof(out), &len, &info), 1);
   EXPECT_STREQ(out, third);
+}
+
+// --- 2026-07-02 全実装レビュー（docs/improvements.md §1）の回帰テスト ---
+
+// §1.1: abort で conn_map からエントリが消え、スロット再利用後も古い conn_id の
+// lookup が別コネクションを返さない。tombstone 枯れで insert が失敗しないこと
+// も接続チャーンで確認する（conn_map_cap = max_conns*4 = 32 を大きく超える回数）。
+TEST(CoopRudp, ConnMapSurvivesConnectionChurnAndSlotReuse) {
+  FakeNet net;
+  FakeSock sock{&net, addr(1)};
+  rudp_endpoint_config cfg = config_for(&sock);
+  rudp_endpoint* ep = nullptr;
+  ASSERT_EQ(rudp_endpoint_create(&ep, &cfg), 0);
+  auto peer = addr(2);
+
+  uint64_t prev_id = 0;
+  for (uint64_t i = 1; i <= 200; ++i) {
+    uint64_t id = 1000 + i;
+    rudp_conn* c = nullptr;
+    ASSERT_EQ(rudp_endpoint_connect(ep, &peer, id, &c), 0) << "churn " << i;
+    ASSERT_NE(c, nullptr);
+    if (prev_id != 0) {
+      // abort 済みの旧 conn_id はスロットが再利用されても引けない。
+      EXPECT_EQ(rudp_endpoint_find_conn(ep, prev_id), nullptr) << "churn " << i;
+    }
+    EXPECT_EQ(rudp_endpoint_find_conn(ep, id), c);
+    rudp_conn_abort(c);
+    EXPECT_EQ(rudp_endpoint_find_conn(ep, id), nullptr);
+    prev_id = id;
+  }
+  rudp_endpoint_destroy(ep);
+}
+
+// §1.6: reliable の in-flight は SACK bitmap 幅（64）を超えて発行されない。
+// ACK が一切返らない状態で flush を繰り返しても、ワイヤに出る reliable
+// パケットは 64 個で止まる（65 個目以降は SACK 不能で不要再送になるため）。
+TEST(CoopRudp, ReliableInflightGateStopsAtAckWindow) {
+  Pair p(/*mtu=*/64);  // 1 パケット 1 メッセージになるサイズ。
+  std::array<uint8_t, 12> msg{};
+  rudp_send_opts opts{};
+  opts.reliability = RUDP_RELIABLE_UNORDERED;
+  for (int i = 0; i < 100; ++i) {
+    msg.fill(static_cast<uint8_t>(i));
+    ASSERT_EQ(rudp_send(p.ca, msg.data(), msg.size(), &opts), RUDP_SEND_QUEUED);
+  }
+  rudp_endpoint_flush(p.ea, p.net.now_ns);
+  EXPECT_EQ(p.net.packets.size(), 64u);
+  // ACK なしで再度 flush しても新しい seq は発行されない。
+  rudp_endpoint_flush(p.ea, p.net.now_ns);
+  EXPECT_EQ(p.net.packets.size(), 64u);
+}
+
+// §1.3: pacing_bps が有限のとき flush はトークンで送出を絞り、時間経過で
+// 続きが送出される（safe_bps/pacing_bps が status 表示専用でないこと）。
+TEST(CoopRudp, PacingGatesFlushWhenRateIsFinite) {
+  FakeNet net;
+  FakeSock a{&net, addr(1)};
+  rudp_endpoint_config ca_cfg = config_for(&a);
+  ca_cfg.max_messages = 1024;
+  ca_cfg.initial_safe_bps = 800'000;  // 100KB/s。バースト上限 16*mtu=8KB。
+  rudp_endpoint* ea = nullptr;
+  ASSERT_EQ(rudp_endpoint_create(&ea, &ca_cfg), 0);
+  auto baddr = addr(2);
+  rudp_conn* ca = nullptr;
+  ASSERT_EQ(rudp_endpoint_connect(ea, &baddr, 42, &ca), 0);
+
+  std::array<uint8_t, 12> msg{};
+  rudp_send_opts opts{};
+  opts.reliability = RUDP_UNRELIABLE;
+  for (int i = 0; i < 600; ++i) {
+    msg.fill(static_cast<uint8_t>(i));
+    ASSERT_EQ(rudp_send(ca, msg.data(), msg.size(), &opts), RUDP_SEND_QUEUED);
+  }
+  rudp_endpoint_flush(ea, net.now_ns);
+  rudp_status st{};
+  rudp_get_status(ca, &st);
+  // バースト上限（16*mtu=8KB）までしか送れず、残りはキューに留まる。
+  EXPECT_GT(st.send_queue_bytes, 0u);
+
+  // 時間を進めながら flush すればトークンが補充されて掃ける
+  // （1 回の flush で送れるのはバースト上限まで）。
+  for (int i = 0; i < 5 && st.send_queue_bytes > 0; ++i) {
+    net.now_ns += 1'000'000'000ull;
+    rudp_endpoint_flush(ea, net.now_ns);
+    rudp_get_status(ca, &st);
+  }
+  EXPECT_EQ(st.send_queue_bytes, 0u);
+  rudp_endpoint_destroy(ea);
+}
+
+// §1.4: ordered の channel_seq はキュー投入が成功するまで消費されない。
+// msg pool 枯渇で送信が失敗しても seq に穴が空かず、その後の送信が受信側で
+// 順番どおり全部届く（穴空きだと expected_ordered が永久に待つ）。
+TEST(CoopRudp, OrderedSeqNotConsumedByFailedSend) {
+  Pair p(/*mtu=*/64);
+  std::array<uint8_t, 12> msg{};
+  rudp_send_opts opts{};
+  opts.reliability = RUDP_RELIABLE_ORDERED;
+
+  // max_messages=128 を使い切るまで送って必ず失敗を踏む。
+  int queued = 0;
+  for (int i = 0; i < 200; ++i) {
+    msg.fill(static_cast<uint8_t>(i));
+    rudp_send_result r = rudp_send(p.ca, msg.data(), msg.size(), &opts);
+    if (r == RUDP_SEND_QUEUED) {
+      ++queued;
+    } else {
+      ASSERT_EQ(r, RUDP_SEND_QUEUE_FULL);
+      break;
+    }
+  }
+  ASSERT_GT(queued, 0);
+
+  // pump と受信ドレインを交互に行う（受信イベントキューは 64 しかないので
+  // ドレインしないと reliable の再送ループになる）。
+  std::array<uint8_t, 12> out{};
+  size_t len = 0;
+  rudp_recv_info info{};
+  int received = 0;
+  uint8_t last = 0;
+  auto drain = [&]() {
+    while (rudp_recv(p.eb, out.data(), out.size(), &len, &info) == 1) {
+      ++received;
+      last = out[0];
+    }
+  };
+  for (int round = 0; round < 20; ++round) {
+    p.pump();
+    drain();
+  }
+  // 掃けてから追加送信。
+  msg.fill(0xAA);
+  ASSERT_EQ(rudp_send(p.ca, msg.data(), msg.size(), &opts), RUDP_SEND_QUEUED);
+  ++queued;
+  for (int round = 0; round < 20; ++round) {
+    p.pump();
+    drain();
+  }
+  // 失敗 send が seq を消費していると、失敗以降の ordered が hold されたまま
+  // received が queued に届かない。
+  EXPECT_EQ(received, queued);
+  EXPECT_EQ(last, 0xAA);  // 最後に受けたのは追加送信分。
+}
+
+// §1.6: max_incoming_conns_per_poll が受信パケット起点の conn 生成を
+// 1 poll あたりで制限する（spoof された conn_id での conn テーブル枯渇の緩和）。
+TEST(CoopRudp, IncomingConnCreationIsRateLimitedPerPoll) {
+  FakeNet net;
+  FakeSock sock{&net, addr(2)};
+  rudp_endpoint_config cfg = config_for(&sock);
+  cfg.max_incoming_conns_per_poll = 1;
+  rudp_endpoint* ep = nullptr;
+  ASSERT_EQ(rudp_endpoint_create(&ep, &cfg), 0);
+
+  auto push_packet_for = [&](uint64_t conn_id) {
+    Packet pk;
+    pk.from = addr(1);
+    pk.to = addr(2);
+    pk.bytes = make_single_frame_packet(/*flags=*/0, /*payload_len=*/4,
+                                        /*channel_seq=*/0);
+    store_u64_le(pk.bytes, 4, conn_id);
+    net.packets.push_back(std::move(pk));
+  };
+
+  push_packet_for(101);
+  push_packet_for(102);
+  rudp_endpoint_poll(ep, net.now_ns);
+  EXPECT_NE(rudp_endpoint_find_conn(ep, 101), nullptr);
+  EXPECT_EQ(rudp_endpoint_find_conn(ep, 102), nullptr);
+
+  // 次の poll では新たに 1 つ生成できる。
+  push_packet_for(102);
+  rudp_endpoint_poll(ep, net.now_ns);
+  EXPECT_NE(rudp_endpoint_find_conn(ep, 102), nullptr);
+  rudp_endpoint_destroy(ep);
+}
+
+// §16: adapter が使う precheck API がコアの受理条件と整合している。
+TEST(CoopRudp, PacketPrecheckMatchesCoreAcceptance) {
+  auto bytes = make_single_frame_packet(/*flags=*/0, /*payload_len=*/4,
+                                        /*channel_seq=*/0);
+  uint64_t conn_id = 0;
+  EXPECT_EQ(rudp_packet_precheck(bytes.data(), bytes.size(), 512, &conn_id), 1);
+  EXPECT_EQ(conn_id, 42u);
+  // magic 破壊で不合格。
+  auto broken = bytes;
+  broken[3] ^= 0xff;
+  EXPECT_EQ(rudp_packet_precheck(broken.data(), broken.size(), 512, nullptr), 0);
+  // ヘッダ未満の長さは不合格。
+  EXPECT_EQ(rudp_packet_precheck(bytes.data(), 31, 512, nullptr), 0);
 }

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -40,6 +41,11 @@
 //
 // This intentionally targets the harness workload: many independent small
 // messages where ordered reliable delivery would only add head-of-line stalls.
+//
+// 輻輳制御・ペーシングは意図的に実装していない (ベンチ設計):
+// バックプレッシャは reliable pending 上限 (MAX_PENDING_RELIABLE_PER_CONN) と
+// TX キュー上限 (MAX_TX_QUEUE) のみで、輻輳への適応は測定対象ワークロード
+// (閉ループ echo) の性質に任せている。一般網向けの実装ではない点に注意。
 // ============================================================
 
 namespace {
@@ -56,9 +62,26 @@ constexpr size_t HEADER_BYTES = 1 + 4 + 4 + 4 + 8;  // flags, conv, seq, ack, ac
 constexpr size_t BATCH_FRAME_LEN_BYTES = 2;
 constexpr size_t MAX_PAYLOAD = MAX_UDP_PAYLOAD - HEADER_BYTES;
 constexpr size_t MAX_PENDING_RELIABLE_PER_CONN = 4096;
+// in-flight 窓: 受信側 SACK bitmap が 64bit 固定なので、未ACK最小 seq から
+// SEND_WINDOW 個以内しかワイヤに出さない (span 最大 63 → 受信側 delta < 64 が
+// 常に成り立ち、RecvSackWindow が未配送パケットを取りこぼさない)。
+// pending (最大 MAX_PENDING_RELIABLE_PER_CONN) はキューとして維持し、送出だけ
+// この窓でゲートする。
+constexpr uint32_t SEND_WINDOW = 64;
 constexpr size_t INBOX_LIMIT = 1u << 20;
 constexpr int DEFAULT_SOCKET_BUFFER_KB = 4096;
-constexpr auto RETX_TIMEOUT = std::chrono::milliseconds(100);
+constexpr uint32_t DEFAULT_MAX_CONNECTIONS = 4096;
+// RTO: SRTT/RTTVAR (RFC 6298 相当) による適応値。INITIAL_RTO は RTT サンプルが
+// 取れるまでの初期値。
+constexpr auto INITIAL_RTO = std::chrono::milliseconds(100);
+constexpr auto MIN_RTO = std::chrono::milliseconds(10);
+constexpr auto MAX_RTO = std::chrono::milliseconds(2000);
+constexpr auto MAX_RETX_BACKOFF = std::chrono::milliseconds(3000);
+constexpr auto RTO_GRANULARITY = std::chrono::milliseconds(1);
+// 送出失敗 (TX バックプレッシャ) 時の再試行間隔
+constexpr auto TX_RETRY_DELAY = std::chrono::milliseconds(1);
+// SACK の穴が何回連続で観測されたら fast retransmit するか
+constexpr uint8_t FAST_RETX_SKIPS = 3;
 constexpr int DEFAULT_ACK_DELAY_MS = 2;
 constexpr size_t RECV_BATCH = 64;
 constexpr size_t TX_BATCH = 256;
@@ -259,12 +282,24 @@ std::chrono::milliseconds ack_delay() {
   return delay;
 }
 
-std::chrono::milliseconds reliable_timeout() {
+// adapter インスタンス生成時に一度だけ読む (getenv をホットパスから外す)。
+// static キャッシュではなくインスタンス単位なのは、テストが env を差し替えて
+// adapter を作り直せるようにするため。
+std::chrono::milliseconds reliable_timeout_from_env() {
   const char* v = std::getenv("APEX_RELIABLE_TIMEOUT_MS");
   if (!v || !*v) return std::chrono::milliseconds(DEFAULT_RELIABLE_TIMEOUT_MS);
   int parsed = std::atoi(v);
   if (parsed <= 0) return std::chrono::milliseconds(DEFAULT_RELIABLE_TIMEOUT_MS);
   return std::chrono::milliseconds(parsed);
+}
+
+// 接続数上限の明示指定 (0 = 未指定。hint ベースの既定値を使う)
+uint32_t conn_limit_from_env() {
+  const char* v = std::getenv("APEX_MAX_CONNECTIONS");
+  if (!v || !*v) return 0;
+  long parsed = std::atol(v);
+  if (parsed <= 0) return 0;
+  return static_cast<uint32_t>(std::min(parsed, 1'000'000L));
 }
 
 class RecvSackWindow {
@@ -302,8 +337,11 @@ class RecvSackWindow {
 struct PendingSend {
   uint32_t seq = 0;
   std::vector<uint8_t> bytes;
-  clock_type::time_point first_sent_at{};
-  clock_type::time_point sent_at{};
+  clock_type::time_point first_sent_at{};  // 初回送出時刻 (transmitted 時のみ有効)
+  clock_type::time_point sent_at{};        // 最終送出時刻 (transmitted 時のみ有効)
+  bool transmitted = false;  // 一度でもワイヤに出したか (in-flight 窓ゲート)
+  uint8_t retx_count = 0;    // 再送回数 (バックオフ指数 / Karn の除外判定)
+  uint8_t skip_acks = 0;     // SACK の穴として観測された回数 (fast retransmit)
 };
 
 struct Conn {
@@ -313,13 +351,21 @@ struct Conn {
   uint32_t next_seq = 1;
   bool active = false;
   bool ack_dirty = false;
+  bool in_ack_list = false;   // ack_list_ (dirty リスト) に載っているか
+  bool in_retx_list = false;  // retx_list_ (dirty リスト) に載っているか
+  bool rtt_valid = false;     // srtt/rttvar が初期化済みか
   clock_type::time_point ack_due = clock_type::time_point::max();
+  clock_type::duration srtt{};
+  clock_type::duration rttvar{};
+  clock_type::duration rto = INITIAL_RTO;
   RecvSackWindow recv_window;
   std::deque<PendingSend> pending;
 };
 
 struct Peer {
-  std::vector<uint32_t> id_by_conv;
+  // conv はリモートが任意指定できる 32bit 値なので vector index にしない
+  // (旧実装は resize(conv + 1) で conv=0xFFFFFFFF が ~16GB 確保になっていた)
+  std::unordered_map<uint32_t, uint32_t> id_by_conv;
 };
 
 struct TxDatagram {
@@ -443,7 +489,8 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     c.fd = client_fds_[(id - 1) % client_fds_.size()];
     c.peer = server_peer_;
     conns_.push_back(std::move(c));
-    connected_peak_ = std::max<uint32_t>(connected_peak_, conns_.size());
+    ++active_conns_;
+    connected_peak_ = std::max<uint32_t>(connected_peak_, active_conns_);
     return id;
   }
 
@@ -470,15 +517,29 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
 
     if (reliable) {
       auto now = clock_type::now();
-      c->pending.push_back(PendingSend{seq, std::move(pkt), now, now});
+      // in-flight 窓ゲート: 窓外 (未ACK最小 seq から SEND_WINDOW 以上先) は
+      // キューに積むだけで送出しない。ACK で窓が進んだ時 (pump_pending) か
+      // service_retransmits が初回送出する。
+      const bool in_window =
+          c->pending.empty() || (seq - c->pending.front().seq) < SEND_WINDOW;
+      PendingSend p;
+      p.seq = seq;
+      p.bytes = std::move(pkt);
+      c->pending.push_back(std::move(p));
       PendingSend& pending = c->pending.back();
-      if (!queue_send_ref(*c, pending.bytes.data(), pending.bytes.size())) {
-        recycle_buffer(std::move(pending.bytes));
-        c->pending.pop_back();
-        return -1;
+      if (in_window) {
+        if (!queue_send_ref(*c, pending.bytes.data(), pending.bytes.size())) {
+          recycle_buffer(std::move(pending.bytes));
+          c->pending.pop_back();
+          return -1;
+        }
+        pending.transmitted = true;
+        pending.first_sent_at = now;
+        pending.sent_at = now;
+        note_ack_sent(*c, h);
+        schedule_retx(now + c->rto);
       }
-      note_ack_sent(*c, h);
-      schedule_retx(now + RETX_TIMEOUT);
+      add_to_retx_list(*c);
     } else {
       bool queued = (is_server_ && async_unreliable_server_enabled())
                         ? queue_send_owned_async(*c, std::move(pkt))
@@ -501,7 +562,8 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
 
     fanout_conns_.clear();
     fanout_headers_.clear();
-    FanoutJob job;
+    // FanoutJob の作業バッファは tx worker から回収したものを再利用する
+    FanoutJob job = take_fanout_job();
     job.stride = HEADER_BYTES + len;
     job.peers.reserve(count);
     job.bytes.reserve(job.stride * count);
@@ -535,6 +597,13 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   }
 
   int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
+    // client 側の予算ロジック:
+    // - batch 受信を観測した client は 1 poll あたり client_recv_budget_left_
+    //   件までしか返さない (server の batch 到着で recv ばかり回って送信側が
+    //   飢えるのを防ぐ)。予算は poll() 先頭で補充される。
+    // - inbox が空のときは poll を待たずに socket を直接 drain して遅延を削る。
+    //   ただし recv_empty_drains_left_ 回まで (poll() 先頭で補充)。
+    // 注意: cap 不足のメッセージは inbox_ 側 (-1) でサイレント破棄される。
     if (!is_server_ && batch_recv_seen_ && client_recv_budget_left_ == 0) return 0;
     if (!is_server_ && recv_drain_on_empty_enabled() && inbox_.empty() &&
         recv_empty_drains_left_ > 0) {
@@ -583,10 +652,14 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     }
     conns_.clear();
     peers_.clear();
+    ack_list_.clear();
+    retx_list_.clear();
+    active_conns_ = 0;
     free_buffers_.clear();
     {
       std::lock_guard<std::mutex> lock(recycled_mu_);
       recycled_buffers_.clear();
+      fanout_pool_.clear();
     }
     inbox_.clear();
     batch_recv_seen_ = false;
@@ -602,11 +675,23 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   const char* name() const override { return "apex_rudp"; }
   bool supports(bool) const override { return true; }
   size_t max_payload_bytes(bool /*reliable*/) const override { return MAX_PAYLOAD; }
+  // 接続数上限: APEX_MAX_CONNECTIONS > hint ベース (+余裕) > 既定値の順で決まる。
+  // server_conn_for() はこの値を超える新規 Conn 生成を破棄する。
+  uint32_t max_connections() const override {
+    if (conn_limit_env_ > 0) return conn_limit_env_;
+    if (hinted_connections_ > 0) {
+      return hinted_connections_ + hinted_connections_ / 8 + 64;
+    }
+    return DEFAULT_MAX_CONNECTIONS;
+  }
   const char* flush_policy(bool reliable) const override {
     return reliable ? "piggyback_sack_retransmit"
                     : "server_async_unreliable_piggyback_ack";
   }
   bool encryption_on() const override { return false; }
+  // 輻輳制御は意図的に非実装（ファイル冒頭コメント参照）。
+  const char* congestion_control() const override { return "none"; }
+  const char* thread_model() const override { return "adapter_worker"; }
   rudp_bench::ConnectionStats connection_stats() const override {
     rudp_bench::ConnectionStats s;
     s.connected_peak = connected_peak_;
@@ -657,22 +742,18 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     auto peer_it = peers_.find(key);
     if (peer_it != peers_.end()) {
       Peer& peer = peer_it->second;
-      if (conv < peer.id_by_conv.size()) {
-        uint32_t existing = peer.id_by_conv[conv];
-        if (existing != 0) {
-          Conn* existing_conn = find_conn(existing);
-          if (existing_conn) return existing_conn;
-          if (!create) return nullptr;
-        }
+      auto it = peer.id_by_conv.find(conv);
+      if (it != peer.id_by_conv.end() && it->second != 0) {
+        Conn* existing_conn = find_conn(it->second);
+        if (existing_conn) return existing_conn;
+        if (!create) return nullptr;
       }
     }
     if (!create) return nullptr;
+    // 任意 src からの無制限 Conn 生成を防ぐ: 上限超過のパケットは破棄
+    if (active_conns_ >= max_connections()) return nullptr;
 
     Peer& peer = peers_[key];
-    if (conv >= peer.id_by_conv.size()) {
-      peer.id_by_conv.resize(static_cast<size_t>(conv) + 1, 0);
-    }
-
     uint32_t id = next_id_++;
     peer.id_by_conv[conv] = id;
     Conn c;
@@ -681,7 +762,8 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     c.fd = server_fd_;
     c.peer = src;
     conns_.push_back(std::move(c));
-    connected_peak_ = std::max<uint32_t>(connected_peak_, conns_.size());
+    ++active_conns_;
+    connected_peak_ = std::max<uint32_t>(connected_peak_, active_conns_);
     return &conns_.back();
   }
 
@@ -882,6 +964,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
       }
       if (!fanout.peers.empty()) {
         send_fanout_job(fanout);
+        recycle_fanout_job(std::move(fanout));
       } else {
         send_batch(batch);
         recycle_worker_batch(batch);
@@ -955,8 +1038,12 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
 
   size_t send_batch(std::vector<TxDatagram>& batch) {
     if (batch.empty()) return 0;
-    std::vector<TxDatagram> physical;
-    std::vector<size_t> logical_counts;
+    // main thread と複数 tx worker の双方から呼ばれるため、作業バッファは
+    // thread_local で呼び出しをまたいで再利用する (メンバ化するとデータ競合)
+    static thread_local std::vector<TxDatagram> physical;
+    static thread_local std::vector<size_t> logical_counts;
+    physical.clear();
+    logical_counts.clear();
     physical.reserve(std::min(batch.size(), TX_BATCH));
     logical_counts.reserve(std::min(batch.size(), TX_BATCH));
 
@@ -1145,24 +1232,126 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     }
   }
 
+  // conns_ の要素であることが前提 (id == index + 1 は client/server 共通の不変条件)
+  uint32_t conn_id_of(const Conn& c) const {
+    return static_cast<uint32_t>(&c - conns_.data()) + 1;
+  }
+
+  void add_to_retx_list(Conn& c) {
+    if (c.in_retx_list) return;
+    c.in_retx_list = true;
+    retx_list_.push_back(conn_id_of(c));
+  }
+
   void mark_ack_dirty(Conn& c, clock_type::time_point now) {
     if (!c.ack_dirty) {
       c.ack_dirty = true;
       c.ack_due = now + ack_delay();
     }
+    if (!c.in_ack_list) {
+      c.in_ack_list = true;
+      ack_list_.push_back(conn_id_of(c));
+    }
     if (c.ack_due < earliest_ack_) earliest_ack_ = c.ack_due;
   }
 
-  void process_ack(Conn& c, uint32_t ack, uint64_t ack_bits) {
+  // RFC 6298 相当の SRTT/RTTVAR 更新
+  void update_rtt(Conn& c, clock_type::duration sample) {
+    if (sample <= clock_type::duration::zero()) {
+      sample = clock_type::duration(1);
+    }
+    if (!c.rtt_valid) {
+      c.srtt = sample;
+      c.rttvar = sample / 2;
+      c.rtt_valid = true;
+    } else {
+      auto diff = c.srtt > sample ? c.srtt - sample : sample - c.srtt;
+      c.rttvar = (c.rttvar * 3 + diff) / 4;
+      c.srtt = (c.srtt * 7 + sample) / 8;
+    }
+    clock_type::duration rto =
+        c.srtt + std::max<clock_type::duration>(RTO_GRANULARITY, c.rttvar * 4);
+    c.rto = std::clamp<clock_type::duration>(rto, MIN_RTO, MAX_RTO);
+  }
+
+  // 再送タイマ: 適応 RTO × 指数バックオフ (2^retx_count, 上限あり)
+  clock_type::duration retx_delay(const Conn& c, const PendingSend& p) const {
+    clock_type::duration d = c.rto;
+    const unsigned shift = std::min<unsigned>(p.retx_count, 5);
+    d *= (1u << shift);
+    return std::min<clock_type::duration>(d, MAX_RETX_BACKOFF);
+  }
+
+  // pending 1 個をワイヤに出す (初回送出・タイマ再送・fast retransmit 共通)。
+  // 送出できたら sent_at 等を更新して true。
+  bool transmit_pending(Conn& c, PendingSend& p, clock_type::time_point now) {
+    PacketHeader h = parse_header(p.bytes.data());
+    h.flags = FLAG_REL;
+    attach_ack(c, &h, true);
+    write_header(p.bytes.data(), h);
+    if (p.transmitted) {
+      // 再送: direct_batch_ に未送出の旧参照が残っていれば重複送出を避ける
+      drop_direct_ref(p.bytes.data());
+    }
+    if (!queue_send_ref(c, p.bytes.data(), p.bytes.size())) return false;
+    note_ack_sent(c, h);
+    if (!p.transmitted) {
+      p.transmitted = true;
+      p.first_sent_at = now;
+    } else if (p.retx_count < 255) {
+      ++p.retx_count;
+    }
+    p.sent_at = now;
+    p.skip_acks = 0;
+    return true;
+  }
+
+  // ACK で窓 (未ACK最小 seq) が進んだ後、新たに窓内に入った未送出 pending を
+  // 送出する。pending は seq 昇順なので窓外に達したら打ち切ってよい。
+  void pump_pending(Conn& c, clock_type::time_point now) {
+    if (c.pending.empty()) return;
+    const uint32_t base = c.pending.front().seq;
+    for (PendingSend& p : c.pending) {
+      if (p.transmitted) continue;
+      if (p.seq - base >= SEND_WINDOW) break;
+      if (!transmit_pending(c, p, now)) {
+        // TX バックプレッシャ。service_retransmits で再試行させる
+        schedule_retx(now + TX_RETRY_DELAY);
+        break;
+      }
+      schedule_retx(p.sent_at + retx_delay(c, p));
+    }
+  }
+
+  void process_ack(Conn& c, uint32_t ack, uint64_t ack_bits,
+                   clock_type::time_point now) {
     if (ack == 0 || c.pending.empty()) return;
+    bool advanced = false;
     for (auto it = c.pending.begin(); it != c.pending.end();) {
       if (ack_covers(ack, ack_bits, it->seq)) {
+        // Karn のアルゴリズム: 再送済みパケットの ACK は RTT サンプルに使わない
+        if (it->transmitted && it->retx_count == 0) {
+          update_rtt(c, now - it->sent_at);
+        }
+        // direct_batch_ に未送出の参照が残ったまま recycle すると use-after-free
+        // になるため、必ず先に参照を除去する
+        drop_direct_ref(it->bytes.data());
         recycle_buffer(std::move(it->bytes));
         it = c.pending.erase(it);
-      } else {
-        ++it;
+        advanced = true;
+        continue;
       }
+      // SACK の穴: この seq を飛ばして先の seq が ACK されている。閾値に達したら
+      // タイマを待たず fast retransmit する
+      if (it->transmitted && seq32_after(ack, it->seq)) {
+        if (it->skip_acks < FAST_RETX_SKIPS) ++it->skip_acks;
+        if (it->skip_acks >= FAST_RETX_SKIPS && transmit_pending(c, *it, now)) {
+          schedule_retx(it->sent_at + retx_delay(c, *it));
+        }
+      }
+      ++it;
     }
+    if (advanced) pump_pending(c, now);
   }
 
   void process_packet(const uint8_t* pkt, size_t len, const sockaddr_in& src,
@@ -1189,7 +1378,7 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     }
 
     if ((h.flags & FLAG_HAS_ACK) != 0) {
-      process_ack(*c, h.ack, h.ack_bits);
+      process_ack(*c, h.ack, h.ack_bits, now);
     }
     if ((h.flags & FLAG_ACK_ONLY) != 0) return;
 
@@ -1211,6 +1400,9 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
       uint16_t frame_len = load_u16(body + offset);
       offset += BATCH_FRAME_LEN_BYTES;
       if (frame_len < HEADER_BYTES || offset + frame_len > len) return;
+      // batch フレームのネスト (フレーム内 FLAG_BATCH) は送信側が生成しない
+      // 不正入力。再帰させず datagram ごと破棄する
+      if ((body[offset] & FLAG_BATCH) != 0) return;
       process_packet(body + offset, frame_len, src, now);
       offset += frame_len;
     }
@@ -1300,33 +1492,56 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     }
   }
 
+  // pending を持つ Conn (retx_list_) だけを走査する。全 Conn の線形走査は
+  // 1000conn 級で O(N) が高頻度に効くため避ける。
   void service_retransmits(clock_type::time_point now) {
     auto next_due = clock_type::time_point::max();
-    auto timeout = reliable_timeout();
-    for (Conn& c : conns_) {
-      if (!c.active) continue;
+    size_t keep = 0;
+    for (size_t i = 0; i < retx_list_.size(); ++i) {
+      const uint32_t id = retx_list_[i];
+      Conn& c = conns_[id - 1];
+      if (!c.active || c.pending.empty()) {
+        c.in_retx_list = false;
+        continue;
+      }
       bool conn_timed_out = false;
+      const uint32_t base = c.pending.front().seq;
       for (PendingSend& p : c.pending) {
-        if (now - p.first_sent_at >= timeout) {
+        if (!p.transmitted) {
+          // 初回送出は in-flight 窓内のみ。pending は seq 昇順 かつ
+          // transmitted は前方に寄るので、窓外に達したら打ち切ってよい
+          if (p.seq - base >= SEND_WINDOW) break;
+          if (!transmit_pending(c, p, now)) {
+            if (now + TX_RETRY_DELAY < next_due) next_due = now + TX_RETRY_DELAY;
+            break;
+          }
+          auto due = p.sent_at + retx_delay(c, p);
+          if (due < next_due) next_due = due;
+          continue;
+        }
+        // reliable_timeout は初回送出からの経過で判定 (未送出分は対象外)
+        if (now - p.first_sent_at >= reliable_timeout_) {
           conn_timed_out = true;
           break;
         }
-        auto due = p.sent_at + RETX_TIMEOUT;
+        auto due = p.sent_at + retx_delay(c, p);
         if (now >= due) {
-          PacketHeader h = parse_header(p.bytes.data());
-          h.flags = FLAG_REL;
-          attach_ack(c, &h, true);
-          write_header(p.bytes.data(), h);
-          if (queue_send_ref(c, p.bytes.data(), p.bytes.size())) {
-            note_ack_sent(c, h);
-            p.sent_at = now;
+          if (transmit_pending(c, p, now)) {
+            due = p.sent_at + retx_delay(c, p);
+          } else {
+            due = now + TX_RETRY_DELAY;
           }
-          due = p.sent_at + RETX_TIMEOUT;
         }
         if (due < next_due) next_due = due;
       }
-      if (conn_timed_out) expire_conn(c);
+      if (conn_timed_out) {
+        expire_conn(c);
+        c.in_retx_list = false;
+        continue;
+      }
+      retx_list_[keep++] = id;
     }
+    retx_list_.resize(keep);
     earliest_retx_ = next_due;
   }
 
@@ -1340,45 +1555,71 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
     c.pending.clear();
     c.ack_dirty = false;
     c.ack_due = clock_type::time_point::max();
+    if (active_conns_ > 0) --active_conns_;
     ++shutdown_by_transport_;
+  }
+
+  // 不変条件: direct_batch_ は pending.bytes への生ポインタ (TxDatagram.external)
+  // を保持しうる。pending の buffer を recycle/解放する前に、必ず
+  // drop_direct_ref() / drop_direct_refs_for() で参照を除去すること
+  // (process_ack / expire_conn / transmit_pending が該当)。
+  // recycle_buffer() のデバッグ assert がこの不変条件を検査する。
+  void drop_direct_ref(const uint8_t* pending_data) {
+    if (direct_batch_.empty()) return;
+    direct_batch_.erase(
+        std::remove_if(direct_batch_.begin(), direct_batch_.end(),
+                       [&](const TxDatagram& d) {
+                         return d.external == pending_data;
+                       }),
+        direct_batch_.end());
   }
 
   void drop_direct_refs_for(const Conn& c) {
     for (const PendingSend& p : c.pending) {
-      const uint8_t* pending_data = p.bytes.data();
-      direct_batch_.erase(
-          std::remove_if(direct_batch_.begin(), direct_batch_.end(),
-                         [&](const TxDatagram& d) {
-                           return d.external == pending_data;
-                         }),
-          direct_batch_.end());
+      drop_direct_ref(p.bytes.data());
     }
   }
 
+  // ack_dirty な Conn (ack_list_) だけを走査する
   void service_standalone_acks(clock_type::time_point now) {
     auto next_due = clock_type::time_point::max();
     std::array<uint8_t, HEADER_BYTES> pkt{};
-    for (Conn& c : conns_) {
-      if (!c.active || !c.ack_dirty) continue;
+    size_t keep = 0;
+    for (size_t i = 0; i < ack_list_.size(); ++i) {
+      const uint32_t id = ack_list_[i];
+      Conn& c = conns_[id - 1];
+      if (!c.active || !c.ack_dirty) {
+        // piggyback (note_ack_sent) で送信済み、または expire 済み
+        c.in_ack_list = false;
+        continue;
+      }
       if (now < c.ack_due) {
         if (c.ack_due < next_due) next_due = c.ack_due;
+        ack_list_[keep++] = id;
         continue;
       }
       PacketHeader h;
       h.flags = FLAG_ACK_ONLY;
       h.conv = c.conv;
       attach_ack(c, &h, true);
-      if ((h.flags & FLAG_HAS_ACK) == 0) continue;
+      if ((h.flags & FLAG_HAS_ACK) == 0) {
+        c.ack_dirty = false;
+        c.in_ack_list = false;
+        continue;
+      }
       write_header(pkt.data(), h);
       const sockaddr_in& ack_peer =
           (!is_server_ && split_ack_enabled()) ? server_ack_peer_ : c.peer;
       if (queue_send_copy_to(c, ack_peer, pkt.data(), pkt.size())) {
         note_ack_sent(c, h);
+        c.in_ack_list = false;
       } else {
         c.ack_due = now + ack_delay();
         if (c.ack_due < next_due) next_due = c.ack_due;
+        ack_list_[keep++] = id;
       }
     }
+    ack_list_.resize(keep);
     earliest_ack_ = next_due;
   }
 
@@ -1392,8 +1633,37 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   }
 
   void recycle_buffer(std::vector<uint8_t>&& b) {
+#ifndef NDEBUG
+    // 不変条件の検査: direct_batch_ が参照している buffer を recycle しては
+    // ならない (drop_direct_ref を先に呼ぶこと)。違反すると再利用時に
+    // use-after-free 相当の内容破壊になる
+    for (const TxDatagram& d : direct_batch_) {
+      assert(d.external != b.data());
+    }
+#endif
     b.clear();
     free_buffers_.push_back(std::move(b));
+  }
+
+  FanoutJob take_fanout_job() {
+    std::lock_guard<std::mutex> lock(recycled_mu_);
+    if (fanout_pool_.empty()) return FanoutJob{};
+    FanoutJob job = std::move(fanout_pool_.back());
+    fanout_pool_.pop_back();
+    job.bytes.clear();
+    job.peers.clear();
+    job.stride = 0;
+    return job;
+  }
+
+  void recycle_fanout_job(FanoutJob&& job) {
+    job.bytes.clear();
+    job.peers.clear();
+    job.stride = 0;
+    std::lock_guard<std::mutex> lock(recycled_mu_);
+    if (fanout_pool_.size() < 64) {
+      fanout_pool_.push_back(std::move(job));
+    }
   }
 
   void recycle_worker_batch(std::vector<TxDatagram>& batch) {
@@ -1434,10 +1704,15 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   sockaddr_in server_ack_peer_{};
   std::vector<Conn> conns_;
   std::unordered_map<uint64_t, Peer> peers_;
+  // dirty リスト: 全 Conn 線形走査を避けるため、ack 待ち / pending ありの
+  // Conn id だけを保持する (in_ack_list / in_retx_list フラグと対)
+  std::vector<uint32_t> ack_list_;
+  std::vector<uint32_t> retx_list_;
   rudp_bench::ReusableInboundQueue inbox_;
   std::vector<std::vector<uint8_t>> free_buffers_;
   std::mutex recycled_mu_;
   std::vector<std::vector<uint8_t>> recycled_buffers_;
+  std::vector<FanoutJob> fanout_pool_;  // recycled_mu_ 保護
   std::vector<TxDatagram> direct_batch_;
   std::vector<Conn*> fanout_conns_;
   std::vector<PacketHeader> fanout_headers_;
@@ -1457,6 +1732,10 @@ class ApexRudpAdapter : public rudp_bench::Adapter {
   uint32_t connected_peak_ = 0;
   uint32_t shutdown_by_transport_ = 0;
   uint32_t hinted_connections_ = 0;
+  uint32_t active_conns_ = 0;
+  // env はインスタンス生成時に一度だけ読む (ホットパスから getenv を排除)
+  const std::chrono::milliseconds reliable_timeout_ = reliable_timeout_from_env();
+  const uint32_t conn_limit_env_ = conn_limit_from_env();
   clock_type::time_point earliest_ack_ = clock_type::time_point::max();
   clock_type::time_point earliest_retx_ = clock_type::time_point::max();
   size_t recv_empty_drains_left_ = 0;

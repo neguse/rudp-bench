@@ -225,20 +225,28 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
   }
 
   void close() override {
-    // 切断通知は送る (相手側の conn_disc カウンタと port 解放のため): 接続を
-    // 閉じて少しだけ update cycle を回して flush し、peer 自体は破棄せず放棄
-    // する (abandon_peer のコメント参照)。
+    // 切断通知は送る (相手側の conn_disc カウンタと port 解放のため): まず全
+    // slot の CloseConnection を発行してから、全 peer まとめて数回 update cycle
+    // を回して flush する。以前は slot ごとに flush_disconnects (2ms×5 sleep)
+    // していたため close_ms が conn 数 × 10ms に膨張していた。一括 flush なら
+    // conn 数に依らず ~10ms で済む。peer 自体は破棄せず放棄する
+    // (abandon_peer のコメント参照)。
+    std::vector<SLNet::RakPeerInterface*> flush_peers;
+    if (peer_) flush_peers.push_back(peer_);
+    for (auto& slot : client_peers_) {
+      if (!slot.peer) continue;
+      if (slot.connected) {
+        slot.peer->CloseConnection(SLNet::AddressOrGUID(slot.guid), true);
+        flush_peers.push_back(slot.peer);
+      }
+    }
+    flush_disconnects_batch(flush_peers);
     if (peer_) {
-      flush_disconnects(peer_);
       abandon_peer(peer_);
       peer_ = nullptr;
     }
     for (auto& slot : client_peers_) {
       if (!slot.peer) continue;
-      if (slot.connected) {
-        slot.peer->CloseConnection(SLNet::AddressOrGUID(slot.guid), true);
-        flush_disconnects(slot.peer);
-      }
       abandon_peer(slot.peer);
       slot.peer = nullptr;
     }
@@ -264,6 +272,9 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
     return "library_internal";
   }
   bool encryption_on() const override { return false; }
+  // loss で cwnd=1MTU に戻す Tahoe 風動作（audit §5）。
+  const char* congestion_control() const override { return "reno_tahoe_reset"; }
+  const char* thread_model() const override { return "internal_worker"; }
 
   rudp_bench::ConnectionStats connection_stats() const override {
     rudp_bench::ConnectionStats stats;
@@ -301,10 +312,16 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
     abandoned_peers_.push_back(peer);
   }
 
-  // CloseConnection の切断通知を wire に出すために少しだけ update cycle を回す
-  void flush_disconnects(SLNet::RakPeerInterface* peer) {
+  // CloseConnection の切断通知を wire に出すために少しだけ update cycle を回す。
+  // 全 peer を1サイクル内でまとめて回すので、所要時間 (2ms×5 の sleep) は
+  // peer 数に依存しない。
+  void flush_disconnects_batch(
+      const std::vector<SLNet::RakPeerInterface*>& peers) {
+    if (peers.empty()) return;
     for (int i = 0; i < 5; ++i) {
-      peer->RunUpdateCycle(update_bs_);
+      for (SLNet::RakPeerInterface* peer : peers) {
+        peer->RunUpdateCycle(update_bs_);
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
   }

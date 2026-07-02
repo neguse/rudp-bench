@@ -61,6 +61,15 @@ struct Adapter {
   }
   virtual const char* flush_policy(bool /*reliable*/) const { return "immediate"; }
   virtual bool encryption_on() const = 0;
+  // ベンチ公平性メタデータ（docs/improvements.md §3.2-3.3）。
+  // 実効の輻輳制御アルゴリズム。adapter がライブラリ既定を上書きしている場合は
+  // 上書き後の値を返す（例: kcp は nocwnd=1 なら "none_nocwnd"）。
+  // CC 無効群と BBR 群を結果表で分離して読むための列になる。
+  virtual const char* congestion_control() const { return "unknown"; }
+  // スレッドモデル。"single" = harness スレッドのみ / "internal_worker" =
+  // ライブラリ内部スレッドが送受信を担う / "adapter_worker" = adapter が
+  // ワーカースレッドを生成。CPU% とスループットの解釈（dev-notes §5.2）に使う。
+  virtual const char* thread_model() const { return "unknown"; }
   // 観測可能な adapter は connection event を記録して返す。デフォルトは全 0。
   virtual ConnectionStats connection_stats() const { return {}; }
 };

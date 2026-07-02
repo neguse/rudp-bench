@@ -84,11 +84,15 @@ var DiagnosticFields = []string{
 	"delivery_dedup_policy",
 }
 
-// ScenarioFields matches Python SCENARIO_FIELDS (24 fields, includes capability metadata).
+// ScenarioFields extends Python SCENARIO_FIELDS with an explicit "profile"
+// column (24 fields, includes capability metadata). The profile column lets
+// downstream consumers (Aggregate/report) join rows to profiles without
+// parsing scenario_id with regexes.
 var ScenarioFields = []string{
 	"run_id",
 	"scenario_id",
 	"library",
+	"profile",
 	"rate_r",
 	"rate_u",
 	"size",
@@ -109,6 +113,11 @@ var ScenarioFields = []string{
 	"max_payload_bytes",
 	"max_connections",
 	"transport_mode",
+	// 公平性メタデータ（improvements §3.2-3.3）: adapter 申告の実効 CC と
+	// スレッドモデル。CC 無効群/BBR 群や single/multi スレッドを結果表で
+	// 分離して読むための列。
+	"cc_algo",
+	"thread_model",
 }
 
 // AppendOpts holds all parameters for the Append function, matching the Python
@@ -128,6 +137,7 @@ type AppendOpts struct {
 	RunID        string
 	ScenarioID   string
 	Library      string
+	Profile      string
 	RateR        string
 	RateU        string
 	Size         string
@@ -184,6 +194,7 @@ func Append(opts AppendOpts) error {
 		"run_id":      opts.RunID,
 		"scenario_id": opts.ScenarioID,
 		"library":     opts.Library,
+		"profile":     opts.Profile,
 		"rate_r":      opts.RateR,
 		"rate_u":      opts.RateU,
 		"size":        opts.Size,
@@ -199,6 +210,8 @@ func Append(opts AppendOpts) error {
 		"client_cpu_pin":  opts.ClientCPUPin,
 		"pinning_policy":  pinningPolicy(opts),
 		"flush_policy":    scenarioFlushPolicy(opts, server, client),
+		"cc_algo":         firstNonEmpty(server["cc_algo"], client["cc_algo"]),
+		"thread_model":    firstNonEmpty(server["thread_model"], client["thread_model"]),
 	}
 	for k, v := range capMeta {
 		scenarioRow[k] = v
@@ -676,6 +689,17 @@ func scenarioFlushPolicy(opts AppendOpts, server, client map[string]string) stri
 		}
 	}
 	return bench.FlushPolicy(opts.Library, channel)
+}
+
+// firstNonEmpty returns the first non-empty string among the arguments
+// ("unknown" if all are empty). raw CSV に列が無い旧データでは空になる。
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return "unknown"
 }
 
 // pinningPolicy formats the CPU pinning description.

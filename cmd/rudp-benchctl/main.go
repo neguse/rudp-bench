@@ -294,16 +294,26 @@ func loadPrior(root, explicit string) map[string]result.PriorCapacity {
 		}
 		return prior
 	}
-	// Auto-detect: find the latest published measurement
+	// Auto-detect: find the latest published measurement.
+	// ディレクトリ名の辞書順は命名規則に依存するため、mtime で最新を選ぶ。
 	measureDir := filepath.Join(root, "docs", "measurements")
 	entries, err := os.ReadDir(measureDir)
 	if err != nil {
 		return nil
 	}
 	var latest string
+	var latestMod time.Time
 	for _, e := range entries {
-		if e.IsDir() {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if latest == "" || info.ModTime().After(latestMod) {
 			latest = e.Name()
+			latestMod = info.ModTime()
 		}
 	}
 	if latest == "" {

@@ -14,7 +14,6 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <limits>
 #include <mutex>
 #include <set>
@@ -93,7 +92,30 @@ struct ConnState {
     std::vector<uint8_t> partial;
     size_t partial_offset = 0;
     // 非ブロッキング送信で書き切れなかったバイト列(フレーム順保存)。
-    std::deque<uint8_t> out_pending;
+    // 消費は out_pending_offset を進めるだけ(front からの copy+erase による
+    // O(n²) を回避)。offset が肥大したら amortized O(1) で前方を圧縮する。
+    std::vector<uint8_t> out_pending;
+    size_t out_pending_offset = 0;
+
+    size_t out_pending_size() const {
+        return out_pending.size() - out_pending_offset;
+    }
+    void compact_out_pending() {
+        if (out_pending_offset == 0) return;
+        if (out_pending_offset == out_pending.size()) {
+            out_pending.clear();
+            out_pending_offset = 0;
+            return;
+        }
+        if (out_pending_offset > 4096 &&
+            out_pending_offset * 2 >= out_pending.size()) {
+            out_pending.erase(
+                out_pending.begin(),
+                out_pending.begin() +
+                    static_cast<std::ptrdiff_t>(out_pending_offset));
+            out_pending_offset = 0;
+        }
+    }
 };
 
 class Udt4Adapter : public rudp_bench::Adapter {
@@ -187,10 +209,11 @@ class Udt4Adapter : public rudp_bench::Adapter {
         ConnState& conn = it->second;
         size_t frame_len = 4 + len;
         size_t limit = out_pending_byte_limit();
-        if (conn.out_pending.size() > limit ||
-            frame_len > limit - conn.out_pending.size()) {
+        size_t pending = conn.out_pending_size();
+        if (pending > limit || frame_len > limit - pending) {
             return -1;
         }
+        conn.compact_out_pending();
 
         // 4-byte LE length prefix
         uint32_t flen = static_cast<uint32_t>(len);
@@ -230,7 +253,7 @@ class Udt4Adapter : public rudp_bench::Adapter {
         // 書き残しのある conn を再 flush(stall した conn は自分だけ遅れる)。
         std::vector<uint32_t> flush_ids;
         for (auto& [id, conn] : conns_) {
-            if (!conn.out_pending.empty()) flush_ids.push_back(id);
+            if (conn.out_pending_size() > 0) flush_ids.push_back(id);
         }
         for (uint32_t id : flush_ids) {
             (void)flush_pending(id);
@@ -269,6 +292,10 @@ class Udt4Adapter : public rudp_bench::Adapter {
         return reliable ? "nonblocking_stream_pending_queue" : "unsupported";
     }
     bool encryption_on() const override { return false; }
+    // adapter が UDT 既定の CUDTCC(DAIMD) を loss 無反応の BenchCCC に
+    // 置き換えている（audit §10）。
+    const char* congestion_control() const override { return "none_benchccc"; }
+    const char* thread_model() const override { return "internal_worker"; }
     rudp_bench::ConnectionStats connection_stats() const override {
         rudp_bench::ConnectionStats stats;
         stats.shutdown_by_transport = shutdown_by_transport_;
@@ -295,27 +322,28 @@ class Udt4Adapter : public rudp_bench::Adapter {
     }
 
     // out_pending から書けるだけ書く。送信バッファ満杯(EASYNCSND)なら
-    // 残りを保持して即 return(次の poll で再試行)。
+    // 残りを保持して即 return(次の poll で再試行)。vector は連続領域なので
+    // offset から直接 UDT::send に渡す(chunk への copy も前方 erase も不要)。
     bool flush_pending(uint32_t conn_id) {
         auto it = conns_.find(conn_id);
         if (it == conns_.end()) return false;
         ConnState& conn = it->second;
-        while (!conn.out_pending.empty()) {
-            char chunk[4096];
-            size_t n = std::min(conn.out_pending.size(), sizeof(chunk));
-            std::copy(conn.out_pending.begin(),
-                      conn.out_pending.begin() + static_cast<long>(n), chunk);
-            int sent = UDT::send(conn.sock, chunk, static_cast<int>(n), 0);
+        while (conn.out_pending_size() > 0) {
+            constexpr size_t kMaxChunk = 64 * 1024;
+            size_t n = std::min(conn.out_pending_size(), kMaxChunk);
+            const char* p = reinterpret_cast<const char*>(
+                conn.out_pending.data() + conn.out_pending_offset);
+            int sent = UDT::send(conn.sock, p, static_cast<int>(n), 0);
             if (sent == UDT::ERROR || sent <= 0) {
                 int err = UDT::getlasterror().getErrorCode();
                 if (err == CUDTException::EASYNCSND) break;
                 mark_transport_shutdown(conn_id);
                 return false;
             }
-            conn.out_pending.erase(conn.out_pending.begin(),
-                                   conn.out_pending.begin() + sent);
+            conn.out_pending_offset += static_cast<size_t>(sent);
             if (static_cast<size_t>(sent) < n) break;
         }
+        conn.compact_out_pending();
         return true;
     }
 

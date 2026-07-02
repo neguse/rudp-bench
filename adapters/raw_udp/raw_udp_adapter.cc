@@ -153,28 +153,32 @@ class RawUdpAdapter : public rudp_bench::Adapter {
 
   int recv(void* buf, size_t cap, size_t* out_len, uint32_t* out_conn_id) override {
     if (server_fd_ >= 0) {
-      sockaddr_in src{};
-      ssize_t n = recv_datagram(server_fd_, buf, cap, &src);
-      if (n == RECV_WOULD_BLOCK) return 0;
-      if (n < 0) return -1;
-      uint64_t k = addr_key(src);
-      auto it = id_by_key_.find(k);
-      uint32_t id;
-      if (it == id_by_key_.end()) {
-        id = next_id_++;
-        id_by_key_[k] = id;
-        peer_by_id_[id] = src;
-      } else {
-        id = it->second;
-      }
-      if (static_cast<size_t>(n) > cap) {
+      // oversized datagram (MSG_TRUNC で n > cap) は drop してカウントし、次の
+      // datagram の受信を続ける。以前はここで -1 を返しており、harness の
+      // drain ループが break してその tick の残り受信が止まっていた。
+      for (;;) {
+        sockaddr_in src{};
+        ssize_t n = recv_datagram(server_fd_, buf, cap, &src);
+        if (n == RECV_WOULD_BLOCK) return 0;
+        if (n < 0) return -1;
+        uint64_t k = addr_key(src);
+        auto it = id_by_key_.find(k);
+        uint32_t id;
+        if (it == id_by_key_.end()) {
+          id = next_id_++;
+          id_by_key_[k] = id;
+          peer_by_id_[id] = src;
+        } else {
+          id = it->second;
+        }
+        if (static_cast<size_t>(n) > cap) {
+          ++oversized_drops_;
+          continue;
+        }
         *out_len = static_cast<size_t>(n);
         *out_conn_id = id;
-        return -1;
+        return 1;
       }
-      *out_len = static_cast<size_t>(n);
-      *out_conn_id = id;
-      return 1;
     }
     return inbox_.recv(buf, cap, out_len, out_conn_id);
   }
@@ -197,6 +201,12 @@ class RawUdpAdapter : public rudp_bench::Adapter {
   }
 
   void close() override {
+    if (oversized_drops_ > 0) {
+      std::fprintf(stderr, "raw_udp_oversized_dropped: %llu\n",
+                   (unsigned long long)oversized_drops_);
+      std::fflush(stderr);
+      oversized_drops_ = 0;
+    }
     if (server_fd_ >= 0) { ::close(server_fd_); server_fd_ = -1; }
     for (auto& [id, c] : conns_) ::close(c.fd);
     conns_.clear();
@@ -215,6 +225,8 @@ class RawUdpAdapter : public rudp_bench::Adapter {
     return reliable ? "unsupported" : "immediate";
   }
   bool encryption_on() const override { return false; }
+  const char* congestion_control() const override { return "none"; }
+  const char* thread_model() const override { return "single"; }
 
  private:
   int server_fd_ = -1;
@@ -225,6 +237,7 @@ class RawUdpAdapter : public rudp_bench::Adapter {
   std::vector<uint32_t> poll_conn_ids_;
   rudp_bench::ReusableInboundQueue inbox_;
   uint32_t next_id_ = 1;
+  uint64_t oversized_drops_ = 0;
 };
 
 }  // namespace

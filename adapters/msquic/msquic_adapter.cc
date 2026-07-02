@@ -30,6 +30,11 @@ namespace {
 
 const QUIC_API_TABLE* MsQuic = nullptr;
 constexpr size_t kDefaultMsquicInboxLimit = 1u << 16;
+// §3.1: 送信 backpressure。stream / datagram それぞれ「submit 済みでまだ完了
+// (SEND_COMPLETE / datagram 終端 state) していないバイト数」が上限を超えたら
+// send が -1 を返す。他 adapter の 32MiB バイト基準に揃える。既存の
+// offered/acked/lost/canceled と同じくプロセス全体(全 conn 合算)で数える。
+constexpr size_t kDefaultPendingSendByteLimit = 32u * 1024u * 1024u;
 
 #define MSQUIC_DIE(msg, status) do { \
   std::fprintf(stderr, "msquic_adapter: " msg " status=0x%x at %s:%d\n", \
@@ -49,19 +54,29 @@ void ensure_msquic_init() {
   });
 }
 
-size_t msquic_inbox_limit() {
-  const char* v = std::getenv("MSQUIC_INBOX_MESSAGES");
-  if (!v || !*v) return kDefaultMsquicInboxLimit;
+size_t msquic_parse_count_env(const char* name, size_t fallback) {
+  const char* v = std::getenv(name);
+  if (!v || !*v) return fallback;
   errno = 0;
   char* end = nullptr;
   unsigned long long parsed = std::strtoull(v, &end, 10);
   if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
-    return kDefaultMsquicInboxLimit;
+    return fallback;
   }
   if (parsed > std::numeric_limits<size_t>::max()) {
     return std::numeric_limits<size_t>::max();
   }
   return static_cast<size_t>(parsed);
+}
+
+size_t msquic_inbox_limit() {
+  return msquic_parse_count_env("MSQUIC_INBOX_MESSAGES",
+                                kDefaultMsquicInboxLimit);
+}
+
+size_t msquic_pending_send_byte_limit() {
+  return msquic_parse_count_env("MSQUIC_PENDING_SEND_BYTES",
+                                kDefaultPendingSendByteLimit);
 }
 
 struct MsquicCertPaths {
@@ -88,6 +103,11 @@ const MsquicCertPaths& ensure_msquic_cert() {
         " -subj '/CN=rudp-bench' 2>/dev/null";
     int rc = std::system(cmd.c_str());
     if (rc != 0) std::abort();
+    // /tmp に生成した一時 pem を process 終了時に掃除する
+    std::atexit([]() {
+      ::unlink(paths.cert.c_str());
+      ::unlink(paths.key.c_str());
+    });
   });
   return paths;
 }
@@ -362,6 +382,9 @@ class MsquicAdapter : public rudp_bench::Adapter {
   }
   const char* flush_policy(bool /*reliable*/) const override { return "async_internal"; }
   bool encryption_on() const override { return true; }
+  // adapter が msquic 既定の Cubic を BBR に上書きしている（audit §10）。
+  const char* congestion_control() const override { return "bbr"; }
+  const char* thread_model() const override { return "internal_worker"; }
 
   // --- Callback dispatchers (called from msquic internal threads) ---
 
@@ -455,6 +478,11 @@ class MsquicAdapter : public rudp_bench::Adapter {
           }
           auto* ctx = static_cast<SendCtx*>(
               ev->DATAGRAM_SEND_STATE_CHANGED.ClientContext);
+          if (ctx) {
+            // §3.1: 終端 state 到達 = in-flight から除外
+            dgram_inflight_bytes_.fetch_sub(ctx->data.size(),
+                                            std::memory_order_relaxed);
+          }
           if (ctx && dgram_debug_enabled()) {
             std::lock_guard<std::mutex> lock(dbg_mtx_);
             dbg_outstanding_.erase(ctx);
@@ -506,6 +534,11 @@ class MsquicAdapter : public rudp_bench::Adapter {
 
       case QUIC_STREAM_EVENT_SEND_COMPLETE: {
         auto* ctx = static_cast<SendCtx*>(ev->SEND_COMPLETE.ClientContext);
+        if (ctx) {
+          // §3.1: SEND_COMPLETE = in-flight から除外
+          stream_inflight_bytes_.fetch_sub(ctx->data.size(),
+                                           std::memory_order_relaxed);
+        }
         delete ctx;
         break;
       }
@@ -569,12 +602,18 @@ class MsquicAdapter : public rudp_bench::Adapter {
   }
 
   int send_stream(HQUIC conn, const void* data, size_t len) {
+    // §3.1: submit 済みで SEND_COMPLETE がまだ来ていないバイト数で cap する
+    size_t frame_size = 4 + len;
+    size_t limit = msquic_pending_send_byte_limit();
+    size_t inflight = stream_inflight_bytes_.load(std::memory_order_relaxed);
+    if (inflight > limit || frame_size > limit - inflight) return -1;
+
     HQUIC stream = reliable_stream(conn);
     if (!stream) return -1;
 
     // Length-prefix (4 bytes big-endian) + payload
     auto* ctx = new SendCtx();
-    ctx->data.resize(4 + len);
+    ctx->data.resize(frame_size);
     uint32_t nlen = htonl(static_cast<uint32_t>(len));
     std::memcpy(ctx->data.data(), &nlen, 4);
     std::memcpy(ctx->data.data() + 4, data, len);
@@ -583,10 +622,17 @@ class MsquicAdapter : public rudp_bench::Adapter {
 
     QUIC_STATUS status = MsQuic->StreamSend(stream, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx);
     if (QUIC_FAILED(status)) { delete ctx; return -1; }
+    stream_inflight_bytes_.fetch_add(frame_size, std::memory_order_relaxed);
     return 0;
   }
 
   int send_datagram(HQUIC conn, const void* data, size_t len) {
+    // §3.1: submit 済みで終端 state (ACKED/LOST/CANCELED) がまだ来ていない
+    // バイト数で cap する(offered/acked トラッキングと同じ粒度 = 全 conn 合算)
+    size_t limit = msquic_pending_send_byte_limit();
+    size_t inflight = dgram_inflight_bytes_.load(std::memory_order_relaxed);
+    if (inflight > limit || len > limit - inflight) return -1;
+
     auto* ctx = new SendCtx();
     ctx->data.assign(static_cast<const uint8_t*>(data),
                      static_cast<const uint8_t*>(data) + len);
@@ -611,6 +657,7 @@ class MsquicAdapter : public rudp_bench::Adapter {
       return -1;
     }
     dgram_offered_.fetch_add(1, std::memory_order_relaxed);
+    dgram_inflight_bytes_.fetch_add(len, std::memory_order_relaxed);
     return 0;
   }
 
@@ -682,6 +729,11 @@ class MsquicAdapter : public rudp_bench::Adapter {
   std::atomic<uint64_t> dgram_acked_{0};
   std::atomic<uint64_t> dgram_lost_{0};
   std::atomic<uint64_t> dgram_canceled_{0};
+  // §3.1: submit 済み・未完了の送信バイト数(バイト基準 backpressure 用)。
+  // stream = StreamSend 済みで SEND_COMPLETE 未着、datagram = DatagramSend
+  // 済みで終端 state 未着。send() はこれが 32MiB を超えると -1 を返す。
+  std::atomic<size_t> stream_inflight_bytes_{0};
+  std::atomic<size_t> dgram_inflight_bytes_{0};
   bool closed_ = false;
 
   // Debug-only (RUDP_MSQUIC_DGRAM_DEBUG=1): live set of unresolved sends.

@@ -3,6 +3,7 @@ package result
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 )
 
@@ -105,6 +106,8 @@ func BinUpperBoundUS(index int) int {
 
 // PercentileUS returns the p-th percentile latency in microseconds.
 // Mirrors LatencyHist::percentile_us in metrics.cc.
+// ランク規約は nearest-rank（ceil(count*p)、[1,count] にクランプ）。
+// metrics.cc / runner.cc の BoundedHistogram と同一規約に統一されている。
 func (h *Histogram) PercentileUS(p float64) int {
 	if h.Count == 0 {
 		return 0
@@ -116,7 +119,13 @@ func (h *Histogram) PercentileUS(p float64) int {
 	if q > 1.0 {
 		q = 1.0
 	}
-	target := uint64(q*float64(h.Count-1)) + 1
+	target := uint64(math.Ceil(q * float64(h.Count)))
+	if target < 1 {
+		target = 1
+	}
+	if target > h.Count {
+		target = h.Count
+	}
 	var seen uint64
 	for i, c := range h.Bins {
 		seen += c

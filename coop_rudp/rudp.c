@@ -26,15 +26,20 @@
 #define RUDP_F_ORDERED 0x02u
 #define RUDP_F_SEQUENCED 0x04u
 
-#define RUDP_PACKET_HEADER_BYTES 32u
-#define RUDP_DATA_FRAME_HEADER_BYTES 20u
+/* ワイヤ定数は公開ヘッダ（rudp.h）の値が単一の真実源。 */
+#define RUDP_PACKET_HEADER_BYTES RUDP_WIRE_PACKET_HEADER_BYTES
+#define RUDP_DATA_FRAME_HEADER_BYTES RUDP_WIRE_DATA_FRAME_HEADER_BYTES
 #define RUDP_INVALID_INDEX UINT32_MAX
 #define RUDP_MAX_REFS_PER_PACKET 16u
 #define RUDP_MAX_FRAGS_PER_MSG 256u
 #define RUDP_MAX_LOST_ACK_SEQS 4u
-#define RUDP_RX_SEEN_BUCKETS 1024u
-#define RUDP_RX_SEEN_WAYS 4u
-#define RUDP_RX_SEEN_COUNT (RUDP_RX_SEEN_BUCKETS * RUDP_RX_SEEN_WAYS)
+/* reliable msg_id 重複排除のスライディングウィンドウ幅（bit 数）。
+   64bit ワード × 1024 = 65536 msg_id。ウィンドウ内は取りこぼしゼロの厳密
+   判定、ウィンドウより古い msg_id は「配信済みとみなす」（重複抑止側に倒す）。
+   旧実装の 4-way set-associative は衝突退避で任意レートでも重複配信が
+   起きえたが、この方式は 65536 個より古い遅延再送のみが偽陽性になる。 */
+#define RUDP_RX_DEDUP_WORDS 1024u
+#define RUDP_RX_DEDUP_WINDOW (RUDP_RX_DEDUP_WORDS * 64u)
 #define RUDP_REASM_BITMAP_WORDS (RUDP_MAX_FRAGS_PER_MSG / 64u)
 #define RUDP_MAX_FLOW_COUNT 65536u
 #define RUDP_MAX_CHANNEL_COUNT 65536u
@@ -77,6 +82,10 @@ typedef struct rudp_msg {
   uint32_t msg_id;
   uint32_t replace_key;
   uint32_t owner_conn_p1; /* conn index + 1; 0 = unowned */
+  /* この msg を現在運んでいる in-flight パケットの seq（0 = なし）。
+     msg は同時に 1 パケットにしか載らない（再送は旧パケットの loss 処理後に
+     新パケットで運ばれる）ので、逆参照は単一値で足りる。 */
+  uint32_t carrier_seq;
   uint32_t lost_ack_seqs[RUDP_MAX_LOST_ACK_SEQS];
   uint64_t enqueue_ns;
   uint64_t deadline_ns;
@@ -178,17 +187,27 @@ struct rudp_conn {
   rudp_flow_state* flows;
   rudp_channel_state* channels;
   rudp_sequenced_state* sequenced;
-  uint32_t rx_seen[RUDP_RX_SEEN_COUNT];
-  uint8_t rx_seen_used[RUDP_RX_SEEN_COUNT];
-  uint8_t rx_seen_next[RUDP_RX_SEEN_BUCKETS];
+  /* msg_id ブロック（msg_id/64）でタグ付けしたリング状ビットマップ。
+     rx_dedup_block[w] がブロック番号一致のときだけ rx_dedup_bits[w] が有効。 */
+  uint64_t rx_dedup_bits[RUDP_RX_DEDUP_WORDS];
+  uint32_t rx_dedup_block[RUDP_RX_DEDUP_WORDS];
+  uint32_t rx_dedup_max; /* 観測した最大 msg_id（0 = 未観測） */
   uint64_t next_retx_ns;
   uint64_t last_rx_ns;
   uint64_t last_tx_ns;
   uint64_t srtt_ns;
+  uint64_t rttvar_ns;
   uint64_t min_rtt_ns;
   uint64_t acked_packets;
   uint64_t lost_packets;
-  uint32_t retransmits_since_rx;
+  /* ピアから何も受信しないまま経過した RTO 再送ラウンド数。パケット単位で
+     数えると 1 ラウンドの一括ロスで閾値を突き抜けて正常接続を誤 abort する。 */
+  uint32_t retx_rounds_since_rx;
+  /* RTO 指数バックオフ段数（受信があるとリセット）。 */
+  uint32_t rto_backoff;
+  /* loss 応答（safe_bps 半減）を 1 ロスラウンドにつき 1 回に抑えるための
+     直近半減時刻。パケット毎に半減すると一括ロスでレートが床まで落ちる。 */
+  uint64_t last_rate_halve_ns;
   uint64_t recv_packets;
   uint64_t reordered_packets;
   uint32_t inflight_bytes;
@@ -196,10 +215,18 @@ struct rudp_conn {
   uint32_t retransmit_queue_bytes;
   uint32_t safe_bps;
   uint32_t pacing_bps;
+  /* pacing_bps を実際の送信ゲートにするためのトークンバケット。
+     pacing_bps == UINT32_MAX（既定）の間は無制限で、loss で safe_bps が
+     半減して有限になると flush がこのトークンで送出を絞る。 */
+  uint64_t pace_tokens_bytes;
+  uint64_t pace_refill_ns;
   uint32_t queue_delay_ms;
   uint32_t sent_seq_head;
   uint32_t sent_seq_tail;
   uint32_t sent_seq_count;
+  /* この flush で発行した最初の reliable seq（record 前のウィンドウ計算用）。
+     flush の conn 処理開始時にリセットされる。 */
+  uint32_t batch_reliable_first_seq;
   /* live messages owned by this conn with a recorded lost packet seq; gates
      the late-ack rescue scans in release_late_acked_messages */
   uint32_t late_ack_msg_count;
@@ -243,6 +270,9 @@ struct rudp_endpoint {
   rudp_rx_reasm* reasm;
   uint8_t* reasm_data;
   uint32_t reasm_count;
+
+  /* この poll 内で受信パケット起点に生成した conn 数（レート制限用）。 */
+  uint32_t incoming_conns_this_poll;
 
   uint8_t* recv_batch_data;
   rudp_in_packet* recv_batch;
@@ -552,6 +582,42 @@ static int conn_map_insert(rudp_endpoint* ep, uint64_t conn_id, uint32_t conn_in
   return -1;
 }
 
+/* linear probing の backward-shift deletion。tombstone を残さないので、
+   短命コネクションを繰り返してもテーブルが used エントリで埋まらない。 */
+static void conn_map_remove(rudp_endpoint* ep, uint64_t conn_id) {
+  if (!ep || !ep->conn_map || ep->conn_map_cap == 0 || conn_id == 0) return;
+  uint32_t mask = ep->conn_map_cap - 1u;
+  uint32_t pos = (uint32_t)hash_conn_id(conn_id) & mask;
+  uint32_t hole = UINT32_MAX;
+  for (uint32_t probe = 0; probe < ep->conn_map_cap; ++probe) {
+    uint32_t i = (pos + probe) & mask;
+    rudp_conn_map_entry* e = &ep->conn_map[i];
+    if (!e->used) return;
+    if (e->conn_id == conn_id) {
+      e->used = 0;
+      hole = i;
+      break;
+    }
+  }
+  if (hole == UINT32_MAX) return;
+  uint32_t i = hole;
+  for (;;) {
+    i = (i + 1u) & mask;
+    rudp_conn_map_entry* e = &ep->conn_map[i];
+    if (!e->used) return;
+    uint32_t home = (uint32_t)hash_conn_id(e->conn_id) & mask;
+    /* e が hole より手前（probe 順で home..i の間に hole が挟まる）なら
+       hole へ詰めて新しい hole を e の位置にする。 */
+    uint32_t dist_home_to_hole = (hole - home) & mask;
+    uint32_t dist_home_to_i = (i - home) & mask;
+    if (dist_home_to_hole <= dist_home_to_i) {
+      ep->conn_map[hole] = *e;
+      e->used = 0;
+      hole = i;
+    }
+  }
+}
+
 static uint64_t endpoint_now_ns(rudp_endpoint* ep) {
   if (!ep) return 0;
   if (ep->cfg.socket.now_ns) {
@@ -676,10 +742,41 @@ static void note_packet_rtt(rudp_conn* c, uint64_t rtt_ns) {
   if (rtt_ns == 0) return;
   if (c->min_rtt_ns == 0 || rtt_ns < c->min_rtt_ns) c->min_rtt_ns = rtt_ns;
   if (c->srtt_ns == 0) {
+    /* RFC 6298: 初回サンプルで SRTT=R, RTTVAR=R/2 */
     c->srtt_ns = rtt_ns;
+    c->rttvar_ns = rtt_ns / 2u;
   } else {
+    uint64_t diff = c->srtt_ns > rtt_ns ? c->srtt_ns - rtt_ns
+                                        : rtt_ns - c->srtt_ns;
+    c->rttvar_ns = (c->rttvar_ns * 3u + diff) / 4u;
     c->srtt_ns = (c->srtt_ns * 7u + rtt_ns) / 8u;
   }
+}
+
+#define RUDP_DEFAULT_MIN_RTO_MS 20u
+#define RUDP_DEFAULT_MAX_RTO_MS 10000u
+
+/* 適応 RTO（SRTT+4*RTTVAR、クランプ付き）に指数バックオフを乗せた値。
+   RTT サンプルが無い間は cfg.rto_ms を初期 RTO として使う。 */
+static uint64_t conn_rto_ns(const rudp_conn* c) {
+  const rudp_endpoint* ep = c->ep;
+  uint64_t rto_ns;
+  if (c->srtt_ns == 0) {
+    rto_ns = (uint64_t)ep->cfg.rto_ms * RUDP_NS_PER_MS;
+  } else {
+    uint64_t min_ns = (uint64_t)cfg_u32(ep->cfg.min_rto_ms,
+                                        RUDP_DEFAULT_MIN_RTO_MS) *
+                      RUDP_NS_PER_MS;
+    uint64_t max_ns = (uint64_t)cfg_u32(ep->cfg.max_rto_ms,
+                                        RUDP_DEFAULT_MAX_RTO_MS) *
+                      RUDP_NS_PER_MS;
+    rto_ns = c->srtt_ns + 4u * c->rttvar_ns;
+    if (rto_ns < min_ns) rto_ns = min_ns;
+    if (rto_ns > max_ns) rto_ns = max_ns;
+  }
+  uint32_t shift = c->rto_backoff > 6u ? 6u : c->rto_backoff;
+  if (rto_ns > (UINT64_MAX >> shift)) return UINT64_MAX;
+  return rto_ns << shift;
 }
 
 static void release_sent_packet(rudp_conn* c, uint32_t seq, uint64_t now_ns,
@@ -705,6 +802,7 @@ static void release_sent_packet(rudp_conn* c, uint32_t seq, uint64_t now_ns,
       --m->inflight_refs;
       if (c->inflight_bytes >= m->len) c->inflight_bytes -= m->len;
     }
+    if (m->carrier_seq == sp->seq) m->carrier_seq = 0;
     if (complete_refs) {
       rudp_flow_state* f = flow_for(c, m->flow_id);
       if (f) add_u32_saturating(&f->stats.delivered_bps, m->len);
@@ -765,25 +863,24 @@ static int remove_msg_from_retry_queue(rudp_conn* c, uint32_t mi,
 
 static void remove_msg_from_inflight_packets(rudp_conn* c, uint32_t mi,
                                              rudp_msg* m) {
-  rudp_endpoint* ep = c->ep;
-  size_t base = (size_t)c->index * ep->cfg.sent_packet_count;
-  for (uint32_t i = 0; i < ep->cfg.sent_packet_count; ++i) {
-    rudp_sent_packet* sp = &ep->sent_packets[base + i];
-    if (!sp->used || sp->conn_index != c->index) continue;
-    uint16_t write = 0;
-    for (uint16_t r = 0; r < sp->ref_count; ++r) {
-      if (sp->refs[r] == mi) {
-        if (m->inflight_refs > 0) {
-          --m->inflight_refs;
-          if (c->inflight_bytes >= m->len) c->inflight_bytes -= m->len;
-        }
-        continue;
+  /* carrier_seq の逆参照で O(1)。以前は sent_packet_count 全走査だった。 */
+  if (m->carrier_seq == 0) return;
+  rudp_sent_packet* sp = sent_packet_for_seq(c, m->carrier_seq);
+  m->carrier_seq = 0;
+  if (!sp) return;
+  uint16_t write = 0;
+  for (uint16_t r = 0; r < sp->ref_count; ++r) {
+    if (sp->refs[r] == mi) {
+      if (m->inflight_refs > 0) {
+        --m->inflight_refs;
+        if (c->inflight_bytes >= m->len) c->inflight_bytes -= m->len;
       }
-      sp->refs[write++] = sp->refs[r];
+      continue;
     }
-    sp->ref_count = write;
-    if (sp->ref_count == 0) sp->used = 0;
+    sp->refs[write++] = sp->refs[r];
   }
+  sp->ref_count = write;
+  if (sp->ref_count == 0) sp->used = 0;
 }
 
 static void complete_late_acked_msg(rudp_conn* c, uint32_t mi,
@@ -799,6 +896,9 @@ static void complete_late_acked_msg(rudp_conn* c, uint32_t mi,
   if (f) add_u32_saturating(&f->stats.delivered_bps, m->len);
   free_msg(c->ep, mi);
 }
+
+static void remove_msg_from_current_queue(rudp_conn* c, uint32_t mi,
+                                          rudp_msg* m);
 
 static void release_late_acked_messages(rudp_conn* c, uint32_t ack,
                                         uint64_t bits) {
@@ -825,25 +925,24 @@ static void release_late_acked_messages(rudp_conn* c, uint32_t ack,
     }
   }
 
-  int changed = 0;
-  do {
-    changed = 0;
-    size_t base = (size_t)c->index * ep->cfg.sent_packet_count;
-    for (uint32_t i = 0; i < ep->cfg.sent_packet_count; ++i) {
-      rudp_sent_packet* sp = &ep->sent_packets[base + i];
-      if (!sp->used || sp->conn_index != c->index) continue;
-      for (uint16_t r = 0; r < sp->ref_count; ++r) {
-        uint32_t mi = sp->refs[r];
-        rudp_msg* m = (mi < ep->cfg.max_messages) ? &ep->msgs[mi] : NULL;
-        if (m && m->used && msg_lost_seq_is_acked(m, ack, bits)) {
-          complete_late_acked_msg(c, mi, 0);
-          changed = 1;
-          break;
-        }
-      }
-      if (changed) break;
+  /* retry キュー以外（in-flight や unsent 再投入済み）の late-ack 救済。
+     以前は sent_packets×refs の入れ子走査を 1 件完了するたびに先頭から
+     再起動していて最悪 O(n^2)。owner でフィルタした msgs の単一走査に置換。 */
+  if (c->late_ack_msg_count == 0) return;
+  for (uint32_t mi = 0; mi < ep->cfg.max_messages; ++mi) {
+    rudp_msg* m = &ep->msgs[mi];
+    if (!m->used || m->owner_conn_p1 != c->index + 1u) continue;
+    if (m->lost_ack_seq_count == 0) continue;
+    if (!msg_lost_seq_is_acked(m, ack, bits)) continue;
+    if (m->queued_kind == RUDP_QUEUE_UNRELIABLE ||
+        m->queued_kind == RUDP_QUEUE_RELIABLE) {
+      /* unsent キューに再投入されていた場合は queued_bytes の帳尻を合わせて
+         リングからも抜く。 */
+      remove_msg_from_current_queue(c, mi, m);
     }
-  } while (changed);
+    complete_late_acked_msg(c, mi, 0);
+    if (c->late_ack_msg_count == 0) break;
+  }
 }
 
 static void remove_msg_from_current_queue(rudp_conn* c, uint32_t mi,
@@ -937,13 +1036,18 @@ static void abort_conn_internal(rudp_conn* c) {
   c->late_ack_msg_count = 0;
   c->next_retx_ns = 0;
   c->active = 0;
+  /* エントリを消さないとスロット再利用時に古い conn_id の lookup が
+     別コネクションを返し、tombstone 無しの probing では insert も枯れる。 */
+  conn_map_remove(ep, c->conn_id);
+  c->conn_id = 0;
 }
 
 void rudp_conn_abort(rudp_conn* conn) {
   abort_conn_internal(conn);
 }
 
-static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp);
+static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp,
+                             uint64_t now_ns);
 
 static void prune_sent_seq_queue(rudp_conn* c) {
   rudp_endpoint* ep = c->ep;
@@ -1002,7 +1106,7 @@ static void release_acked_packets(rudp_conn* c, uint32_t ack, uint64_t bits,
         continue;
       }
       if (seq32_after(ack, seq) && ack - seq >= RUDP_LOSS_PACKET_THRESHOLD) {
-        mark_packet_lost(c, sp);
+        mark_packet_lost(c, sp, now_ns);
         continue;
       }
       ep->sent_seq_queue[base + c->sent_seq_tail] = seq;
@@ -1073,6 +1177,8 @@ int rudp_endpoint_create(rudp_endpoint** out, const rudp_endpoint_config* config
   ep->cfg.send_batch_size = cfg_u32(ep->cfg.send_batch_size, RUDP_DEFAULT_SEND_BATCH);
   ep->cfg.rto_ms = cfg_u32(ep->cfg.rto_ms, RUDP_DEFAULT_RTO_MS);
   ep->cfg.initial_safe_bps = cfg_u32(ep->cfg.initial_safe_bps, UINT32_MAX);
+  ep->cfg.max_reassemblies =
+      cfg_u32(ep->cfg.max_reassemblies, ep->cfg.max_recv_events);
   if (ep->cfg.max_flows > RUDP_MAX_FLOW_COUNT ||
       ep->cfg.max_channels > RUDP_MAX_CHANNEL_COUNT) {
     goto fail;
@@ -1122,7 +1228,7 @@ int rudp_endpoint_create(rudp_endpoint** out, const rudp_endpoint_config* config
                         &hold_data_bytes) ||
       !checked_mul_size(ep->cfg.max_recv_events, ep->max_payload,
                         &recv_event_data_bytes) ||
-      !checked_mul_size(ep->cfg.max_recv_events, ep->max_payload,
+      !checked_mul_size(ep->cfg.max_reassemblies, ep->max_payload,
                         &reasm_data_bytes) ||
       !checked_mul_size(ep->cfg.recv_batch_size, ep->mtu,
                         &recv_batch_data_bytes) ||
@@ -1154,7 +1260,7 @@ int rudp_endpoint_create(rudp_endpoint** out, const rudp_endpoint_config* config
   ep->recv_events = (rudp_recv_event_i*)calloc(ep->cfg.max_recv_events, sizeof(rudp_recv_event_i));
   ep->recv_event_data = (uint8_t*)calloc(recv_event_data_bytes, 1);
   ep->borrow_data = (uint8_t*)calloc(1, ep->max_payload);
-  ep->reasm_count = ep->cfg.max_recv_events;
+  ep->reasm_count = ep->cfg.max_reassemblies;
   ep->reasm = (rudp_rx_reasm*)calloc(ep->reasm_count, sizeof(rudp_rx_reasm));
   ep->reasm_data = (uint8_t*)calloc(reasm_data_bytes, 1);
   ep->recv_batch = (rudp_in_packet*)calloc(ep->cfg.recv_batch_size, sizeof(rudp_in_packet));
@@ -1250,7 +1356,11 @@ rudp_conn* rudp_endpoint_find_conn(rudp_endpoint* ep, uint64_t conn_id) {
   if (!ep || conn_id == 0) return NULL;
   uint32_t idx = 0;
   if (!conn_map_lookup(ep, conn_id, &idx)) return NULL;
-  return conn_by_index(ep, idx);
+  rudp_conn* c = conn_by_index(ep, idx);
+  /* conn_map_remove があるので通常ここは一致するが、スロット再利用で別
+     コネクションを返す事故を防ぐため conn_id を必ず照合する（防御）。 */
+  if (!c || c->conn_id != conn_id) return NULL;
+  return c;
 }
 
 uint64_t rudp_conn_id(const rudp_conn* conn) {
@@ -1451,17 +1561,21 @@ rudp_send_result rudp_send(rudp_conn* conn, const void* data, size_t len,
   drop_replaced_unreliable(conn, f, opts);
   uint32_t allocated[RUDP_MAX_FRAGS_PER_MSG];
   uint32_t msg_id = conn->next_msg_id++;
+  /* channel_seq はここでは「予約」のみ。ordered の seq を先にインクリメント
+     してから投入に失敗すると seq に穴が空き、受信側 expected_ordered が
+     永久に待つ。採番の確定（インクリメント）は全フラグメントのキュー投入が
+     成功した後に行う。 */
   uint16_t channel_seq = 0;
+  rudp_sequenced_state* seq_state = NULL;
   if (opts->reliability == RUDP_RELIABLE_ORDERED) {
-    channel_seq = ch->next_ordered_seq++;
+    channel_seq = ch->next_ordered_seq;
   } else if (opts->reliability == RUDP_UNRELIABLE_SEQUENCED) {
-    rudp_sequenced_state* seq =
-        sequenced_for(conn, opts->flow_id, opts->channel_id);
-    if (!seq) {
+    seq_state = sequenced_for(conn, opts->flow_id, opts->channel_id);
+    if (!seq_state) {
       ++f->stats.send_queue_full;
       return RUDP_SEND_QUEUE_FULL;
     }
-    channel_seq = seq->next_send_seq++;
+    channel_seq = seq_state->next_send_seq;
   }
   uint64_t enqueue_ns = endpoint_now_ns(conn->ep);
   uint64_t deadline_ns =
@@ -1501,7 +1615,22 @@ rudp_send_result rudp_send(rudp_conn* conn, const void* data, size_t len,
     if (frag_len > 0) memcpy(m->data, (const uint8_t*)data + offset, frag_len);
   }
   for (uint16_t frag = 0; frag < frag_count; ++frag) {
-    (void)ring_push_priority(q, conn->ep, allocated[frag]);
+    if (!ring_push_priority(q, conn->ep, allocated[frag])) {
+      /* 事前の空き検査で通常は起きないが、万一失敗したら投入済み分を
+         取り除いて全フラグメントを解放し、seq を消費せずに失敗を返す。 */
+      for (uint16_t undo = 0; undo < frag; ++undo) {
+        (void)ring_remove_value(q, allocated[undo]);
+      }
+      for (uint16_t i = 0; i < frag_count; ++i) free_msg(conn->ep, allocated[i]);
+      ++f->stats.send_queue_full;
+      return RUDP_SEND_QUEUE_FULL;
+    }
+  }
+  /* 全フラグメントの投入が成功したのでここで初めて採番を確定させる。 */
+  if (opts->reliability == RUDP_RELIABLE_ORDERED) {
+    ch->next_ordered_seq = (uint16_t)(channel_seq + 1u);
+  } else if (seq_state) {
+    seq_state->next_send_seq = (uint16_t)(channel_seq + 1u);
   }
   add_u32_saturating(&f->queued_bytes, (uint32_t)len);
   f->stats.queued_bytes = f->queued_bytes;
@@ -1620,18 +1749,22 @@ static int queue_retransmit(rudp_conn* c, uint32_t mi) {
   return 0;
 }
 
-static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp) {
+static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp,
+                             uint64_t now_ns) {
   if (!c || !sp || sp->lost) return;
-  if (c->ep->cfg.max_retransmits > 0 &&
-      c->retransmits_since_rx >= c->ep->cfg.max_retransmits) {
-    abort_conn_internal(c);
-    return;
-  }
-  ++c->retransmits_since_rx;
   sp->lost = 1;
   ++c->lost_packets;
-  if (c->safe_bps > 64000u) c->safe_bps /= 2u;
-  c->pacing_bps = c->safe_bps;
+  /* loss 応答は 1 RTT（サンプル前は最小 RTO）につき 1 回。ウィンドウ分の
+     一括ロスでパケット毎に半減させるとレートが一気に床まで落ちる。 */
+  uint64_t halve_interval_ns =
+      c->srtt_ns ? c->srtt_ns
+                 : (uint64_t)RUDP_DEFAULT_MIN_RTO_MS * RUDP_NS_PER_MS;
+  if (c->last_rate_halve_ns == 0 ||
+      now_ns >= add_ns_saturating(c->last_rate_halve_ns, halve_interval_ns)) {
+    if (c->safe_bps > 64000u) c->safe_bps /= 2u;
+    c->pacing_bps = c->safe_bps;
+    c->last_rate_halve_ns = now_ns;
+  }
   for (uint16_t r = 0; r < sp->ref_count; ++r) {
     uint32_t mi = sp->refs[r];
     if (mi >= c->ep->cfg.max_messages) continue;
@@ -1643,6 +1776,7 @@ static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp) {
       --m->inflight_refs;
       if (c->inflight_bytes >= m->len) c->inflight_bytes -= m->len;
     }
+    if (m->carrier_seq == sp->seq) m->carrier_seq = 0;
     if (!queue_retransmit(c, mi)) {
       drop_msg(c, mi, RUDP_QUEUE_NONE, 1);
     }
@@ -1654,23 +1788,46 @@ static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp) {
 static void service_retransmits(rudp_conn* c, uint64_t now_ns) {
   if (c->next_retx_ns == 0 || now_ns < c->next_retx_ns) return;
   rudp_endpoint* ep = c->ep;
-  uint64_t rto_ns = (uint64_t)ep->cfg.rto_ms * RUDP_NS_PER_MS;
+  uint64_t rto_ns = conn_rto_ns(c);
   uint64_t next_retx_ns = 0;
-  size_t base = (size_t)c->index * ep->cfg.sent_packet_count;
-  for (uint32_t i = 0; i < ep->cfg.sent_packet_count; ++i) {
-    rudp_sent_packet* sp = &ep->sent_packets[base + i];
-    if (!sp->used || sp->conn_index != c->index || sp->lost) {
-      continue;
-    }
-    uint64_t due = add_ns_saturating(sp->sent_ns, rto_ns);
-    if (now_ns < due) {
+  int lost_any = 0;
+  /* sent_seq_queue（送信時刻順）を 1 周して RTO 判定する。スロット配列の
+     全走査（sent_packet_count 固定）ではなく生きている追跡 seq 数に比例。 */
+  uint32_t cap = ep->cfg.sent_packet_count;
+  if (cap > 0 && ep->sent_seq_queue && c->sent_seq_count > 0) {
+    size_t base = (size_t)c->index * cap;
+    uint32_t n = c->sent_seq_count;
+    for (uint32_t i = 0; i < n; ++i) {
+      uint32_t seq = ep->sent_seq_queue[base + c->sent_seq_head];
+      c->sent_seq_head = (c->sent_seq_head + 1u) % cap;
+      --c->sent_seq_count;
+      rudp_sent_packet* sp = sent_packet_for_seq(c, seq);
+      if (!sp || sp->lost) continue;
+      uint64_t due = add_ns_saturating(sp->sent_ns, rto_ns);
+      if (now_ns >= due) {
+        lost_any = 1;
+        mark_packet_lost(c, sp, now_ns);
+        if (!c->active) return;
+        continue;
+      }
       if (next_retx_ns == 0 || due < next_retx_ns) next_retx_ns = due;
-      continue;
+      ep->sent_seq_queue[base + c->sent_seq_tail] = seq;
+      c->sent_seq_tail = (c->sent_seq_tail + 1u) % cap;
+      ++c->sent_seq_count;
     }
-    mark_packet_lost(c, sp);
-    if (!c->active) return;
   }
   c->next_retx_ns = next_retx_ns;
+  if (lost_any) {
+    /* 死活判定はパケット数ではなく「受信の無いまま経過した RTO ラウンド数」。
+       ラウンド毎に RTO を指数バックオフさせ再送洪水も抑える。
+       max_retransmits は「許容する再送ラウンド数」なので超過（>）で abort。 */
+    ++c->retx_rounds_since_rx;
+    if (c->rto_backoff < 6u) ++c->rto_backoff;
+    if (ep->cfg.max_retransmits > 0 &&
+        c->retx_rounds_since_rx > ep->cfg.max_retransmits) {
+      abort_conn_internal(c);
+    }
+  }
 }
 
 static void record_sent_packet(rudp_endpoint* ep, uint32_t batch_index, uint64_t now_ns) {
@@ -1692,7 +1849,7 @@ static void record_sent_packet(rudp_endpoint* ep, uint32_t batch_index, uint64_t
   sp->bytes = (uint16_t)ep->send_batch[batch_index].len;
   sp->ref_count = refs;
   track_reliable_seq(c, seq);
-  uint64_t due = deadline_after_ms(now_ns, ep->cfg.rto_ms);
+  uint64_t due = add_ns_saturating(now_ns, conn_rto_ns(c));
   if (c->next_retx_ns == 0 || due < c->next_retx_ns) c->next_retx_ns = due;
   for (uint16_t i = 0; i < refs; ++i) {
     uint32_t mi = ep->send_batch_refs[(size_t)batch_index * RUDP_MAX_REFS_PER_PACKET + i];
@@ -1701,6 +1858,7 @@ static void record_sent_packet(rudp_endpoint* ep, uint32_t batch_index, uint64_t
     rudp_msg* m = &ep->msgs[mi];
     if (!m->used) continue;
     ++m->inflight_refs;
+    m->carrier_seq = seq;
     uint8_t source = m->queued_kind;
     m->queued_kind = RUDP_QUEUE_NONE;
     add_u32_saturating(&c->inflight_bytes, m->len);
@@ -1807,15 +1965,54 @@ static uint32_t next_nonzero_packet_seq(rudp_conn* c) {
   return seq ? seq : 1u;
 }
 
+/* ACK bitmap は max_seq 相対 64bit しかないので、un-ACK の最古 seq から
+   RUDP_ACK_WINDOW 以上先の seq を発行すると受信側が SACK できず不要再送に
+   なる。reliable パケットの発行を SACK 幅以内にゲートして整合させる。 */
+#define RUDP_ACK_WINDOW 64u
+
+static int reliable_window_allows(rudp_conn* c, uint32_t candidate) {
+  rudp_endpoint* ep = c->ep;
+  if (ep->sent_seq_queue && c->sent_seq_count > 0) prune_sent_seq_queue(c);
+  uint32_t oldest = 0;
+  int have_oldest = 0;
+  if (ep->sent_seq_queue && c->sent_seq_count > 0) {
+    oldest = ep->sent_seq_queue[(size_t)c->index * ep->cfg.sent_packet_count +
+                                c->sent_seq_head];
+    have_oldest = 1;
+  } else if (c->batch_reliable_first_seq != 0) {
+    /* まだ record されていない同一 flush 内の発行分もウィンドウに数える。 */
+    oldest = c->batch_reliable_first_seq;
+    have_oldest = 1;
+  }
+  if (!have_oldest) return 1;
+  return (uint32_t)(candidate - oldest) < RUDP_ACK_WINDOW;
+}
+
 static int next_packet_seq(rudp_conn* c, int needs_tracking, uint32_t* out_seq) {
   if (!needs_tracking) {
+    if (c->ep->cfg.skip_unreliable_acks) {
+      /* unreliable 専用パケットは seq を消費しない（seq=0 で送る）。
+         seq 空間を reliable パケット専用にしないと、unreliable が seq を
+         先へ進めて reliable 同士の SACK bitmap 距離（raw seq 差）を引き
+         伸ばし、64 幅のウィンドウを押し流してしまう。 */
+      *out_seq = 0;
+      return 1;
+    }
+    /* skip_unreliable_acks=0 のモードでは unreliable も ACK/reorder 統計の
+       対象なので従来どおり seq を振る（このモードは SACK 窓の希釈と
+       引き換え）。 */
     *out_seq = next_nonzero_packet_seq(c);
     return 1;
+  }
+  {
+    uint32_t candidate = c->next_packet_seq ? c->next_packet_seq : 1u;
+    if (!reliable_window_allows(c, candidate)) return 0;
   }
   uint32_t tries = c->ep->cfg.sent_packet_count;
   while (tries-- > 0) {
     uint32_t seq = next_nonzero_packet_seq(c);
     if (sent_slot_available(c, seq)) {
+      if (c->batch_reliable_first_seq == 0) c->batch_reliable_first_seq = seq;
       *out_seq = seq;
       return 1;
     }
@@ -1829,6 +2026,9 @@ static int batch_packet_can_add_reliable(rudp_endpoint* ep, uint32_t batch_index
   if (!c) return 0;
   const uint8_t* pkt = ep->send_batch[batch_index].data;
   uint32_t seq = load_u32(pkt + 12);
+  /* seq=0（unreliable 専用）のパケットには reliable を相乗りさせない。
+     追跡 seq が無いので ACK/再送管理ができない。 */
+  if (seq == 0) return 0;
   return sent_slot_available(c, seq);
 }
 
@@ -1914,6 +2114,43 @@ static int conn_idle_expired(const rudp_conn* c, uint64_t now_ns) {
   return now_ns >= add_ns_saturating(c->last_rx_ns, idle_ns);
 }
 
+/* pacing トークンの補充。バーストは max(16*mtu, 10ms 分) まで。
+   無制限（UINT32_MAX）の間はトークンを満杯に保ち、loss で有限レートに
+   遷移した直後も 1 バースト分は即時送信できるようにする（0 から始めると
+   同一時刻内の再送がストールする）。 */
+static void refill_pace_tokens(rudp_conn* c, uint64_t now_ns) {
+  if (c->pacing_bps == UINT32_MAX) {
+    c->pace_tokens_bytes = UINT64_MAX;
+    c->pace_refill_ns = now_ns;
+    return;
+  }
+  uint64_t rate_bytes_per_sec = (uint64_t)c->pacing_bps / 8u;
+  uint64_t burst_cap = 16u * (uint64_t)c->ep->mtu;
+  uint64_t ten_ms_bytes = rate_bytes_per_sec / 100u;
+  if (ten_ms_bytes > burst_cap) burst_cap = ten_ms_bytes;
+  if (c->pace_tokens_bytes > burst_cap) c->pace_tokens_bytes = burst_cap;
+  if (c->pace_refill_ns == 0 || now_ns <= c->pace_refill_ns) {
+    c->pace_refill_ns = now_ns;
+    return;
+  }
+  uint64_t elapsed = now_ns - c->pace_refill_ns;
+  if (elapsed > RUDP_NS_PER_SEC) elapsed = RUDP_NS_PER_SEC;
+  c->pace_tokens_bytes += rate_bytes_per_sec * elapsed / RUDP_NS_PER_SEC;
+  if (c->pace_tokens_bytes > burst_cap) c->pace_tokens_bytes = burst_cap;
+  c->pace_refill_ns = now_ns;
+}
+
+static int pace_allows_send(const rudp_conn* c) {
+  if (c->pacing_bps == UINT32_MAX) return 1;
+  return c->pace_tokens_bytes >= (uint64_t)c->ep->mtu;
+}
+
+static void pace_consume(rudp_conn* c, uint64_t bytes) {
+  if (c->pacing_bps == UINT32_MAX) return;
+  c->pace_tokens_bytes =
+      c->pace_tokens_bytes > bytes ? c->pace_tokens_bytes - bytes : 0;
+}
+
 void rudp_endpoint_flush(rudp_endpoint* ep, uint64_t now_ns) {
   if (!ep) return;
   ep->now_ns = now_ns;
@@ -1927,11 +2164,14 @@ void rudp_endpoint_flush(rudp_endpoint* ep, uint64_t now_ns) {
     }
     service_retransmits(c, now_ns);
     if (!c->active) continue;
+    refill_pace_tokens(c, now_ns);
+    c->batch_reliable_first_seq = 0;
     uint32_t mi;
     uint8_t source = RUDP_QUEUE_NONE;
     uint32_t guard = ep->cfg.max_messages;
     int sent_data = 0;
     while (guard-- > 0) {
+      if (!pace_allows_send(c)) break;
       if (ep->send_count >= ep->cfg.send_batch_size &&
           !flush_send_batch(ep, now_ns)) {
         break;
@@ -1941,6 +2181,8 @@ void rudp_endpoint_flush(rudp_endpoint* ep, uint64_t now_ns) {
         requeue_unsent_msg(c, mi, source);
         break;
       }
+      pace_consume(c, (uint64_t)ep->msgs[mi].len +
+                          RUDP_DATA_FRAME_HEADER_BYTES);
       sent_data = 1;
     }
     if (!sent_data) append_ack_only(c, now_ns);
@@ -1955,9 +2197,19 @@ static rudp_conn* find_or_create_incoming_conn(rudp_endpoint* ep, uint64_t conn_
   if (c) {
     return addr_equal(&c->peer, peer) ? c : NULL;
   }
+  /* ハンドシェイク/cookie が無いので、spoof された conn_id での conn テーブル
+     枯渇はこのレート制限（cfg.max_incoming_conns_per_poll、0=無制限）と
+     idle timeout で緩和するのみ。 */
+  if (ep->cfg.max_incoming_conns_per_poll > 0 &&
+      ep->incoming_conns_this_poll >= ep->cfg.max_incoming_conns_per_poll) {
+    return NULL;
+  }
   for (uint32_t i = 0; i < ep->cfg.max_conns; ++i) {
     if (!ep->conns[i].active) {
-      if (create_conn_at(ep, i, peer, conn_id, &c) == 0) return c;
+      if (create_conn_at(ep, i, peer, conn_id, &c) == 0) {
+        ++ep->incoming_conns_this_poll;
+        return c;
+      }
       return NULL;
     }
   }
@@ -1965,31 +2217,32 @@ static rudp_conn* find_or_create_incoming_conn(rudp_endpoint* ep, uint64_t conn_
 }
 
 static int reliable_seen_lookup(rudp_conn* c, uint32_t msg_id) {
-  uint32_t bucket = (uint32_t)hash_conn_id(msg_id) & (RUDP_RX_SEEN_BUCKETS - 1u);
-  uint32_t base = bucket * RUDP_RX_SEEN_WAYS;
-  for (uint32_t way = 0; way < RUDP_RX_SEEN_WAYS; ++way) {
-    uint32_t idx = base + way;
-    if (c->rx_seen_used[idx] && c->rx_seen[idx] == msg_id) return 1;
+  if (msg_id == 0) return 0;
+  if (c->rx_dedup_max != 0 && seq32_after(c->rx_dedup_max, msg_id) &&
+      c->rx_dedup_max - msg_id >= RUDP_RX_DEDUP_WINDOW) {
+    /* ウィンドウより古い msg_id は判定できないので配信済み扱い（重複抑止）。
+       送信側の in-flight は msg pool で有界なので、正常系ではここまで古い
+       未配信 msg は到達しない。 */
+    return 1;
   }
-  return 0;
+  uint32_t block = msg_id >> 6u;
+  uint32_t w = block & (RUDP_RX_DEDUP_WORDS - 1u);
+  if (c->rx_dedup_block[w] != block) return 0;
+  return (c->rx_dedup_bits[w] & (1ull << (msg_id & 63u))) != 0;
 }
 
 static void reliable_mark_seen(rudp_conn* c, uint32_t msg_id) {
-  uint32_t bucket = (uint32_t)hash_conn_id(msg_id) & (RUDP_RX_SEEN_BUCKETS - 1u);
-  uint32_t base = bucket * RUDP_RX_SEEN_WAYS;
-  for (uint32_t way = 0; way < RUDP_RX_SEEN_WAYS; ++way) {
-    uint32_t idx = base + way;
-    if (c->rx_seen_used[idx] && c->rx_seen[idx] == msg_id) return;
-    if (!c->rx_seen_used[idx]) {
-      c->rx_seen_used[idx] = 1;
-      c->rx_seen[idx] = msg_id;
-      return;
-    }
+  if (msg_id == 0) return;
+  uint32_t block = msg_id >> 6u;
+  uint32_t w = block & (RUDP_RX_DEDUP_WORDS - 1u);
+  if (c->rx_dedup_block[w] != block) {
+    c->rx_dedup_block[w] = block;
+    c->rx_dedup_bits[w] = 0;
   }
-  uint32_t victim = base + c->rx_seen_next[bucket];
-  c->rx_seen_next[bucket] =
-      (uint8_t)((c->rx_seen_next[bucket] + 1u) % RUDP_RX_SEEN_WAYS);
-  c->rx_seen[victim] = msg_id;
+  c->rx_dedup_bits[w] |= 1ull << (msg_id & 63u);
+  if (c->rx_dedup_max == 0 || seq32_after(msg_id, c->rx_dedup_max)) {
+    c->rx_dedup_max = msg_id;
+  }
 }
 
 static int hold_ordered(rudp_conn* c, uint16_t flow_id, uint16_t channel_id,
@@ -2058,6 +2311,8 @@ static void drain_ordered(rudp_conn* c, uint16_t channel_id) {
 
 static void drain_all_ordered(rudp_conn* c) {
   if (!c) return;
+  /* hold が無ければ全チャネル走査をスキップ（recv 毎に呼ばれるホットパス）。 */
+  if (c->ep->ordered_hold_count == 0) return;
   for (uint32_t i = 0; i < c->ep->cfg.max_channels; ++i) {
     if (c->ep->recv_count >= c->ep->cfg.max_recv_events) return;
     drain_ordered(c, (uint16_t)i);
@@ -2253,12 +2508,15 @@ static int process_data_frame(rudp_conn* c, uint8_t flags, uint16_t flow_id,
 }
 
 static int validate_packet_frames(rudp_endpoint* ep, const uint8_t* p,
-                                  size_t off, size_t end) {
+                                  size_t off, size_t end, int allow_reliable) {
   while (off < end) {
     if (off + RUDP_DATA_FRAME_HEADER_BYTES > end) return 0;
     const uint8_t* f = p + off;
     uint8_t type = f[0];
     uint8_t flags = f[1];
+    /* seq=0 のパケット（unreliable 専用）に reliable フレームは載らない。
+       packet seq が無いと ACK/再送管理ができないため受信側でも弾く。 */
+    if (!allow_reliable && (flags & RUDP_F_RELIABLE)) return 0;
     uint16_t frame_header_len = load_u16(f + 2);
     uint16_t flow_id = load_u16(f + 4);
     uint16_t frame_payload_len = load_u16(f + 6);
@@ -2300,6 +2558,18 @@ static int validate_packet_frames(rudp_endpoint* ep, const uint8_t* p,
   return off == end;
 }
 
+int rudp_packet_precheck(const void* data, size_t len, uint16_t mtu,
+                         uint64_t* out_conn_id) {
+  const uint8_t* p = (const uint8_t*)data;
+  if (!p && len != 0) return 0;
+  if (len < RUDP_PACKET_HEADER_BYTES) return 0;
+  if (mtu != 0 && len > mtu) return 0;
+  if ((load_u32(p + 0) & RUDP_PACKET_MAGIC_MASK) != RUDP_PACKET_MAGIC) return 0;
+  if (load_u16(p + 28) != RUDP_PACKET_HEADER_BYTES) return 0;
+  if (out_conn_id) *out_conn_id = load_u64(p + 4);
+  return 1;
+}
+
 static void process_packet(rudp_endpoint* ep, const rudp_in_packet* in, uint64_t now_ns) {
   if (!in || !in->data || in->len > in->cap ||
       in->len < RUDP_PACKET_HEADER_BYTES || in->len > ep->mtu) {
@@ -2326,8 +2596,11 @@ static void process_packet(rudp_endpoint* ep, const rudp_in_packet* in, uint64_t
   int ack_only = (packet_flags & RUDP_PACKET_FLAG_ACK_ONLY) != 0;
   if (ack_only) {
     if (packet_seq != 0 || payload_len != 0) return;
-  } else if (packet_seq == 0 || payload_len == 0 ||
-             !validate_packet_frames(ep, p, off, end)) {
+  } else if (payload_len == 0 ||
+             !validate_packet_frames(ep, p, off, end,
+                                     /*allow_reliable=*/packet_seq != 0)) {
+    /* データパケットの packet_seq==0 は「unreliable 専用（ACK 不要）」を
+       意味するので、unreliable フレームのみなら許容する。 */
     return;
   }
 
@@ -2337,7 +2610,8 @@ static void process_packet(rudp_endpoint* ep, const rudp_in_packet* in, uint64_t
   if (ack_only && !addr_is_valid(&in->addr)) return;
   if (ack_only && !addr_equal(&c->peer, &in->addr)) return;
   c->last_rx_ns = now_ns;
-  c->retransmits_since_rx = 0;
+  c->retx_rounds_since_rx = 0;
+  c->rto_backoff = 0;
   if (ack_only) {
     if (ack_seq != 0) release_acked_packets(c, ack_seq, ack_bits, now_ns);
     return;
@@ -2396,6 +2670,7 @@ static void reset_recv_batch_slot(rudp_endpoint* ep, uint32_t i) {
 void rudp_endpoint_poll(rudp_endpoint* ep, uint64_t now_ns) {
   if (!ep) return;
   ep->now_ns = now_ns;
+  ep->incoming_conns_this_poll = 0;
   expire_reassembly(ep, now_ns);
   int n = ep->cfg.socket.recv_batch(ep->cfg.socket.user, ep->recv_batch,
                                     ep->cfg.recv_batch_size);

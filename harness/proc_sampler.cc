@@ -39,6 +39,7 @@ void ProcSampler::begin() {
   cpu_samples_ = 0;
   rss_mb_max_ = 0;
   rss_samples_ = 0;
+  measure_ended_ = false;
   sample_rss();
 }
 
@@ -53,13 +54,27 @@ void ProcSampler::mark_measure_begin() {
   cpu_pct_peak_ = 0.0;
 }
 
+void ProcSampler::mark_measure_end() {
+  // §5.1: 計測窓をトラフィック終了時刻で閉じる。tail 区間のポーリングは
+  // 続いても、以降の sample_*()/end() は集計を更新しない（no-op）ので、
+  // 無トラフィック区間が cpu_pct の分母/rss max に混入しない。
+  if (measure_ended_) return;
+  sample_cpu();  // 最後の部分インターバルを peak に反映
+  sample_rss();
+  t1_ = std::chrono::steady_clock::now();
+  cpu_us_end_ = cpu_us_now();
+  measure_ended_ = true;
+}
+
 void ProcSampler::sample_rss() {
+  if (measure_ended_) return;  // §5.1: 窓 close 後は凍結
   uint64_t now = rss_kb_now() / 1024;
   if (now > rss_mb_max_) rss_mb_max_ = now;
   ++rss_samples_;
 }
 
 void ProcSampler::sample_cpu() {
+  if (measure_ended_) return;  // §5.1: 窓 close 後は凍結
   auto now_t = std::chrono::steady_clock::now();
   uint64_t now_cpu = cpu_us_now();
   uint64_t wall_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -75,11 +90,14 @@ void ProcSampler::sample_cpu() {
 }
 
 void ProcSampler::end() {
+  // §5.1: mark_measure_end() で既に窓が閉じていれば何もしない。
+  if (measure_ended_) return;
   // Capture the final partial interval before closing the window.
   sample_cpu();
   t1_ = std::chrono::steady_clock::now();
   cpu_us_end_ = cpu_us_now();
   sample_rss();
+  measure_ended_ = true;
 }
 
 double ProcSampler::cpu_pct() const {
