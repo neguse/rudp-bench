@@ -18,7 +18,7 @@ trap 'rm -rf "$WORK"' EXIT
 # ビルド(既にあれば no-op)
 cmake -S "$ROOT/servers/enet" -B "$ROOT/build-v2-enet" >/dev/null
 cmake --build "$ROOT/build-v2-enet" -j >/dev/null
-go build -o "$WORK/orchestrator" "$ROOT/orchestrator/cmd/orchestrator" >/dev/null
+go build -o "$ROOT/build-v2-go/orchestrator" "$ROOT/orchestrator/cmd/orchestrator" >/dev/null
 
 run_once() {
   local duration="$1" out="$2" port="$3"
@@ -43,7 +43,7 @@ run_once() {
   "output_dir": "$out"
 }
 EOF
-  "$WORK/orchestrator" run -config "$out/config.json" >/dev/null
+  "$ROOT/build-v2-go/orchestrator" run -config "$out/config.json" >/dev/null
 }
 
 run_once "$DUR_SHORT" "$WORK/short" 42911
