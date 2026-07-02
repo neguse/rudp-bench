@@ -1,7 +1,8 @@
 # rudp-bench v2 設計 — idiomatic server 方式によるゼロベース再構築
 
 - 作成日: 2026-07-02
-- 状態: レビュー済み(ユーザー + Codex 第二意見を反映)・実装可
+- 状態: v2.0 完了 — benchspec/benchkit は version 1 として**凍結済み**。
+  以後は量産フェーズ(必須セット残り: gns, litenetlib, websocket)
 - 前提: [v1 設計](2026-04-28-rudp-bench-design.md) の後継。要素は流用するが構造はゼロベース。
   この repo 内で v2 ツリーを育て、移植完了後に v1 を削除する
 

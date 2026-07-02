@@ -112,6 +112,25 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 			return finishRunResult(result, GateInput{ExtraReasons: extraReasons, NetemEnabled: true}, resultPath, summaryPath)
 		}
 		defer teardownNetem(teardown)
+
+		// netem 実効値 gate(校正 §3): ping/iperf3 を実際に流し、実測の
+		// RTT/loss が設定と一致することをベンチ開始前に機械検証する。
+		// tc の echo back だけでは「設定はあるが実効が違う」型を検出できない。
+		if !cfg.NetemGateOff {
+			gateReport, err := netops.RunNetemGate(runCtx, pair)
+			result.Netem.Gate = &gateReport
+			if err != nil {
+				extraReasons = append(extraReasons, fmt.Sprintf("netem gate tooling failed: %v", err))
+				return finishRunResult(result, GateInput{ExtraReasons: extraReasons, NetemEnabled: true}, resultPath, summaryPath)
+			}
+			if !gateReport.OK() {
+				for _, f := range gateReport.Failures {
+					extraReasons = append(extraReasons, "netem gate: "+f)
+				}
+				return finishRunResult(result, GateInput{ExtraReasons: extraReasons, NetemEnabled: true}, resultPath, summaryPath)
+			}
+		}
+
 		before, err := readNetnsUDPStats(runCtx, pair.ClientNS)
 		if err != nil {
 			extraReasons = append(extraReasons, fmt.Sprintf("read client netns UDP counters before run: %v", err))

@@ -49,4 +49,6 @@ type NetemResult struct {
 	UDPBefore        netops.UDPStats  `json:"udp_before,omitempty"`
 	UDPAfter         netops.UDPStats  `json:"udp_after,omitempty"`
 	UDPDelta         netops.UDPStats  `json:"udp_delta,omitempty"`
+
+	Gate *netops.NetemGateReport `json:"gate,omitempty"`
 }

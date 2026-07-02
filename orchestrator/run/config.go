@@ -110,6 +110,7 @@ type RunConfig struct {
 	DeadlineNS         uint64        `json:"deadline_ns"`
 	StalenessPeriodNS  uint64        `json:"staleness_period_ns"`
 	Netem              *NetemRegime  `json:"netem,omitempty"`
+	NetemGateOff       bool          `json:"netem_gate_off,omitempty"`
 	OutputDir          string        `json:"output_dir"`
 	AttemptedThreshold float64       `json:"attempted_threshold,omitempty"`
 	ControlTimeout     Duration      `json:"control_timeout,omitempty"`

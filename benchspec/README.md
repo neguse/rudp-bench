@@ -3,7 +3,9 @@
 言語非依存の契約仕様。server / client / orchestrator の実装はすべてこの文書に従う。
 設計の背景と根拠は [v2 design spec](../docs/superpowers/specs/2026-07-02-rudp-bench-v2-design.md) 参照。
 
-- version: 1(v2.0 完了時に凍結。それまでは draft)
+- version: 1(**凍結済み**。v2.0 完了条件 — 校正5本 green・v1 突き合わせ・
+  縮小 broadcast 検証 — を満たして確定。以後の変更は version を上げ、
+  全実装・orchestrator を同時に移行する)
 
 ## 用語
 

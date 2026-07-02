@@ -143,3 +143,32 @@ func TestParseGemodelEchoBack(t *testing.T) {
 		t.Fatalf("validate: %v", err)
 	}
 }
+
+func TestParsePingAvgMS(t *testing.T) {
+	out := `20 packets transmitted, 20 received, 0% packet loss, time 1928ms
+rtt min/avg/max/mdev = 50.062/51.244/60.310/2.216 ms`
+	avg, err := netops.ParsePingAvgMS(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if avg != 51.244 {
+		t.Fatalf("avg = %g, want 51.244", avg)
+	}
+}
+
+func TestParseIperfLossPct(t *testing.T) {
+	ok := `{"end":{"sum":{"lost_percent":1.0416666666666667}}}`
+	loss, err := netops.ParseIperfLossPct(ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loss < 1.04 || loss > 1.05 {
+		t.Fatalf("loss = %g", loss)
+	}
+	if _, err := netops.ParseIperfLossPct(`{"error":"unable to connect"}`); err == nil {
+		t.Fatal("want error for iperf3 error json")
+	}
+	if _, err := netops.ParseIperfLossPct(`{"end":{"sum":{}}}`); err == nil {
+		t.Fatal("want error for missing lost_percent")
+	}
+}

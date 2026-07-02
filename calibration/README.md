@@ -9,8 +9,8 @@
 |---|---|---|---|
 | 1 | 会計零点(null) | `benchkit/tests/test_metrics_zero.c` | ctest(CI 常設) |
 | 2 | 既知故障注入(fault_inject) | `benchkit/tests/test_fault_inject.c` | ctest(CI 常設) |
-| 3 | netem 実効値検証(ping/iperf3) | 未実装(netns 実行と同時に整備) | pre-run gate、要 sudo |
-| 4 | 必達会計(TCP 系参加者) | 未実装(magiconion 移植後) | canonical 内で兼務 |
+| 3 | netem 実効値検証(ping/iperf3) | `orchestrator/netops/gate.go`(netem 付き run で自動実施。`netem_gate_off` で無効化可) | pre-run gate、要 sudo |
+| 4 | 必達会計(TCP 系参加者) | magiconion の must-deliver が loss 下で delivery 1.000(loss 平面で実測) | canonical 内で兼務 |
 | 5 | duration 不変性 | [`duration_invariance.sh`](duration_invariance.sh) | CI 常設(loopback) |
 
 CI は [`.github/workflows/v2.yml`](../.github/workflows/v2.yml)。
