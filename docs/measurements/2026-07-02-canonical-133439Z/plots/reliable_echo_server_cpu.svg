@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" font-family="sans-serif" font-size="11">
+  <text x="342" y="18" text-anchor="middle" font-size="14" font-weight="bold">reliable_echo: server CPU vs connections</text>
+  <rect x="65" y="35" width="555" height="275" fill="white" stroke="#ccc"/>
+  <line x1="65" y1="308.7" x2="620.0" y2="308.7" stroke="#ddd" stroke-width="1"/>
+  <text x="60" y="311.7" text-anchor="end" font-size="9" fill="#333">0</text>
+  <line x1="65" y1="236.4" x2="620.0" y2="236.4" stroke="#ddd" stroke-width="1"/>
+  <text x="60" y="239.4" text-anchor="end" font-size="9" fill="#333">50</text>
+  <line x1="65" y1="164.1" x2="620.0" y2="164.1" stroke="#ddd" stroke-width="1"/>
+  <text x="60" y="167.1" text-anchor="end" font-size="9" fill="#333">100</text>
+  <line x1="65" y1="91.9" x2="620.0" y2="91.9" stroke="#ddd" stroke-width="1"/>
+  <text x="60" y="94.9" text-anchor="end" font-size="9" fill="#333">150</text>
+  <line x1="65.0" y1="35" x2="65.0" y2="310.0" stroke="#ddd" stroke-width="1"/>
+  <text x="65.0" y="324.0" text-anchor="middle" font-size="9" fill="#333">0</text>
+  <line x1="157.5" y1="35" x2="157.5" y2="310.0" stroke="#ddd" stroke-width="1"/>
+  <text x="157.5" y="324.0" text-anchor="middle" font-size="9" fill="#333">500</text>
+  <line x1="250.0" y1="35" x2="250.0" y2="310.0" stroke="#ddd" stroke-width="1"/>
+  <text x="250.0" y="324.0" text-anchor="middle" font-size="9" fill="#333">1000</text>
+  <line x1="342.5" y1="35" x2="342.5" y2="310.0" stroke="#ddd" stroke-width="1"/>
+  <text x="342.5" y="324.0" text-anchor="middle" font-size="9" fill="#333">1500</text>
+  <line x1="435.0" y1="35" x2="435.0" y2="310.0" stroke="#ddd" stroke-width="1"/>
+  <text x="435.0" y="324.0" text-anchor="middle" font-size="9" fill="#333">2000</text>
+  <line x1="527.5" y1="35" x2="527.5" y2="310.0" stroke="#ddd" stroke-width="1"/>
+  <text x="527.5" y="324.0" text-anchor="middle" font-size="9" fill="#333">2500</text>
+  <line x1="620.0" y1="35" x2="620.0" y2="310.0" stroke="#ddd" stroke-width="1"/>
+  <text x="620.0" y="324.0" text-anchor="middle" font-size="9" fill="#333">3000</text>
+  <text x="342" y="340" text-anchor="middle" font-size="11" fill="#333">connections</text>
+  <text x="14" y="172" text-anchor="middle" font-size="11" fill="#333" transform="rotate(-90,14,172)">median server CPU %</text>
+  <polyline points="65.2,293.3 74.2,291.8 102.0,290.1 176.0,286.0 250.0,281.9 342.5,276.3 435.0,271.3 620.0,258.3" fill="none" stroke="#1f77b4" stroke-width="1.8"/>
+  <circle cx="65.2" cy="293.3" r="3" fill="#1f77b4"><title>apex_rudp: 10.68 at 1 connections</title></circle>
+  <circle cx="74.2" cy="291.8" r="3" fill="#1f77b4"><title>apex_rudp: 11.68 at 50 connections</title></circle>
+  <circle cx="102.0" cy="290.1" r="3" fill="#1f77b4"><title>apex_rudp: 12.85 at 200 connections</title></circle>
+  <circle cx="176.0" cy="286.0" r="3" fill="#1f77b4"><title>apex_rudp: 15.68 at 600 connections</title></circle>
+  <circle cx="250.0" cy="281.9" r="3" fill="#1f77b4"><title>apex_rudp: 18.56 at 1000 connections</title></circle>
+  <circle cx="342.5" cy="276.3" r="3" fill="#1f77b4"><title>apex_rudp: 22.4 at 1500 connections</title></circle>
+  <circle cx="435.0" cy="271.3" r="3" fill="#1f77b4"><title>apex_rudp: 25.88 at 2000 connections</title></circle>
+  <circle cx="620.0" cy="258.3" r="3" fill="#1f77b4"><title>apex_rudp: 34.87 at 3000 connections</title></circle>
+  <polyline points="65.2,295.0 74.2,292.9 102.0,282.2 176.0,272.6" fill="none" stroke="#ff7f0e" stroke-width="1.8"/>
+  <circle cx="65.2" cy="295.0" r="3" fill="#ff7f0e"><title>coop_rudp: 9.47 at 1 connections</title></circle>
+  <circle cx="74.2" cy="292.9" r="3" fill="#ff7f0e"><title>coop_rudp: 10.9 at 50 connections</title></circle>
+  <circle cx="102.0" cy="282.2" r="3" fill="#ff7f0e"><title>coop_rudp: 18.35 at 200 connections</title></circle>
+  <circle cx="176.0" cy="272.6" r="3" fill="#ff7f0e"><title>coop_rudp: 24.94 at 600 connections</title></circle>
+  <polyline points="65.2,293.7 74.2,284.3 102.0,251.1 176.0,170.7 250.0,169.3 342.5,170.4" fill="none" stroke="#2ca02c" stroke-width="1.8"/>
+  <circle cx="65.2" cy="293.7" r="3" fill="#2ca02c"><title>enet: 10.38 at 1 connections</title></circle>
+  <circle cx="74.2" cy="284.3" r="3" fill="#2ca02c"><title>enet: 16.9 at 50 connections</title></circle>
+  <circle cx="102.0" cy="251.1" r="3" fill="#2ca02c"><title>enet: 39.85 at 200 connections</title></circle>
+  <circle cx="176.0" cy="170.7" r="3" fill="#2ca02c"><title>enet: 95.46 at 600 connections</title></circle>
+  <circle cx="250.0" cy="169.3" r="3" fill="#2ca02c"><title>enet: 96.46 at 1000 connections</title></circle>
+  <circle cx="342.5" cy="170.4" r="3" fill="#2ca02c"><title>enet: 95.69 at 1500 connections</title></circle>
+  <polyline points="65.2,295.1 74.2,283.1 102.0,249.3 176.0,169.6 250.0,131.7 342.5,103.6 435.0,85.1 620.0,64.4" fill="none" stroke="#d62728" stroke-width="1.8"/>
+  <circle cx="65.2" cy="295.1" r="3" fill="#d62728"><title>gns: 9.4 at 1 connections</title></circle>
+  <circle cx="74.2" cy="283.1" r="3" fill="#d62728"><title>gns: 17.69 at 50 connections</title></circle>
+  <circle cx="102.0" cy="249.3" r="3" fill="#d62728"><title>gns: 41.12 at 200 connections</title></circle>
+  <circle cx="176.0" cy="169.6" r="3" fill="#d62728"><title>gns: 96.24 at 600 connections</title></circle>
+  <circle cx="250.0" cy="131.7" r="3" fill="#d62728"><title>gns: 122.43 at 1000 connections</title></circle>
+  <circle cx="342.5" cy="103.6" r="3" fill="#d62728"><title>gns: 141.87 at 1500 connections</title></circle>
+  <circle cx="435.0" cy="85.1" r="3" fill="#d62728"><title>gns: 154.67 at 2000 connections</title></circle>
+  <circle cx="620.0" cy="64.4" r="3" fill="#d62728"><title>gns: 168.98 at 3000 connections</title></circle>
+  <polyline points="65.2,295.2 74.2,291.9 102.0,279.2 176.0,222.5 250.0,168.5 342.5,172.0" fill="none" stroke="#9467bd" stroke-width="1.8"/>
+  <circle cx="65.2" cy="295.2" r="3" fill="#9467bd"><title>kcp: 9.34 at 1 connections</title></circle>
+  <circle cx="74.2" cy="291.9" r="3" fill="#9467bd"><title>kcp: 11.65 at 50 connections</title></circle>
+  <circle cx="102.0" cy="279.2" r="3" fill="#9467bd"><title>kcp: 20.44 at 200 connections</title></circle>
+  <circle cx="176.0" cy="222.5" r="3" fill="#9467bd"><title>kcp: 59.64 at 600 connections</title></circle>
+  <circle cx="250.0" cy="168.5" r="3" fill="#9467bd"><title>kcp: 96.97 at 1000 connections</title></circle>
+  <circle cx="342.5" cy="172.0" r="3" fill="#9467bd"><title>kcp: 94.54 at 1500 connections</title></circle>
+  <polyline points="65.2,293.1 74.2,283.8 102.0,258.3 176.0,182.1 250.0,101.0 342.5,75.9 435.0,64.2 620.0,47.5" fill="none" stroke="#8c564b" stroke-width="1.8"/>
+  <circle cx="65.2" cy="293.1" r="3" fill="#8c564b"><title>litenetlib: 10.76 at 1 connections</title></circle>
+  <circle cx="74.2" cy="283.8" r="3" fill="#8c564b"><title>litenetlib: 17.23 at 50 connections</title></circle>
+  <circle cx="102.0" cy="258.3" r="3" fill="#8c564b"><title>litenetlib: 34.85 at 200 connections</title></circle>
+  <circle cx="176.0" cy="182.1" r="3" fill="#8c564b"><title>litenetlib: 87.58 at 600 connections</title></circle>
+  <circle cx="250.0" cy="101.0" r="3" fill="#8c564b"><title>litenetlib: 143.66 at 1000 connections</title></circle>
+  <circle cx="342.5" cy="75.9" r="3" fill="#8c564b"><title>litenetlib: 161.06 at 1500 connections</title></circle>
+  <circle cx="435.0" cy="64.2" r="3" fill="#8c564b"><title>litenetlib: 169.11 at 2000 connections</title></circle>
+  <circle cx="620.0" cy="47.5" r="3" fill="#8c564b"><title>litenetlib: 180.68 at 3000 connections</title></circle>
+  <polyline points="65.2,294.3 74.2,287.4 102.0,265.1 176.0,197.5 250.0,167.1 342.5,167.4 435.0,166.7 620.0,168.4" fill="none" stroke="#e377c2" stroke-width="1.8"/>
+  <circle cx="65.2" cy="294.3" r="3" fill="#e377c2"><title>lsquic: 9.93 at 1 connections</title></circle>
+  <circle cx="74.2" cy="287.4" r="3" fill="#e377c2"><title>lsquic: 14.74 at 50 connections</title></circle>
+  <circle cx="102.0" cy="265.1" r="3" fill="#e377c2"><title>lsquic: 30.15 at 200 connections</title></circle>
+  <circle cx="176.0" cy="197.5" r="3" fill="#e377c2"><title>lsquic: 76.92 at 600 connections</title></circle>
+  <circle cx="250.0" cy="167.1" r="3" fill="#e377c2"><title>lsquic: 97.92 at 1000 connections</title></circle>
+  <circle cx="342.5" cy="167.4" r="3" fill="#e377c2"><title>lsquic: 97.72 at 1500 connections</title></circle>
+  <circle cx="435.0" cy="166.7" r="3" fill="#e377c2"><title>lsquic: 98.21 at 2000 connections</title></circle>
+  <circle cx="620.0" cy="168.4" r="3" fill="#e377c2"><title>lsquic: 97.07 at 3000 connections</title></circle>
+  <polyline points="65.2,295.9 74.2,288.4 102.0,252.9 176.0,166.9" fill="none" stroke="#7f7f7f" stroke-width="1.8"/>
+  <circle cx="65.2" cy="295.9" r="3" fill="#7f7f7f"><title>mini_rudp: 8.83 at 1 connections</title></circle>
+  <circle cx="74.2" cy="288.4" r="3" fill="#7f7f7f"><title>mini_rudp: 14.06 at 50 connections</title></circle>
+  <circle cx="102.0" cy="252.9" r="3" fill="#7f7f7f"><title>mini_rudp: 38.58 at 200 connections</title></circle>
+  <circle cx="176.0" cy="166.9" r="3" fill="#7f7f7f"><title>mini_rudp: 98.09 at 600 connections</title></circle>
+  <polyline points="65.2,297.5 74.2,269.6 102.0,185.2 176.0,111.6 250.0,108.5" fill="none" stroke="#bcbd22" stroke-width="1.8"/>
+  <circle cx="65.2" cy="297.5" r="3" fill="#bcbd22"><title>msquic: 7.75 at 1 connections</title></circle>
+  <circle cx="74.2" cy="269.6" r="3" fill="#bcbd22"><title>msquic: 27.05 at 50 connections</title></circle>
+  <circle cx="102.0" cy="185.2" r="3" fill="#bcbd22"><title>msquic: 85.46 at 200 connections</title></circle>
+  <circle cx="176.0" cy="111.6" r="3" fill="#bcbd22"><title>msquic: 136.32 at 600 connections</title></circle>
+  <circle cx="250.0" cy="108.5" r="3" fill="#bcbd22"><title>msquic: 138.51 at 1000 connections</title></circle>
+  <polyline points="65.2,291.8 74.2,191.7 102.0,165.8 176.0,166.1 250.0,165.7" fill="none" stroke="#17becf" stroke-width="1.8"/>
+  <circle cx="65.2" cy="291.8" r="3" fill="#17becf"><title>quiche: 11.67 at 1 connections</title></circle>
+  <circle cx="74.2" cy="191.7" r="3" fill="#17becf"><title>quiche: 80.93 at 50 connections</title></circle>
+  <circle cx="102.0" cy="165.8" r="3" fill="#17becf"><title>quiche: 98.83 at 200 connections</title></circle>
+  <circle cx="176.0" cy="166.1" r="3" fill="#17becf"><title>quiche: 98.63 at 600 connections</title></circle>
+  <circle cx="250.0" cy="165.7" r="3" fill="#17becf"><title>quiche: 98.92 at 1000 connections</title></circle>
+  <polyline points="65.2,295.6 74.2,277.2 102.0,224.1 176.0,144.1 250.0,137.9 342.5,139.2 435.0,135.9" fill="none" stroke="#aec7e8" stroke-width="1.8"/>
+  <circle cx="65.2" cy="295.6" r="3" fill="#aec7e8"><title>raknet: 9.08 at 1 connections</title></circle>
+  <circle cx="74.2" cy="277.2" r="3" fill="#aec7e8"><title>raknet: 21.8 at 50 connections</title></circle>
+  <circle cx="102.0" cy="224.1" r="3" fill="#aec7e8"><title>raknet: 58.55 at 200 connections</title></circle>
+  <circle cx="176.0" cy="144.1" r="3" fill="#aec7e8"><title>raknet: 113.89 at 600 connections</title></circle>
+  <circle cx="250.0" cy="137.9" r="3" fill="#aec7e8"><title>raknet: 118.18 at 1000 connections</title></circle>
+  <circle cx="342.5" cy="139.2" r="3" fill="#aec7e8"><title>raknet: 117.27 at 1500 connections</title></circle>
+  <circle cx="435.0" cy="135.9" r="3" fill="#aec7e8"><title>raknet: 119.54 at 2000 connections</title></circle>
+  <polyline points="65.2,295.6 74.2,277.4 102.0,222.0 176.0,149.1 250.0,141.9 342.5,138.9 435.0,136.1 620.0,112.0" fill="none" stroke="#ffbb78" stroke-width="1.8"/>
+  <circle cx="65.2" cy="295.6" r="3" fill="#ffbb78"><title>slikenet: 9.04 at 1 connections</title></circle>
+  <circle cx="74.2" cy="277.4" r="3" fill="#ffbb78"><title>slikenet: 21.63 at 50 connections</title></circle>
+  <circle cx="102.0" cy="222.0" r="3" fill="#ffbb78"><title>slikenet: 59.95 at 200 connections</title></circle>
+  <circle cx="176.0" cy="149.1" r="3" fill="#ffbb78"><title>slikenet: 110.38 at 600 connections</title></circle>
+  <circle cx="250.0" cy="141.9" r="3" fill="#ffbb78"><title>slikenet: 115.4 at 1000 connections</title></circle>
+  <circle cx="342.5" cy="138.9" r="3" fill="#ffbb78"><title>slikenet: 117.48 at 1500 connections</title></circle>
+  <circle cx="435.0" cy="136.1" r="3" fill="#ffbb78"><title>slikenet: 119.38 at 2000 connections</title></circle>
+  <circle cx="620.0" cy="112.0" r="3" fill="#ffbb78"><title>slikenet: 136.06 at 3000 connections</title></circle>
+  <polyline points="65.2,288.4 74.2,251.1" fill="none" stroke="#98df8a" stroke-width="1.8"/>
+  <circle cx="65.2" cy="288.4" r="3" fill="#98df8a"><title>udt4: 14.07 at 1 connections</title></circle>
+  <circle cx="74.2" cy="251.1" r="3" fill="#98df8a"><title>udt4: 39.83 at 50 connections</title></circle>
+  <polyline points="65.2,293.1 74.2,280.7" fill="none" stroke="#ff9896" stroke-width="1.8"/>
+  <circle cx="65.2" cy="293.1" r="3" fill="#ff9896"><title>yojimbo: 10.77 at 1 connections</title></circle>
+  <circle cx="74.2" cy="280.7" r="3" fill="#ff9896"><title>yojimbo: 19.36 at 50 connections</title></circle>
+  <rect x="65" y="347" width="12" height="10" fill="#1f77b4" rx="1"/>  <text x="81" y="355" font-size="9">apex_rudp</text>
+  <rect x="342" y="347" width="12" height="10" fill="#ff7f0e" rx="1"/>  <text x="358" y="355" font-size="9">coop_rudp</text>
+  <rect x="65" y="363" width="12" height="10" fill="#2ca02c" rx="1"/>  <text x="81" y="371" font-size="9">enet</text>
+  <rect x="342" y="363" width="12" height="10" fill="#d62728" rx="1"/>  <text x="358" y="371" font-size="9">gns</text>
+  <rect x="65" y="379" width="12" height="10" fill="#9467bd" rx="1"/>  <text x="81" y="387" font-size="9">kcp</text>
+  <rect x="342" y="379" width="12" height="10" fill="#8c564b" rx="1"/>  <text x="358" y="387" font-size="9">litenetlib</text>
+  <rect x="65" y="395" width="12" height="10" fill="#e377c2" rx="1"/>  <text x="81" y="403" font-size="9">lsquic</text>
+  <rect x="342" y="395" width="12" height="10" fill="#7f7f7f" rx="1"/>  <text x="358" y="403" font-size="9">mini_rudp</text>
+  <rect x="65" y="411" width="12" height="10" fill="#bcbd22" rx="1"/>  <text x="81" y="419" font-size="9">msquic</text>
+  <rect x="342" y="411" width="12" height="10" fill="#17becf" rx="1"/>  <text x="358" y="419" font-size="9">quiche</text>
+  <rect x="65" y="427" width="12" height="10" fill="#aec7e8" rx="1"/>  <text x="81" y="435" font-size="9">raknet</text>
+  <rect x="342" y="427" width="12" height="10" fill="#ffbb78" rx="1"/>  <text x="358" y="435" font-size="9">slikenet</text>
+  <rect x="65" y="443" width="12" height="10" fill="#98df8a" rx="1"/>  <text x="81" y="451" font-size="9">udt4</text>
+  <rect x="342" y="443" width="12" height="10" fill="#ff9896" rx="1"/>  <text x="358" y="451" font-size="9">yojimbo</text>
+</svg>

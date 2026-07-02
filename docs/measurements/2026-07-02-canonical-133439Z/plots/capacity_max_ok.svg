@@ -1,0 +1,199 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 820" font-family="sans-serif" font-size="11">
+  <text x="130" y="26" font-size="13" font-weight="bold">media_relay: max OK connections</text>
+  <line x1="130.0" y1="34.0" x2="130.0" y2="190.0" stroke="#ddd" stroke-width="1"/>
+  <text x="130.0" y="202.0" text-anchor="middle" font-size="9" fill="#666">0</text>
+  <line x1="285.4" y1="34.0" x2="285.4" y2="190.0" stroke="#ddd" stroke-width="1"/>
+  <text x="285.4" y="202.0" text-anchor="middle" font-size="9" fill="#666">50</text>
+  <line x1="440.7" y1="34.0" x2="440.7" y2="190.0" stroke="#ddd" stroke-width="1"/>
+  <text x="440.7" y="202.0" text-anchor="middle" font-size="9" fill="#666">100</text>
+  <line x1="596.1" y1="34.0" x2="596.1" y2="190.0" stroke="#ddd" stroke-width="1"/>
+  <text x="596.1" y="202.0" text-anchor="middle" font-size="9" fill="#666">150</text>
+  <text x="124" y="43.6" text-anchor="end" font-size="10">apex_rudp</text>
+  <text x="139.3" y="43.6" font-size="9">below_gate</text>
+  <text x="124" y="54.7" text-anchor="end" font-size="10">coop_rudp</text>
+  <rect x="130" y="47.1" width="466.1" height="7.1" fill="#ff7f0e" rx="2"><title>coop_rudp: 150 (media_relay)</title></rect>
+  <text x="605.4" y="54.7" font-size="9">150</text>
+  <text x="124" y="65.9" text-anchor="end" font-size="10">enet</text>
+  <rect x="130" y="58.3" width="155.4" height="7.1" fill="#2ca02c" rx="2"><title>enet: 50 (media_relay)</title></rect>
+  <text x="294.7" y="65.9" font-size="9">50</text>
+  <text x="124" y="77.0" text-anchor="end" font-size="10">gns</text>
+  <rect x="130" y="69.4" width="155.4" height="7.1" fill="#d62728" rx="2"><title>gns: 50 (media_relay)</title></rect>
+  <text x="294.7" y="77.0" font-size="9">50</text>
+  <text x="124" y="88.1" text-anchor="end" font-size="10">kcp</text>
+  <rect x="130" y="80.6" width="155.4" height="7.1" fill="#9467bd" rx="2"><title>kcp: 50 (media_relay)</title></rect>
+  <text x="294.7" y="88.1" font-size="9">50</text>
+  <text x="124" y="99.3" text-anchor="end" font-size="10">litenetlib</text>
+  <rect x="130" y="91.7" width="155.4" height="7.1" fill="#8c564b" rx="2"><title>litenetlib: 50 (media_relay)</title></rect>
+  <text x="294.7" y="99.3" font-size="9">50</text>
+  <text x="124" y="110.4" text-anchor="end" font-size="10">lsquic</text>
+  <rect x="130" y="102.9" width="15.5" height="7.1" fill="#e377c2" rx="2"><title>lsquic: 5 (media_relay)</title></rect>
+  <text x="154.9" y="110.4" font-size="9">5</text>
+  <text x="124" y="121.6" text-anchor="end" font-size="10">mini_rudp</text>
+  <rect x="130" y="114.0" width="155.4" height="7.1" fill="#7f7f7f" rx="2"><title>mini_rudp: 50 (media_relay)</title></rect>
+  <text x="294.7" y="121.6" font-size="9">50</text>
+  <text x="124" y="132.7" text-anchor="end" font-size="10">msquic</text>
+  <rect x="130" y="125.1" width="15.5" height="7.1" fill="#bcbd22" rx="2"><title>msquic: 5 (media_relay)</title></rect>
+  <text x="154.9" y="132.7" font-size="9">5</text>
+  <text x="124" y="143.9" text-anchor="end" font-size="10">quiche</text>
+  <rect x="130" y="136.3" width="15.5" height="7.1" fill="#17becf" rx="2"><title>quiche: 5 (media_relay)</title></rect>
+  <text x="154.9" y="143.9" font-size="9">5</text>
+  <text x="124" y="155.0" text-anchor="end" font-size="10">raknet</text>
+  <rect x="130" y="147.4" width="15.5" height="7.1" fill="#aec7e8" rx="2"><title>raknet: 5 (media_relay)</title></rect>
+  <text x="154.9" y="155.0" font-size="9">5</text>
+  <text x="124" y="166.1" text-anchor="end" font-size="10">slikenet</text>
+  <rect x="130" y="158.6" width="15.5" height="7.1" fill="#ffbb78" rx="2"><title>slikenet: 5 (media_relay)</title></rect>
+  <text x="154.9" y="166.1" font-size="9">5</text>
+  <text x="124" y="177.3" text-anchor="end" font-size="10">udt4</text>
+  <text x="139.3" y="177.3" font-size="9">unsupported</text>
+  <text x="124" y="188.4" text-anchor="end" font-size="10">yojimbo</text>
+  <rect x="130" y="180.9" width="15.5" height="7.1" fill="#ff9896" rx="2"><title>yojimbo: 5 (media_relay)</title></rect>
+  <text x="154.9" y="188.4" font-size="9">5</text>
+  <text x="130" y="226" font-size="13" font-weight="bold">game_server: max OK connections</text>
+  <line x1="130.0" y1="234.0" x2="130.0" y2="390.0" stroke="#ddd" stroke-width="1"/>
+  <text x="130.0" y="402.0" text-anchor="middle" font-size="9" fill="#666">0</text>
+  <line x1="312.1" y1="234.0" x2="312.1" y2="390.0" stroke="#ddd" stroke-width="1"/>
+  <text x="312.1" y="402.0" text-anchor="middle" font-size="9" fill="#666">50</text>
+  <line x1="494.1" y1="234.0" x2="494.1" y2="390.0" stroke="#ddd" stroke-width="1"/>
+  <text x="494.1" y="402.0" text-anchor="middle" font-size="9" fill="#666">100</text>
+  <text x="124" y="243.6" text-anchor="end" font-size="10">apex_rudp</text>
+  <text x="139.3" y="243.6" font-size="9">below_gate</text>
+  <text x="124" y="254.7" text-anchor="end" font-size="10">coop_rudp</text>
+  <rect x="130" y="247.1" width="18.2" height="7.1" fill="#ff7f0e" rx="2"><title>coop_rudp: 5 (game_server)</title></rect>
+  <text x="157.5" y="254.7" font-size="9">5</text>
+  <text x="124" y="265.9" text-anchor="end" font-size="10">enet</text>
+  <rect x="130" y="258.3" width="233.1" height="7.1" fill="#2ca02c" rx="2"><title>enet: 64 (game_server)</title></rect>
+  <text x="372.4" y="265.9" font-size="9">64</text>
+  <text x="124" y="277.0" text-anchor="end" font-size="10">gns</text>
+  <rect x="130" y="269.4" width="349.6" height="7.1" fill="#d62728" rx="2"><title>gns: 96 (game_server)</title></rect>
+  <text x="488.9" y="277.0" font-size="9">96</text>
+  <text x="124" y="288.1" text-anchor="end" font-size="10">kcp</text>
+  <rect x="130" y="280.6" width="233.1" height="7.1" fill="#9467bd" rx="2"><title>kcp: 64 (game_server)</title></rect>
+  <text x="372.4" y="288.1" font-size="9">64</text>
+  <text x="124" y="299.3" text-anchor="end" font-size="10">litenetlib</text>
+  <rect x="130" y="291.7" width="466.1" height="7.1" fill="#8c564b" rx="2"><title>litenetlib: 128 (game_server)</title></rect>
+  <text x="605.4" y="299.3" font-size="9">128</text>
+  <text x="124" y="310.4" text-anchor="end" font-size="10">lsquic</text>
+  <rect x="130" y="302.9" width="18.2" height="7.1" fill="#e377c2" rx="2"><title>lsquic: 5 (game_server)</title></rect>
+  <text x="157.5" y="310.4" font-size="9">5</text>
+  <text x="124" y="321.6" text-anchor="end" font-size="10">mini_rudp</text>
+  <rect x="130" y="314.0" width="18.2" height="7.1" fill="#7f7f7f" rx="2"><title>mini_rudp: 5 (game_server)</title></rect>
+  <text x="157.5" y="321.6" font-size="9">5</text>
+  <text x="124" y="332.7" text-anchor="end" font-size="10">msquic</text>
+  <rect x="130" y="325.1" width="349.6" height="7.1" fill="#bcbd22" rx="2"><title>msquic: 96 (game_server)</title></rect>
+  <text x="488.9" y="332.7" font-size="9">96</text>
+  <text x="124" y="343.9" text-anchor="end" font-size="10">quiche</text>
+  <rect x="130" y="336.3" width="466.1" height="7.1" fill="#17becf" rx="2"><title>quiche: 128 (game_server)</title></rect>
+  <text x="605.4" y="343.9" font-size="9">128</text>
+  <text x="124" y="355.0" text-anchor="end" font-size="10">raknet</text>
+  <rect x="130" y="347.4" width="18.2" height="7.1" fill="#aec7e8" rx="2"><title>raknet: 5 (game_server)</title></rect>
+  <text x="157.5" y="355.0" font-size="9">5</text>
+  <text x="124" y="366.1" text-anchor="end" font-size="10">slikenet</text>
+  <rect x="130" y="358.6" width="233.1" height="7.1" fill="#ffbb78" rx="2"><title>slikenet: 64 (game_server)</title></rect>
+  <text x="372.4" y="366.1" font-size="9">64</text>
+  <text x="124" y="377.3" text-anchor="end" font-size="10">udt4</text>
+  <text x="139.3" y="377.3" font-size="9">unsupported</text>
+  <text x="124" y="388.4" text-anchor="end" font-size="10">yojimbo</text>
+  <rect x="130" y="380.9" width="233.1" height="7.1" fill="#ff9896" rx="2"><title>yojimbo: 64 (game_server)</title></rect>
+  <text x="372.4" y="388.4" font-size="9">64</text>
+  <text x="130" y="426" font-size="13" font-weight="bold">reliable_echo: max OK connections</text>
+  <line x1="130.0" y1="434.0" x2="130.0" y2="590.0" stroke="#ddd" stroke-width="1"/>
+  <text x="130.0" y="602.0" text-anchor="middle" font-size="9" fill="#666">0</text>
+  <line x1="285.4" y1="434.0" x2="285.4" y2="590.0" stroke="#ddd" stroke-width="1"/>
+  <text x="285.4" y="602.0" text-anchor="middle" font-size="9" fill="#666">1000</text>
+  <line x1="440.7" y1="434.0" x2="440.7" y2="590.0" stroke="#ddd" stroke-width="1"/>
+  <text x="440.7" y="602.0" text-anchor="middle" font-size="9" fill="#666">2000</text>
+  <line x1="596.1" y1="434.0" x2="596.1" y2="590.0" stroke="#ddd" stroke-width="1"/>
+  <text x="596.1" y="602.0" text-anchor="middle" font-size="9" fill="#666">3000</text>
+  <text x="124" y="443.6" text-anchor="end" font-size="10">apex_rudp</text>
+  <rect x="130" y="436.0" width="466.1" height="7.1" fill="#1f77b4" rx="2"><title>apex_rudp: 3000 (reliable_echo)</title></rect>
+  <text x="605.4" y="443.6" font-size="9">3000</text>
+  <text x="124" y="454.7" text-anchor="end" font-size="10">coop_rudp</text>
+  <rect x="130" y="447.1" width="93.2" height="7.1" fill="#ff7f0e" rx="2"><title>coop_rudp: 600 (reliable_echo)</title></rect>
+  <text x="232.5" y="454.7" font-size="9">600</text>
+  <text x="124" y="465.9" text-anchor="end" font-size="10">enet</text>
+  <rect x="130" y="458.3" width="155.4" height="7.1" fill="#2ca02c" rx="2"><title>enet: 1000 (reliable_echo)</title></rect>
+  <text x="294.7" y="465.9" font-size="9">1000</text>
+  <text x="124" y="477.0" text-anchor="end" font-size="10">gns</text>
+  <rect x="130" y="469.4" width="466.1" height="7.1" fill="#d62728" rx="2"><title>gns: 3000 (reliable_echo)</title></rect>
+  <text x="605.4" y="477.0" font-size="9">3000</text>
+  <text x="124" y="488.1" text-anchor="end" font-size="10">kcp</text>
+  <rect x="130" y="480.6" width="155.4" height="7.1" fill="#9467bd" rx="2"><title>kcp: 1000 (reliable_echo)</title></rect>
+  <text x="294.7" y="488.1" font-size="9">1000</text>
+  <text x="124" y="499.3" text-anchor="end" font-size="10">litenetlib</text>
+  <rect x="130" y="491.7" width="466.1" height="7.1" fill="#8c564b" rx="2"><title>litenetlib: 3000 (reliable_echo)</title></rect>
+  <text x="605.4" y="499.3" font-size="9">3000</text>
+  <text x="124" y="510.4" text-anchor="end" font-size="10">lsquic</text>
+  <rect x="130" y="502.9" width="310.7" height="7.1" fill="#e377c2" rx="2"><title>lsquic: 2000 (reliable_echo)</title></rect>
+  <text x="450.1" y="510.4" font-size="9">2000</text>
+  <text x="124" y="521.6" text-anchor="end" font-size="10">mini_rudp</text>
+  <rect x="130" y="514.0" width="93.2" height="7.1" fill="#7f7f7f" rx="2"><title>mini_rudp: 600 (reliable_echo)</title></rect>
+  <text x="232.5" y="521.6" font-size="9">600</text>
+  <text x="124" y="532.7" text-anchor="end" font-size="10">msquic</text>
+  <rect x="130" y="525.1" width="155.4" height="7.1" fill="#bcbd22" rx="2"><title>msquic: 1000 (reliable_echo)</title></rect>
+  <text x="294.7" y="532.7" font-size="9">1000</text>
+  <text x="124" y="543.9" text-anchor="end" font-size="10">quiche</text>
+  <rect x="130" y="536.3" width="93.2" height="7.1" fill="#17becf" rx="2"><title>quiche: 600 (reliable_echo)</title></rect>
+  <text x="232.5" y="543.9" font-size="9">600</text>
+  <text x="124" y="555.0" text-anchor="end" font-size="10">raknet</text>
+  <rect x="130" y="547.4" width="310.7" height="7.1" fill="#aec7e8" rx="2"><title>raknet: 2000 (reliable_echo)</title></rect>
+  <text x="450.1" y="555.0" font-size="9">2000</text>
+  <text x="124" y="566.1" text-anchor="end" font-size="10">slikenet</text>
+  <rect x="130" y="558.6" width="310.7" height="7.1" fill="#ffbb78" rx="2"><title>slikenet: 2000 (reliable_echo)</title></rect>
+  <text x="450.1" y="566.1" font-size="9">2000</text>
+  <text x="124" y="577.3" text-anchor="end" font-size="10">udt4</text>
+  <rect x="130" y="569.7" width="0.2" height="7.1" fill="#98df8a" rx="2"><title>udt4: 1 (reliable_echo)</title></rect>
+  <text x="139.5" y="577.3" font-size="9">1</text>
+  <text x="124" y="588.4" text-anchor="end" font-size="10">yojimbo</text>
+  <rect x="130" y="580.9" width="7.8" height="7.1" fill="#ff9896" rx="2"><title>yojimbo: 50 (reliable_echo)</title></rect>
+  <text x="147.1" y="588.4" font-size="9">50</text>
+  <text x="130" y="626" font-size="13" font-weight="bold">echo: max OK connections</text>
+  <line x1="130.0" y1="634.0" x2="130.0" y2="790.0" stroke="#ddd" stroke-width="1"/>
+  <text x="130.0" y="802.0" text-anchor="middle" font-size="9" fill="#666">0</text>
+  <line x1="285.4" y1="634.0" x2="285.4" y2="790.0" stroke="#ddd" stroke-width="1"/>
+  <text x="285.4" y="802.0" text-anchor="middle" font-size="9" fill="#666">1000</text>
+  <line x1="440.7" y1="634.0" x2="440.7" y2="790.0" stroke="#ddd" stroke-width="1"/>
+  <text x="440.7" y="802.0" text-anchor="middle" font-size="9" fill="#666">2000</text>
+  <line x1="596.1" y1="634.0" x2="596.1" y2="790.0" stroke="#ddd" stroke-width="1"/>
+  <text x="596.1" y="802.0" text-anchor="middle" font-size="9" fill="#666">3000</text>
+  <text x="124" y="643.6" text-anchor="end" font-size="10">apex_rudp</text>
+  <rect x="130" y="636.0" width="466.1" height="7.1" fill="#1f77b4" rx="2"><title>apex_rudp: 3000 (echo)</title></rect>
+  <text x="605.4" y="643.6" font-size="9">3000</text>
+  <text x="124" y="654.7" text-anchor="end" font-size="10">coop_rudp</text>
+  <rect x="130" y="647.1" width="93.2" height="7.1" fill="#ff7f0e" rx="2"><title>coop_rudp: 600 (echo)</title></rect>
+  <text x="232.5" y="654.7" font-size="9">600</text>
+  <text x="124" y="665.9" text-anchor="end" font-size="10">enet</text>
+  <rect x="130" y="658.3" width="93.2" height="7.1" fill="#2ca02c" rx="2"><title>enet: 600 (echo)</title></rect>
+  <text x="232.5" y="665.9" font-size="9">600</text>
+  <text x="124" y="677.0" text-anchor="end" font-size="10">gns</text>
+  <rect x="130" y="669.4" width="233.1" height="7.1" fill="#d62728" rx="2"><title>gns: 1500 (echo)</title></rect>
+  <text x="372.4" y="677.0" font-size="9">1500</text>
+  <text x="124" y="688.1" text-anchor="end" font-size="10">kcp</text>
+  <rect x="130" y="680.6" width="31.1" height="7.1" fill="#9467bd" rx="2"><title>kcp: 200 (echo)</title></rect>
+  <text x="170.4" y="688.1" font-size="9">200</text>
+  <text x="124" y="699.3" text-anchor="end" font-size="10">litenetlib</text>
+  <rect x="130" y="691.7" width="310.7" height="7.1" fill="#8c564b" rx="2"><title>litenetlib: 2000 (echo)</title></rect>
+  <text x="450.1" y="699.3" font-size="9">2000</text>
+  <text x="124" y="710.4" text-anchor="end" font-size="10">lsquic</text>
+  <rect x="130" y="702.9" width="93.2" height="7.1" fill="#e377c2" rx="2"><title>lsquic: 600 (echo)</title></rect>
+  <text x="232.5" y="710.4" font-size="9">600</text>
+  <text x="124" y="721.6" text-anchor="end" font-size="10">mini_rudp</text>
+  <rect x="130" y="714.0" width="31.1" height="7.1" fill="#7f7f7f" rx="2"><title>mini_rudp: 200 (echo)</title></rect>
+  <text x="170.4" y="721.6" font-size="9">200</text>
+  <text x="124" y="732.7" text-anchor="end" font-size="10">msquic</text>
+  <rect x="130" y="725.1" width="233.1" height="7.1" fill="#bcbd22" rx="2"><title>msquic: 1500 (echo)</title></rect>
+  <text x="372.4" y="732.7" font-size="9">1500</text>
+  <text x="124" y="743.9" text-anchor="end" font-size="10">quiche</text>
+  <rect x="130" y="736.3" width="31.1" height="7.1" fill="#17becf" rx="2"><title>quiche: 200 (echo)</title></rect>
+  <text x="170.4" y="743.9" font-size="9">200</text>
+  <text x="124" y="755.0" text-anchor="end" font-size="10">raknet</text>
+  <rect x="130" y="747.4" width="155.4" height="7.1" fill="#aec7e8" rx="2"><title>raknet: 1000 (echo)</title></rect>
+  <text x="294.7" y="755.0" font-size="9">1000</text>
+  <text x="124" y="766.1" text-anchor="end" font-size="10">slikenet</text>
+  <rect x="130" y="758.6" width="31.1" height="7.1" fill="#ffbb78" rx="2"><title>slikenet: 200 (echo)</title></rect>
+  <text x="170.4" y="766.1" font-size="9">200</text>
+  <text x="124" y="777.3" text-anchor="end" font-size="10">udt4</text>
+  <text x="139.3" y="777.3" font-size="9">unsupported</text>
+  <text x="124" y="788.4" text-anchor="end" font-size="10">yojimbo</text>
+  <rect x="130" y="780.9" width="7.8" height="7.1" fill="#ff9896" rx="2"><title>yojimbo: 50 (echo)</title></rect>
+  <text x="147.1" y="788.4" font-size="9">50</text>
+</svg>
