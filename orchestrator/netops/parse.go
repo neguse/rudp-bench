@@ -15,12 +15,14 @@ type QdiscStats struct {
 	DelayMS     float64
 	JitterMS    float64
 	LossPercent float64
-	Rate        string
-	SentBytes   uint64
-	SentPackets uint64
-	Dropped     uint64
-	Overlimits  uint64
-	Requeues    uint64
+	// gemodel 検出時のみ非ゼロ: p/(p+r) と 1/r から再構成した値
+	LossBurstLen float64
+	Rate         string
+	SentBytes    uint64
+	SentPackets  uint64
+	Dropped      uint64
+	Overlimits   uint64
+	Requeues     uint64
 }
 
 var sentLineRE = regexp.MustCompile(`Sent\s+(\d+)\s+bytes\s+(\d+)\s+pkt\s+\(dropped\s+(\d+),\s+overlimits\s+(\d+)\s+requeues\s+(\d+)\)`)
@@ -80,7 +82,15 @@ func ValidateNetemEcho(expected Netem, actual QdiscStats) error {
 	if !closeFloat(actual.JitterMS, float64(expected.JitterMS)) {
 		return fmt.Errorf("netem jitter_ms = %g, want %d", actual.JitterMS, expected.JitterMS)
 	}
-	if !closeFloat(actual.LossPercent, expected.LossPercent) {
+	if expected.LossBurstLen > 0 {
+		// tc は百分率を丸めて表示するため、再構成値は相対誤差で比較する
+		if !closeRelative(actual.LossPercent, expected.LossPercent, 0.1) {
+			return fmt.Errorf("netem gemodel loss = %g%%, want %g%%", actual.LossPercent, expected.LossPercent)
+		}
+		if !closeRelative(actual.LossBurstLen, expected.LossBurstLen, 0.1) {
+			return fmt.Errorf("netem gemodel burst_len = %g, want %g", actual.LossBurstLen, expected.LossBurstLen)
+		}
+	} else if !closeFloat(actual.LossPercent, expected.LossPercent) {
 		return fmt.Errorf("netem loss_percent = %g, want %g", actual.LossPercent, expected.LossPercent)
 	}
 	if expected.Rate != "" && !strings.EqualFold(actual.Rate, expected.Rate) {
@@ -104,10 +114,37 @@ func parseQdiscFields(fields []string, stat *QdiscStats) {
 				stat.JitterMS, _ = parseTCMS(fields[i+2])
 			}
 		case "loss":
-			for j := i + 1; j < len(fields); j++ {
-				if strings.HasSuffix(fields[j], "%") {
-					stat.LossPercent, _ = strconv.ParseFloat(strings.TrimSuffix(fields[j], "%"), 64)
-					break
+			if i+1 < len(fields) && fields[i+1] == "gemodel" {
+				// 形式: loss gemodel p 0.25% r 25% 1-h 100% 1-k 0%
+				var p, r float64
+				for j := i + 2; j+1 < len(fields); j += 2 {
+					label := fields[j]
+					if label != "p" && label != "r" && label != "1-h" && label != "1-k" {
+						break
+					}
+					v, err := strconv.ParseFloat(strings.TrimSuffix(fields[j+1], "%"), 64)
+					if err != nil {
+						break
+					}
+					switch label {
+					case "p":
+						p = v
+					case "r":
+						r = v
+					}
+				}
+				if p+r > 0 {
+					stat.LossPercent = p / (p + r) * 100.0
+				}
+				if r > 0 {
+					stat.LossBurstLen = 100.0 / r
+				}
+			} else {
+				for j := i + 1; j < len(fields); j++ {
+					if strings.HasSuffix(fields[j], "%") {
+						stat.LossPercent, _ = strconv.ParseFloat(strings.TrimSuffix(fields[j], "%"), 64)
+						break
+					}
 				}
 			}
 		case "rate":
@@ -160,6 +197,13 @@ func parseTCMS(s string) (float64, error) {
 
 func closeFloat(a, b float64) bool {
 	return math.Abs(a-b) < 0.000001
+}
+
+func closeRelative(a, b, tol float64) bool {
+	if b == 0 {
+		return math.Abs(a) < tol
+	}
+	return math.Abs(a-b)/math.Abs(b) <= tol
 }
 
 type UDPStats struct {

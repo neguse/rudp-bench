@@ -111,3 +111,35 @@ Udp: 110 2 9 210 7 0 0 0 0
 		t.Fatalf("delta = %+v", delta)
 	}
 }
+
+func TestNetemGemodelArgs(t *testing.T) {
+	n := netops.Netem{DelayMS: 25, JitterMS: 2, LossPercent: 1, LossBurstLen: 4}
+	args, err := n.Args()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(args, " ")
+	// loss 1% / burst 4 → r = 25%, p = 1·0.25/0.99 ≈ 0.2525%
+	want := "limit 10000 delay 25ms 2ms distribution normal loss gemodel 0.2525% 25% 100% 0%"
+	if got != want {
+		t.Fatalf("args = %q, want %q", got, want)
+	}
+}
+
+func TestParseGemodelEchoBack(t *testing.T) {
+	out := `qdisc netem 8001: root refcnt 2 limit 10000 delay 25ms  2ms loss gemodel p 0.2525% r 25% 1-h 100% 1-k 0%
+ Sent 1000 bytes 10 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 0b 0p requeues 0
+`
+	stats, err := netops.ParseQdiscShow(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats) != 1 {
+		t.Fatalf("stats = %d, want 1", len(stats))
+	}
+	expected := netops.Netem{DelayMS: 25, JitterMS: 2, LossPercent: 1, LossBurstLen: 4, Limit: 10000}
+	if err := netops.ValidateNetemEcho(expected, stats[0]); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+}

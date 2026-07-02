@@ -1,6 +1,7 @@
 package netops
 
 import (
+	"math"
 	"bytes"
 	"context"
 	"fmt"
@@ -31,8 +32,31 @@ type Netem struct {
 	DelayMS     int     `json:"delay_ms,omitempty"`
 	JitterMS    int     `json:"jitter_ms,omitempty"`
 	LossPercent float64 `json:"loss_pct,omitempty"`
-	Rate        string  `json:"rate,omitempty"`
-	Limit       int     `json:"limit,omitempty"`
+	// LossBurstLen > 0 のとき、単純ランダム loss ではなく Gilbert-Elliott
+	// (netem gemodel)を使う。LossPercent = 平均 loss 率、LossBurstLen =
+	// 平均バースト長(packets)。2状態モデル(bad 状態で必ず loss)で
+	// r = 1/burst_len、p = loss·r/(1−loss) から遷移確率を逆算する。
+	LossBurstLen float64 `json:"loss_burst_len,omitempty"`
+	Rate         string  `json:"rate,omitempty"`
+	Limit        int     `json:"limit,omitempty"`
+}
+
+// gemodelParams は (平均 loss 率, 平均バースト長) から Gilbert-Elliott の
+// 遷移確率 p(good→bad), r(bad→good) をパーセントで返す。
+func (n Netem) gemodelParams() (p, r float64, err error) {
+	loss := n.LossPercent / 100.0
+	if loss <= 0 || loss >= 1 {
+		return 0, 0, fmt.Errorf("gemodel requires 0 < loss_pct < 100, got %g", n.LossPercent)
+	}
+	if n.LossBurstLen < 1 {
+		return 0, 0, fmt.Errorf("loss_burst_len must be >= 1, got %g", n.LossBurstLen)
+	}
+	r = 1.0 / n.LossBurstLen
+	p = loss * r / (1.0 - loss)
+	if p >= 1 {
+		return 0, 0, fmt.Errorf("loss_pct %g with burst_len %g is infeasible (p >= 1)", n.LossPercent, n.LossBurstLen)
+	}
+	return p * 100.0, r * 100.0, nil
 }
 
 func (n Netem) Enabled() bool {
@@ -64,7 +88,21 @@ func (n Netem) Args() ([]string, error) {
 		}
 	}
 	if n.LossPercent != 0 {
-		args = append(args, "loss", formatPercent(n.LossPercent)+"%")
+		if n.LossBurstLen > 0 {
+			p, r, err := n.gemodelParams()
+			if err != nil {
+				return nil, err
+			}
+			// 1-h=100%(bad 状態で必ず loss)、1-k=0%(good 状態で loss なし)を明示。
+			// tc に渡す桁は 1e-4 % で丸める(echo back 検証は相対 10% 許容)
+			roundPct := func(v float64) string {
+				return strconv.FormatFloat(math.Round(v*1e4)/1e4, 'f', -1, 64)
+			}
+			args = append(args, "loss", "gemodel",
+				roundPct(p)+"%", roundPct(r)+"%", "100%", "0%")
+		} else {
+			args = append(args, "loss", formatPercent(n.LossPercent)+"%")
+		}
 	}
 	if n.Rate != "" {
 		args = append(args, "rate", n.Rate)
