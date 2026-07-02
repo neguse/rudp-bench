@@ -56,6 +56,16 @@ type Server struct {
 	mu     sync.Mutex
 	nextID int
 	conns  map[int]net.Conn
+
+	serverReadyOnce sync.Once
+	serverReadyCh   chan struct{}
+}
+
+// ServerReady は role=server の参加者から ready を受信した時点で close される。
+// runner は server の listen 完了を待ってから client 群を起動する
+// (起動が遅い server に client が先に接続を試みて即死するレースの防止)。
+func (s *Server) ServerReady() <-chan struct{} {
+	return s.serverReadyCh
 }
 
 func NewServer(cfg Config) (*Server, error) {
@@ -74,10 +84,11 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("listen control socket: %w", err)
 	}
 	return &Server{
-		cfg:          cfg,
-		ln:           ln,
-		removeSocket: true,
-		conns:        make(map[int]net.Conn),
+		cfg:           cfg,
+		ln:            ln,
+		removeSocket:  true,
+		conns:         make(map[int]net.Conn),
+		serverReadyCh: make(chan struct{}),
 	}, nil
 }
 
@@ -87,9 +98,10 @@ func newServerWithListener(cfg Config, ln net.Listener) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		cfg:   cfg,
-		ln:    ln,
-		conns: make(map[int]net.Conn),
+		cfg:           cfg,
+		ln:            ln,
+		conns:         make(map[int]net.Conn),
+		serverReadyCh: make(chan struct{}),
 	}, nil
 }
 
@@ -187,6 +199,11 @@ func (s *Server) Run(ctx context.Context) (*Result, error) {
 			}
 			if err := state.apply(ev); err != nil {
 				return state.result(), err
+			}
+			if ev.kind == eventReady {
+				if p := state.participants[ev.connID]; p != nil && p.Hello.Role == "server" {
+					s.serverReadyOnce.Do(func() { close(s.serverReadyCh) })
+				}
 			}
 			for {
 				next, err := s.advanceStageIfReady(state, stage, timer)

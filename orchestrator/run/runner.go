@@ -163,6 +163,27 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		extraReasons = append(extraReasons, fmt.Sprintf("start server: %v", err))
 	}
 
+	// server の listen 完了(control 上の ready)を待ってから client を起動する。
+	// 起動の遅い server(cert 生成・ランタイム初期化)に client が先に接続を
+	// 試みると、接続失敗 → 早期 exit → barrier abort の連鎖で run 全体が落ちる。
+	waitsConsumed := 0
+	if startedOK {
+		select {
+		case <-ctrl.ServerReady():
+		case <-runCtx.Done():
+			startedOK = false
+			extraReasons = append(extraReasons, "canceled while waiting for server ready")
+		case ev := <-waitCh:
+			applyWaitEvent(ev, result.Processes)
+			waitsConsumed++
+			startedOK = false
+			extraReasons = append(extraReasons, "server exited before becoming ready")
+		case <-time.After(cfg.ControlTimeout.Duration):
+			startedOK = false
+			extraReasons = append(extraReasons, "server did not become ready before control timeout")
+		}
+	}
+
 	connSplit := splitConns(cfg.TotalConns, cfg.ClientProcs)
 	originStart := 0
 	clientMetricPaths := make([]string, 0, cfg.ClientProcs)
@@ -199,7 +220,7 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 
 	if !startedOK {
 		cancelRun()
-		drainWaits(waitCh, len(handles), cfg.ProcessExitTimeout.Duration, result.Processes)
+		drainWaits(waitCh, len(handles)-waitsConsumed, cfg.ProcessExitTimeout.Duration, result.Processes)
 		controlResult := awaitControl(controlCh, cfg.ControlTimeout.Duration)
 		result.Control = controlResult.result
 		if controlResult.err != nil && !errors.Is(controlResult.err, context.Canceled) {
@@ -234,7 +255,7 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		sampleCh <- sampleEvent{series: series, err: err}
 	}()
 
-	remaining := len(handles)
+	remaining := len(handles) - waitsConsumed
 	controlDone := false
 	for !controlDone {
 		select {
