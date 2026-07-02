@@ -11,3 +11,4 @@ __pycache__/
 # .NET build artifacts
 adapters/litenetlib/bin/
 adapters/litenetlib/obj/
+results-v2/
