@@ -67,7 +67,7 @@ public sealed class BenchMetrics
         public ulong SchedTsNs;
     }
 
-    private readonly record struct SeenKey(uint OriginId, byte ClassIndex, ulong Seq);
+    private readonly record struct SeenKey(uint LocalIndex, uint OriginId, byte ClassIndex, ulong Seq);
 
     private sealed class ClassMetrics
     {
@@ -127,7 +127,9 @@ public sealed class BenchMetrics
         }
     }
 
-    public void OnRecv(BenchHeader header, ulong recvTsNs)
+    // localIndex は受信した自 proc 内 conn の 0 起点 index(benchspec: 重複判定は
+    // (受信側 local conn, origin, class, seq) — broadcast の複製を duplicate にしない)
+    public void OnRecv(uint localIndex, BenchHeader header, ulong recvTsNs)
     {
         if ((header.Flags & BenchConstants.FlagMeasure) == 0)
         {
@@ -137,7 +139,7 @@ public sealed class BenchMetrics
 
         rawRecvMeasured++;
         var classIndex = (byte)BenchConstants.ClassIndexFromFlags(header.Flags);
-        if (!seen.Add(new SeenKey(header.OriginId, classIndex, header.Seq)))
+        if (!seen.Add(new SeenKey(localIndex, header.OriginId, classIndex, header.Seq)))
         {
             classes[classIndex].Counts.Duplicates++;
             return;

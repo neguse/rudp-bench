@@ -27,6 +27,7 @@ typedef struct {
 typedef struct {
   uint64_t seq;
   uint32_t origin_id;
+  uint32_t local_index;  // 受信側 local conn。broadcast の複製と重複を区別する
   uint8_t class_index;
   bool used;
 } bk_seen_key;
@@ -61,17 +62,19 @@ static uint64_t hash_mix_u64(uint64_t x) {
   return x;
 }
 
-static uint64_t seen_hash(uint32_t origin_id, uint8_t class_index,
-                          uint64_t seq) {
+static uint64_t seen_hash(uint32_t local_index, uint32_t origin_id,
+                          uint8_t class_index, uint64_t seq) {
   uint64_t x = seq;
   x ^= (uint64_t)origin_id * 0x9e3779b185ebca87ull;
+  x ^= (uint64_t)local_index * 0xc2b2ae3d27d4eb4full;
   x ^= (uint64_t)class_index << 56u;
   return hash_mix_u64(x);
 }
 
-static bool key_equal(const bk_seen_key *k, uint32_t origin_id,
-                      uint8_t class_index, uint64_t seq) {
-  return k->used && k->origin_id == origin_id && k->class_index == class_index &&
+static bool key_equal(const bk_seen_key *k, uint32_t local_index,
+                      uint32_t origin_id, uint8_t class_index, uint64_t seq) {
+  return k->used && k->local_index == local_index &&
+         k->origin_id == origin_id && k->class_index == class_index &&
          k->seq == seq;
 }
 
@@ -91,8 +94,8 @@ static int seen_rehash(bk_metrics *m, size_t new_cap) {
     if (!old[i].used) {
       continue;
     }
-    const uint64_t h =
-        seen_hash(old[i].origin_id, old[i].class_index, old[i].seq);
+    const uint64_t h = seen_hash(old[i].local_index, old[i].origin_id,
+                                 old[i].class_index, old[i].seq);
     size_t pos = (size_t)h & (m->seen_cap - 1u);
     while (m->seen[pos].used) {
       pos = (pos + 1u) & (m->seen_cap - 1u);
@@ -104,18 +107,19 @@ static int seen_rehash(bk_metrics *m, size_t new_cap) {
   return 0;
 }
 
-static int seen_insert_new(bk_metrics *m, uint32_t origin_id,
-                           uint8_t class_index, uint64_t seq, bool *is_new) {
+static int seen_insert_new(bk_metrics *m, uint32_t local_index,
+                           uint32_t origin_id, uint8_t class_index,
+                           uint64_t seq, bool *is_new) {
   if ((m->seen_len + 1u) * 10u >= m->seen_cap * 7u) {
     if (seen_rehash(m, m->seen_cap * 2u) != 0) {
       return -1;
     }
   }
 
-  const uint64_t h = seen_hash(origin_id, class_index, seq);
+  const uint64_t h = seen_hash(local_index, origin_id, class_index, seq);
   size_t pos = (size_t)h & (m->seen_cap - 1u);
   while (m->seen[pos].used) {
-    if (key_equal(&m->seen[pos], origin_id, class_index, seq)) {
+    if (key_equal(&m->seen[pos], local_index, origin_id, class_index, seq)) {
       *is_new = false;
       return 0;
     }
@@ -123,6 +127,7 @@ static int seen_insert_new(bk_metrics *m, uint32_t origin_id,
   }
 
   m->seen[pos].used = true;
+  m->seen[pos].local_index = local_index;
   m->seen[pos].origin_id = origin_id;
   m->seen[pos].class_index = class_index;
   m->seen[pos].seq = seq;
@@ -271,7 +276,8 @@ void bk_metrics_on_slot(bk_metrics *m, const bk_header *h, bool submitted) {
   }
 }
 
-void bk_metrics_on_recv(bk_metrics *m, const bk_header *h, uint64_t recv_ts_ns) {
+void bk_metrics_on_recv(bk_metrics *m, uint32_t local_index,
+                        const bk_header *h, uint64_t recv_ts_ns) {
   if (m == NULL || h == NULL) {
     return;
   }
@@ -283,7 +289,8 @@ void bk_metrics_on_recv(bk_metrics *m, const bk_header *h, uint64_t recv_ts_ns) 
   m->raw_recv_measured++;
   const uint8_t class_index = (uint8_t)bk_class_index_from_flags(h->flags);
   bool is_new = false;
-  if (seen_insert_new(m, h->origin_id, class_index, h->seq, &is_new) != 0) {
+  if (seen_insert_new(m, local_index, h->origin_id, class_index, h->seq,
+                      &is_new) != 0) {
     return;
   }
   if (!is_new) {

@@ -30,6 +30,8 @@ typedef struct {
   uint32_t origin_base;
   double rate_lt;
   double rate_md;
+  bool broadcast_lt;
+  bool broadcast_md;
   size_t payload_size;
   uint64_t deadline_ns;
   uint64_t staleness_period_ns;
@@ -39,6 +41,7 @@ typedef struct {
   ENetPeer *peer;
   bk_plan *plan;
   uint32_t origin_id;
+  uint32_t local_index;  // 自 proc 内 0 起点(重複判定の受信側キー)
   bool connected;
 } client_conn;
 
@@ -181,6 +184,14 @@ static int parse_args(int argc, char **argv, client_config *cfg) {
       have_rate_md = parse_rate(argv[++i], &cfg->rate_md) == 0;
       continue;
     }
+    if (strcmp(argv[i], "--broadcast-lt") == 0) {
+      cfg->broadcast_lt = true;
+      continue;
+    }
+    if (strcmp(argv[i], "--broadcast-md") == 0) {
+      cfg->broadcast_md = true;
+      continue;
+    }
     if (strcmp(argv[i], "--payload") == 0 && i + 1 < argc) {
       have_payload = parse_size(argv[++i], &cfg->payload_size) == 0 &&
                      cfg->payload_size >= BK_MIN_PAYLOAD &&
@@ -244,7 +255,7 @@ static int build_streams(const client_config *cfg, bk_stream *streams,
     }
     streams[n++] = (bk_stream){
         .must_deliver = false,
-        .broadcast = false,
+        .broadcast = cfg->broadcast_lt,
         .interval_ns = interval_ns,
     };
   }
@@ -254,7 +265,7 @@ static int build_streams(const client_config *cfg, bk_stream *streams,
     }
     streams[n++] = (bk_stream){
         .must_deliver = true,
-        .broadcast = false,
+        .broadcast = cfg->broadcast_md,
         .interval_ns = interval_ns,
     };
   }
@@ -305,9 +316,11 @@ static int handle_event(const ENetEvent *event, bk_metrics *metrics,
     }
     case ENET_EVENT_TYPE_RECEIVE: {
       bk_header header;
-      if (bk_payload_read(event->packet->data, event->packet->dataLength,
+      client_conn *conn = (client_conn *)event->peer->data;
+      if (conn != NULL &&
+          bk_payload_read(event->packet->data, event->packet->dataLength,
                           &header) == 0) {
-        bk_metrics_on_recv(metrics, &header, bk_now_ns());
+        bk_metrics_on_recv(metrics, conn->local_index, &header, bk_now_ns());
       }
       enet_packet_destroy(event->packet);
       break;
@@ -526,6 +539,7 @@ static int run_client(const client_config *cfg) {
 
   for (int i = 0; i < cfg->conns; ++i) {
     conns[i].origin_id = cfg->origin_base + (uint32_t)i;
+    conns[i].local_index = (uint32_t)i;
     conns[i].peer = enet_host_connect(host, &address, 2, 0);
     if (conns[i].peer == NULL) {
       fprintf(stderr, "enet_host_connect failed\n");

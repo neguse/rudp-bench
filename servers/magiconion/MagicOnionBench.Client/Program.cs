@@ -60,7 +60,7 @@ try
     for (var i = 0; i < config.Conns; i++)
     {
         var originId = config.OriginBase + (uint)i;
-        var receiver = new BenchReceiver(metrics, metricsGate);
+        var receiver = new BenchReceiver(metrics, metricsGate, (uint)i);
         var handler = new SocketsHttpHandler
         {
             EnableMultipleHttp2Connections = true,
@@ -202,11 +202,11 @@ static IReadOnlyList<BenchStream> BuildStreams(ClientConfig config)
     var streams = new List<BenchStream>(2);
     if (config.RateLt > 0)
     {
-        streams.Add(new BenchStream(false, false, IntervalFromRate(config.RateLt)));
+        streams.Add(new BenchStream(false, config.BroadcastLt, IntervalFromRate(config.RateLt)));
     }
     if (config.RateMd > 0)
     {
-        streams.Add(new BenchStream(true, false, IntervalFromRate(config.RateMd)));
+        streams.Add(new BenchStream(true, config.BroadcastMd, IntervalFromRate(config.RateMd)));
     }
 
     return streams;
@@ -305,7 +305,7 @@ static string MetricsPathOrDefault()
            Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".json";
 }
 
-internal sealed class BenchReceiver(BenchMetrics metrics, object metricsGate) : IBenchHubReceiver
+internal sealed class BenchReceiver(BenchMetrics metrics, object metricsGate, uint localIndex) : IBenchHubReceiver
 {
     public void OnPayload(byte[] payload)
     {
@@ -317,7 +317,7 @@ internal sealed class BenchReceiver(BenchMetrics metrics, object metricsGate) : 
         var recvTsNs = BenchClock.NowNs();
         lock (metricsGate)
         {
-            metrics.OnRecv(header, recvTsNs);
+            metrics.OnRecv(localIndex, header, recvTsNs);
         }
     }
 }
@@ -528,6 +528,8 @@ internal readonly record struct ClientConfig(
     uint OriginBase,
     double RateLt,
     double RateMd,
+    bool BroadcastLt,
+    bool BroadcastMd,
     int PayloadSize,
     ulong DeadlineNs,
     ulong StalenessPeriodNs)
@@ -543,7 +545,7 @@ internal readonly record struct ClientConfig(
         {
             if (args[i] == "--describe")
             {
-                return new ClientConfig(true, true, "", 0, 0, 0, 0, 0, 0, 0, 0, 0);
+                return new ClientConfig(true, true, "", 0, 0, 0, 0, 0, 0, false, false, 0, 0, 0);
             }
             if (args[i] == "--host" && i + 1 < args.Length)
             {
@@ -592,6 +594,16 @@ internal readonly record struct ClientConfig(
                 cfg.HaveRateMd = true;
                 continue;
             }
+            if (args[i] == "--broadcast-lt")
+            {
+                cfg.BroadcastLt = true;
+                continue;
+            }
+            if (args[i] == "--broadcast-md")
+            {
+                cfg.BroadcastMd = true;
+                continue;
+            }
             if (args[i] == "--payload" && i + 1 < args.Length &&
                 int.TryParse(args[++i], NumberStyles.None, CultureInfo.InvariantCulture, out cfg.PayloadSize) &&
                 cfg.PayloadSize >= BenchConstants.MinPayloadBytes &&
@@ -636,12 +648,14 @@ internal readonly record struct ClientConfig(
             cfg.OriginBase,
             cfg.RateLt,
             cfg.RateMd,
+            cfg.BroadcastLt,
+            cfg.BroadcastMd,
             cfg.PayloadSize,
             cfg.DeadlineNs,
             cfg.StalenessPeriodNs);
     }
 
-    private static ClientConfig Invalid() => new(false, false, "", 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    private static ClientConfig Invalid() => new(false, false, "", 0, 0, 0, 0, 0, 0, false, false, 0, 0, 0);
 
     private sealed class MutableConfig
     {
@@ -652,6 +666,8 @@ internal readonly record struct ClientConfig(
         public uint OriginBase;
         public double RateLt;
         public double RateMd;
+        public bool BroadcastLt;
+        public bool BroadcastMd;
         public int PayloadSize;
         public ulong DeadlineNs;
         public ulong StalenessPeriodNs;

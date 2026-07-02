@@ -1,0 +1,40 @@
+{
+ "transport": "msquic",
+ "server_command": [
+  "build-v2-msquic/msquic_server",
+  "--port",
+  "42919"
+ ],
+ "client_command": [
+  "build-v2-msquic/msquic_client",
+  "--host",
+  "127.0.0.1",
+  "--port",
+  "42919",
+  "--conns",
+  "{conns}",
+  "--proc-index",
+  "{proc_index}",
+  "--origin-base",
+  "{origin_id_start}",
+  "--rate-lt",
+  "30",
+  "--rate-md",
+  "0",
+  "--payload",
+  "1000",
+  "--deadline-ns",
+  "150000000",
+  "--staleness-period-ns",
+  "10000000",
+  "--broadcast-lt"
+ ],
+ "client_procs": 2,
+ "total_conns": 4,
+ "warmup": "1s",
+ "duration": "3s",
+ "drain": "1s",
+ "deadline_ns": 150000000,
+ "staleness_period_ns": 10000000,
+ "output_dir": "results-v2/bcast-msquic"
+}

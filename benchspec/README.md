@@ -101,7 +101,10 @@ process → orchestrator: {"type":"done","stats":{…}}
   受信時刻 − sched_ts ≤ D だった slot の割合。未送信 slot も分母に入る
 - **診断用**: delivery_ratio(最終到達率)、send_ts 起点 latency(transport 単体の遅延)、
   forward / return 分解、per-class ヒストグラム
-- 重複判定は (origin_id, class, seq) で行い、初観測のみ集計する
+- 重複判定は **(受信側 local conn, origin_id, class, seq)** で行い、初観測のみ集計する。
+  受信側 conn をキーに含めるのは、broadcast では同一メッセージの正当な複製が
+  同一 proc 内の複数 conn に届くため(含めないと複製が duplicate 扱いになり
+  delivery が壊れる)
 
 ## 開示 metadata(--describe)
 

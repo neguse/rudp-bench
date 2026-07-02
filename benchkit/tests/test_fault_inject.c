@@ -36,7 +36,7 @@ int main(void) {
   bk_header got;
   uint64_t recv_ts;
   while (fx_transport_recv(t, 0, drain_until, &got, &recv_ts)) {
-    bk_metrics_on_recv(m, &got, recv_ts);
+    bk_metrics_on_recv(m, 0, &got, recv_ts);
   }
 
   bk_class_counts loss;

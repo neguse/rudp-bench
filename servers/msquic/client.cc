@@ -35,6 +35,8 @@ struct ClientConfig {
   uint32_t origin_base = 0;
   double rate_lt = 0.0;
   double rate_md = 0.0;
+  bool broadcast_lt = false;
+  bool broadcast_md = false;
   size_t payload_size = 0;
   uint64_t deadline_ns = 0;
   uint64_t staleness_period_ns = 0;
@@ -47,6 +49,7 @@ struct ClientConn {
   HQUIC conn = nullptr;
   HQUIC stream = nullptr;
   uint32_t origin_id = 0;
+  uint32_t local_index = 0;  // 自 proc 内 0 起点(重複判定の受信側キー)
   bool connected = false;
   bool stream_ready = false;
   bk_plan *plan = nullptr;
@@ -180,6 +183,14 @@ int parse_args(int argc, char **argv, ClientConfig *cfg) {
       have_rate_md = parse_rate(argv[++i], &cfg->rate_md) == 0;
       continue;
     }
+    if (std::strcmp(argv[i], "--broadcast-lt") == 0) {
+      cfg->broadcast_lt = true;
+      continue;
+    }
+    if (std::strcmp(argv[i], "--broadcast-md") == 0) {
+      cfg->broadcast_md = true;
+      continue;
+    }
     if (std::strcmp(argv[i], "--payload") == 0 && i + 1 < argc) {
       have_payload =
           parse_size(argv[++i], &cfg->payload_size) == 0 &&
@@ -243,7 +254,7 @@ int build_streams(const ClientConfig *cfg, bk_stream *streams,
     }
     streams[n++] = {
         false,
-        false,
+        cfg->broadcast_lt,
         interval_ns,
     };
   }
@@ -253,7 +264,7 @@ int build_streams(const ClientConfig *cfg, bk_stream *streams,
     }
     streams[n++] = {
         true,
-        false,
+        cfg->broadcast_md,
         interval_ns,
     };
   }
@@ -468,7 +479,7 @@ class ClientApp {
         break;
 
       case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED:
-        record_recv(event->DATAGRAM_RECEIVED.Buffer->Buffer,
+        record_recv(conn->local_index, event->DATAGRAM_RECEIVED.Buffer->Buffer,
                     event->DATAGRAM_RECEIVED.Buffer->Length);
         break;
 
@@ -517,7 +528,9 @@ class ClientApp {
           std::lock_guard<std::mutex> lock(conn->decoder_mu);
           conn->decoder.append(
               event->RECEIVE.Buffers, event->RECEIVE.BufferCount,
-              [&](const uint8_t *data, size_t len) { record_recv(data, len); });
+              [&](const uint8_t *data, size_t len) {
+                record_recv(conn->local_index, data, len);
+              });
         }
         break;
 
@@ -578,6 +591,7 @@ class ClientApp {
       auto *conn = new ClientConn();
       conn->app = this;
       conn->origin_id = cfg_.origin_base + static_cast<uint32_t>(i);
+      conn->local_index = static_cast<uint32_t>(i);
       if (!rudp_bench_msquic::status_ok(
               MsQuic->ConnectionOpen(registration_, connection_cb, conn,
                                      &conn->conn),
@@ -734,14 +748,14 @@ class ClientApp {
     }
   }
 
-  void record_recv(const uint8_t *data, size_t len) {
+  void record_recv(uint32_t local_index, const uint8_t *data, size_t len) {
     bk_header header;
     if (bk_payload_read(data, len, &header) != 0) {
       return;
     }
     const uint64_t now = bk_now_ns();
     std::lock_guard<std::mutex> lock(metrics_mu_);
-    bk_metrics_on_recv(metrics_, &header, now);
+    bk_metrics_on_recv(metrics_, local_index, &header, now);
   }
 
   void metrics_on_slot(const bk_header *header, bool submitted) {

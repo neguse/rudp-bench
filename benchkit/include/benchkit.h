@@ -110,7 +110,7 @@ uint64_t bk_plan_peek_ns(const bk_plan *p);
 
 // 会計は benchspec「計測の定義」に従う:
 // - 分母は slot(未送信 slot も miss として数える)
-// - 重複判定は (origin_id, class, seq) の初観測のみ集計
+// - 重複判定は (受信側 local conn, origin_id, class, seq) の初観測のみ集計
 // - staleness: (origin, class) ごとに最新受信 update の age を周期サンプル
 // - deadline hit: recv_ts − sched_ts <= deadline の slot 割合(must-deliver)
 // - measurement bit の立った message のみ集計対象
@@ -129,7 +129,12 @@ void bk_metrics_free(bk_metrics *m);
 // transport に渡さなかった slot(分母には入る)。
 void bk_metrics_on_slot(bk_metrics *m, const bk_header *h, bool submitted);
 // 受信側: payload を parse 済みの header と受信時刻を渡す。
-void bk_metrics_on_recv(bk_metrics *m, const bk_header *h, uint64_t recv_ts_ns);
+// local_index は受信した自 proc 内 conn の 0 起点 index。broadcast では同一
+// メッセージの複製が自 proc の複数 conn に届くため、重複判定は
+// (local_index, origin, class, seq) で行う(受信側 conn を含めないと
+// 正当な複製が duplicate 扱いになり delivery が壊れる)。
+void bk_metrics_on_recv(bk_metrics *m, uint32_t local_index, const bk_header *h,
+                        uint64_t recv_ts_ns);
 // staleness サンプラを駆動する。受信ループから高頻度で呼んでよい
 // (staleness_period_ns 未満の呼び出しは内部で間引く)。
 // 計測窓 [start_at, stop_at) 内でのみ呼ぶこと。warmup 中(measured update が
