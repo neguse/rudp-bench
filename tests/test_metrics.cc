@@ -18,6 +18,18 @@ TEST(LatencyHist, EmptyReturnsZero) {
   EXPECT_EQ(h.percentile_us(0.50), 0);
 }
 
+// §5.4: ランク定義は nearest-rank（ceil(count*p)）。BoundedHistogram
+// (runner.cc) と同じ規約に統一されていることを固定する。旧実装
+// floor(q*(count-1))+1 は 10 サンプル p95 で 9 を返していた（1 ランク楽観）。
+TEST(LatencyHist, NearestRankCeilConvention) {
+  LatencyHist h;
+  for (int i = 1; i <= 10; ++i) h.record_us(i);
+  EXPECT_EQ(h.percentile_us(0.50), 5);   // ceil(5.0) = 5
+  EXPECT_EQ(h.percentile_us(0.95), 10);  // ceil(9.5) = 10（旧実装は 9）
+  EXPECT_EQ(h.percentile_us(1.00), 10);
+  EXPECT_EQ(h.percentile_us(0.00), 1);   // target は最低 1 にクランプ
+}
+
 TEST(LatencyHist, UsesBoundedStorage) {
   LatencyHist h;
   const size_t bins = h.storage_bins();

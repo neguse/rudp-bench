@@ -2,6 +2,8 @@
 #include "harness/adapter_registry.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -14,6 +16,31 @@ class GnsRegistrar {
 static GnsRegistrar registrar;
 
 using namespace rudp_bench;
+
+class ScopedEnv {
+ public:
+  ScopedEnv(const char* name, const char* value) : name_(name) {
+    const char* old = ::getenv(name);
+    if (old) {
+      had_old_ = true;
+      old_ = old;
+    }
+    ::setenv(name_.c_str(), value, 1);
+  }
+
+  ~ScopedEnv() {
+    if (had_old_) {
+      ::setenv(name_.c_str(), old_.c_str(), 1);
+    } else {
+      ::unsetenv(name_.c_str());
+    }
+  }
+
+ private:
+  std::string name_;
+  std::string old_;
+  bool had_old_ = false;
+};
 
 // ベンチ既定の "gns" は他アダプタと条件を揃えるため暗号化 OFF。
 // 暗号化込みの計測は "gns_encrypted" バリアントで行う。
@@ -88,6 +115,58 @@ TEST(GnsSmoke, ReliableEcho) {
   EXPECT_TRUE(got);
 
   server_thread.join();
+  client->close();
+  server->close();
+}
+
+TEST(GnsSmoke, InboxLimitDropsOldestMessages) {
+  ScopedEnv limit("GNS_INBOX_MESSAGES", "2");
+  constexpr uint16_t kPort = 0xC109;
+  constexpr uint32_t kMessages = 4;
+
+  auto server = create_adapter("gns");
+  auto client = create_adapter("gns");
+  ASSERT_NE(server, nullptr);
+  ASSERT_NE(client, nullptr);
+
+  server->server_listen(kPort);
+  uint32_t cid = client->client_connect("127.0.0.1", kPort);
+
+  auto connect_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < connect_deadline && !client->is_connected(cid)) {
+    server->poll();
+    client->poll();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(client->is_connected(cid));
+
+  for (uint32_t i = 0; i < kMessages; ++i) {
+    ASSERT_EQ(client->send(cid, &i, sizeof(i), true), 0);
+  }
+
+  auto delivery_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (std::chrono::steady_clock::now() < delivery_deadline) {
+    client->poll();
+    server->poll();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  std::vector<uint32_t> got;
+  for (;;) {
+    uint32_t seq = 0;
+    size_t len = 0;
+    uint32_t in_cid = 0;
+    int r = server->recv(&seq, sizeof(seq), &len, &in_cid);
+    if (r == 0) break;
+    ASSERT_EQ(r, 1);
+    ASSERT_EQ(len, sizeof(seq));
+    got.push_back(seq);
+  }
+
+  ASSERT_EQ(got.size(), 2u);
+  EXPECT_EQ(got[0], 2u);
+  EXPECT_EQ(got[1], 3u);
+
   client->close();
   server->close();
 }

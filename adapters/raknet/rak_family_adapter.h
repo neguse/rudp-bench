@@ -31,12 +31,15 @@
 #include <slikenet/MessageIdentifiers.h>
 #include <slikenet/PacketPriority.h>
 #include <slikenet/peerinterface.h>
+#include <slikenet/statistics.h>
 #include <slikenet/types.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -49,11 +52,39 @@ constexpr uint32_t kMaxConnections = 4096;
 constexpr size_t kMaxPayloadBytes = 65536;
 constexpr unsigned kConnectAttempts = 12;
 constexpr unsigned kConnectAttemptIntervalMs = 250;
+constexpr size_t kDefaultOutgoingByteLimit = 32u * 1024u * 1024u;
+
+inline size_t parse_byte_limit_env(const char* v, size_t fallback) {
+  if (!v || !*v) return fallback;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return fallback;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
+}
+
+inline size_t outgoing_byte_limit_for(const char* name) {
+  const char* specific =
+      (name && std::strcmp(name, "slikenet") == 0)
+          ? std::getenv("SLIKENET_OUTGOING_BYTES")
+          : std::getenv("RAKNET_OUTGOING_BYTES");
+  if (specific && *specific) {
+    return parse_byte_limit_env(specific, kDefaultOutgoingByteLimit);
+  }
+  return parse_byte_limit_env(std::getenv("RAK_FAMILY_OUTGOING_BYTES"),
+                              kDefaultOutgoingByteLimit);
+}
 
 struct ClientPeer {
   uint32_t id = 0;
   SLNet::RakPeerInterface* peer = nullptr;
   SLNet::RakNetGUID guid{};
+  SLNet::SystemAddress address{};
   bool connected = false;
   // Connect() サイクルが進行中 (結果待ち)。false かつ未接続なら poll() が再発行する。
   bool connect_in_flight = false;
@@ -61,7 +92,8 @@ struct ClientPeer {
 
 class RakFamilyAdapter : public rudp_bench::Adapter {
  public:
-  explicit RakFamilyAdapter(const char* name) : name_(name) {}
+  explicit RakFamilyAdapter(const char* name)
+      : name_(name), outgoing_byte_limit_(outgoing_byte_limit_for(name)) {}
   ~RakFamilyAdapter() override { close(); }
 
   void hint_connections(uint32_t n) override {
@@ -131,11 +163,11 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
     if (is_server_) {
       auto it = guid_by_id_.find(conn_id);
       if (it == guid_by_id_.end()) return -1;
-      return send_packet(peer_, it->second, reliable);
+      return send_packet(peer_, it->second, address_for_id(conn_id), reliable);
     }
     ClientPeer* slot = find_client_peer(conn_id);
     if (!slot || !slot->peer || !slot->connected) return -1;
-    return send_packet(slot->peer, slot->guid, reliable);
+    return send_packet(slot->peer, slot->guid, slot->address, reliable);
   }
 
   size_t send_many(const uint32_t* conn_ids, size_t count, const void* data,
@@ -153,7 +185,10 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
     for (size_t i = 0; i < count; ++i) {
       auto it = guid_by_id_.find(conn_ids[i]);
       if (it == guid_by_id_.end()) continue;
-      if (send_packet(peer_, it->second, reliable) == 0) ++accepted;
+      if (send_packet(peer_, it->second, address_for_id(conn_ids[i]),
+                      reliable) == 0) {
+        ++accepted;
+      }
     }
     return accepted;
   }
@@ -190,26 +225,35 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
   }
 
   void close() override {
-    // 切断通知は送る (相手側の conn_disc カウンタと port 解放のため): 接続を
-    // 閉じて少しだけ update cycle を回して flush し、peer 自体は破棄せず放棄
-    // する (abandon_peer のコメント参照)。
+    // 切断通知は送る (相手側の conn_disc カウンタと port 解放のため): まず全
+    // slot の CloseConnection を発行してから、全 peer まとめて数回 update cycle
+    // を回して flush する。以前は slot ごとに flush_disconnects (2ms×5 sleep)
+    // していたため close_ms が conn 数 × 10ms に膨張していた。一括 flush なら
+    // conn 数に依らず ~10ms で済む。peer 自体は破棄せず放棄する
+    // (abandon_peer のコメント参照)。
+    std::vector<SLNet::RakPeerInterface*> flush_peers;
+    if (peer_) flush_peers.push_back(peer_);
+    for (auto& slot : client_peers_) {
+      if (!slot.peer) continue;
+      if (slot.connected) {
+        slot.peer->CloseConnection(SLNet::AddressOrGUID(slot.guid), true);
+        flush_peers.push_back(slot.peer);
+      }
+    }
+    flush_disconnects_batch(flush_peers);
     if (peer_) {
-      flush_disconnects(peer_);
       abandon_peer(peer_);
       peer_ = nullptr;
     }
     for (auto& slot : client_peers_) {
       if (!slot.peer) continue;
-      if (slot.connected) {
-        slot.peer->CloseConnection(SLNet::AddressOrGUID(slot.guid), true);
-        flush_disconnects(slot.peer);
-      }
       abandon_peer(slot.peer);
       slot.peer = nullptr;
     }
     client_peers_.clear();
     peer_index_by_id_.clear();
     guid_by_id_.clear();
+    address_by_id_.clear();
     id_by_guid_.clear();
     connected_ids_.clear();
     connected_peak_ = 0;
@@ -228,6 +272,9 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
     return "library_internal";
   }
   bool encryption_on() const override { return false; }
+  // loss で cwnd=1MTU に戻す Tahoe 風動作（audit §5）。
+  const char* congestion_control() const override { return "reno_tahoe_reset"; }
+  const char* thread_model() const override { return "internal_worker"; }
 
   rudp_bench::ConnectionStats connection_stats() const override {
     rudp_bench::ConnectionStats stats;
@@ -265,10 +312,16 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
     abandoned_peers_.push_back(peer);
   }
 
-  // CloseConnection の切断通知を wire に出すために少しだけ update cycle を回す
-  void flush_disconnects(SLNet::RakPeerInterface* peer) {
+  // CloseConnection の切断通知を wire に出すために少しだけ update cycle を回す。
+  // 全 peer を1サイクル内でまとめて回すので、所要時間 (2ms×5 の sleep) は
+  // peer 数に依存しない。
+  void flush_disconnects_batch(
+      const std::vector<SLNet::RakPeerInterface*>& peers) {
+    if (peers.empty()) return;
     for (int i = 0; i < 5; ++i) {
-      peer->RunUpdateCycle(update_bs_);
+      for (SLNet::RakPeerInterface* peer : peers) {
+        peer->RunUpdateCycle(update_bs_);
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
   }
@@ -310,8 +363,12 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
   }
 
   int send_packet(SLNet::RakPeerInterface* peer,
-                  const SLNet::RakNetGUID& guid, bool reliable) {
+                  const SLNet::RakNetGUID& guid,
+                  const SLNet::SystemAddress& address, bool reliable) {
     if (!peer) return -1;
+    if (!outgoing_has_room(peer, guid, address, send_scratch_.size())) {
+      return -1;
+    }
     uint32_t receipt = peer->Send(send_scratch_.data(),
                                   static_cast<int>(send_scratch_.size()),
                                   HIGH_PRIORITY,
@@ -322,11 +379,67 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
     return receipt == 0 ? -1 : 0;
   }
 
-  uint32_t register_guid(const SLNet::RakNetGUID& guid) {
+  SLNet::SystemAddress address_for_id(uint32_t conn_id) const {
+    auto it = address_by_id_.find(conn_id);
+    if (it == address_by_id_.end()) return SLNet::UNASSIGNED_SYSTEM_ADDRESS;
+    return it->second;
+  }
+
+  size_t outgoing_buffered_bytes(SLNet::RakPeerInterface* peer,
+                                 const SLNet::RakNetGUID& guid,
+                                 const SLNet::SystemAddress& known_address)
+      const {
+    if (!peer) return std::numeric_limits<size_t>::max();
+    SLNet::SystemAddress address = known_address;
+    if (address == SLNet::UNASSIGNED_SYSTEM_ADDRESS) {
+      address = peer->GetSystemAddressFromGuid(guid);
+      if (address == SLNet::UNASSIGNED_SYSTEM_ADDRESS) {
+        return std::numeric_limits<size_t>::max();
+      }
+    }
+    SLNet::RakNetStatistics stats{};
+    if (!peer->GetStatistics(address, &stats)) {
+      return std::numeric_limits<size_t>::max();
+    }
+    double pending = 0.0;
+    for (unsigned i = 0; i < NUMBER_OF_PRIORITIES; ++i) {
+      pending += stats.bytesInSendBuffer[i];
+    }
+    if (pending >= static_cast<double>(std::numeric_limits<size_t>::max())) {
+      return std::numeric_limits<size_t>::max();
+    }
+    size_t bytes = static_cast<size_t>(pending);
+    size_t resend = stats.bytesInResendBuffer;
+    if (resend > std::numeric_limits<size_t>::max() - bytes) {
+      return std::numeric_limits<size_t>::max();
+    }
+    return bytes + resend;
+  }
+
+  bool outgoing_has_room(SLNet::RakPeerInterface* peer,
+                         const SLNet::RakNetGUID& guid,
+                         const SLNet::SystemAddress& address,
+                         size_t next_bytes) const {
+    if (next_bytes > outgoing_byte_limit_) return false;
+    size_t queued = outgoing_buffered_bytes(peer, guid, address);
+    return queued <= outgoing_byte_limit_ &&
+           next_bytes <= outgoing_byte_limit_ - queued;
+  }
+
+  uint32_t register_guid(const SLNet::RakNetGUID& guid,
+                         const SLNet::SystemAddress& address) {
     auto existing = id_by_guid_.find(guid.g);
-    if (existing != id_by_guid_.end()) return existing->second;
+    if (existing != id_by_guid_.end()) {
+      if (address != SLNet::UNASSIGNED_SYSTEM_ADDRESS) {
+        address_by_id_[existing->second] = address;
+      }
+      return existing->second;
+    }
     uint32_t id = next_id_++;
     guid_by_id_[id] = guid;
+    if (address != SLNet::UNASSIGNED_SYSTEM_ADDRESS) {
+      address_by_id_[id] = address;
+    }
     id_by_guid_[guid.g] = id;
     connected_ids_.insert(id);
     connected_peak_ = std::max<uint32_t>(
@@ -340,6 +453,7 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
     uint32_t id = it->second;
     id_by_guid_.erase(it);
     guid_by_id_.erase(id);
+    address_by_id_.erase(id);
     connected_ids_.erase(id);
     if (by_transport) {
       ++shutdown_by_transport_;
@@ -363,7 +477,7 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
       }
       switch (p->data[0]) {
         case ID_NEW_INCOMING_CONNECTION:
-          register_guid(p->guid);
+          register_guid(p->guid, p->systemAddress);
           break;
         case ID_DISCONNECTION_NOTIFICATION:
           remove_guid(p->guid, false);
@@ -372,7 +486,7 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
           remove_guid(p->guid, true);
           break;
         case ID_USER_PACKET_ENUM:
-          handle_user_packet(p, register_guid(p->guid));
+          handle_user_packet(p, register_guid(p->guid, p->systemAddress));
           break;
         default:
           break;
@@ -394,6 +508,7 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
       switch (p->data[0]) {
         case ID_CONNECTION_REQUEST_ACCEPTED:
           slot.guid = p->guid;
+          slot.address = p->systemAddress;
           slot.connected = true;
           slot.connect_in_flight = false;
           connected_ids_.insert(slot.id);
@@ -436,6 +551,7 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
   }
 
   std::string name_;
+  size_t outgoing_byte_limit_ = kDefaultOutgoingByteLimit;
   SLNet::RakPeerInterface* peer_ = nullptr;
   bool is_server_ = false;
   uint32_t hinted_connections_ = kMaxConnections;
@@ -449,6 +565,7 @@ class RakFamilyAdapter : public rudp_bench::Adapter {
   std::vector<SLNet::RakPeerInterface*> abandoned_peers_;
   std::unordered_map<uint32_t, size_t> peer_index_by_id_;
   std::unordered_map<uint32_t, SLNet::RakNetGUID> guid_by_id_;
+  std::unordered_map<uint32_t, SLNet::SystemAddress> address_by_id_;
   std::unordered_map<uint64_t, uint32_t> id_by_guid_;
   std::unordered_set<uint32_t> connected_ids_;
   std::vector<char> send_scratch_;

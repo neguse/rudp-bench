@@ -666,6 +666,31 @@ TEST(CoopRudpAdapterSmoke, AsyncTxEchoUsesWorkerSendPath) {
   server->close();
 }
 
+TEST(CoopRudpAdapterSmoke, MaxRetransmitsDisconnectsSilentPeer) {
+  ScopedEnv max_retx("COOP_MAX_RETRANSMITS", "1");
+  ScopedEnv idle_timeout("COOP_IDLE_TIMEOUT_MS", "60000");
+  auto client = rudp_bench::create_adapter("coop_rudp");
+  ASSERT_NE(client, nullptr);
+
+  uint32_t cid = client->client_connect("127.0.0.1", 0xC4FE);
+  ASSERT_NE(cid, 0u);
+  ASSERT_TRUE(client->is_connected(cid));
+
+  const char msg[] = "silent-peer";
+  ASSERT_EQ(client->send(cid, msg, sizeof(msg), true), 0);
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < deadline &&
+         client->is_connected(cid)) {
+    client->poll();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
+  EXPECT_FALSE(client->is_connected(cid));
+  EXPECT_EQ(client->send(cid, msg, sizeof(msg), true), -1);
+  client->close();
+}
+
 TEST(CoopRudpAdapterSmoke, AsyncTxQueueLimitRequeuesUnacceptedPackets) {
   ScopedEnv async("COOP_ASYNC_TX", "1");
   ScopedEnv packet_limit("COOP_ASYNC_TX_PACKET_LIMIT", "1");

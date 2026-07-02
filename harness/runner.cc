@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "harness/inbound_queue.h"
 #include "harness/metrics.h"
 #include "harness/proc_sampler.h"
 
@@ -111,6 +112,11 @@ constexpr size_t kReliableFlagOffset = 16;
 constexpr size_t kHeaderBytes = kReliableFlagOffset + 1;
 constexpr uint8_t kPayloadFlagReliable = 0x01;
 constexpr uint8_t kPayloadFlagMeasured = 0x02;
+// §5.3: スケジュール時刻タイムスタンプ（8B、ns）が payload に載っている印。
+// 17B の基本ヘッダ直後（kSchedTsOffset）に格納する。payload がそのサイズに
+// 満たない run（size 17..24）では flag を立てず sched 計測は無効になる。
+constexpr uint8_t kPayloadFlagSchedTs = 0x04;
+constexpr size_t kSchedTsOffset = kHeaderBytes;
 
 void adaptive_idle_for(std::chrono::microseconds d) {
   if (d.count() > 0) std::this_thread::sleep_for(d);
@@ -189,9 +195,14 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   // Without this the server exits mid-run and the tail of the client's send
   // window is "lost" — at ramp=10s/duration=20s that reads as delivery≈0.6,
   // an artifact that was misattributed to the library under test.
-  auto deadline = start + std::chrono::seconds(cfg.duration_s + cfg.warmup_s) +
-                  std::chrono::milliseconds(cfg.ramp_up_ms) +
-                  std::chrono::milliseconds(server_tail_ms);
+  // §5.1: クライアントの送信が止まる推定時刻（client 側の run_end 相当）。
+  // tail 区間（server_tail_ms ≥ 2s）はポーリング自体は続けるが、CPU/RSS の
+  // 計測窓からは除外する。tail の無トラフィック区間が平均の分母に入ると
+  // capacity ゲートの主要指標 server_cpu_pct が系統的に過小になるため。
+  auto traffic_end = start +
+                     std::chrono::seconds(cfg.duration_s + cfg.warmup_s) +
+                     std::chrono::milliseconds(cfg.ramp_up_ms);
+  auto deadline = traffic_end + std::chrono::milliseconds(server_tail_ms);
   // M2: exclude warmup from the server CPU window too. The server has no
   // explicit warmup gate (it just reacts), so re-baseline once warmup elapses.
   // Shift by ramp_up_ms as well: the client is still connecting during ramp,
@@ -199,6 +210,7 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   auto measure_begin = start + std::chrono::seconds(cfg.warmup_s) +
                        std::chrono::milliseconds(cfg.ramp_up_ms);
   bool measure_started = (cfg.warmup_s == 0);
+  bool measure_ended = false;  // §5.1
   auto next_rss_sample = start + kRssSampleInterval;
   uint64_t server_received = 0;
   uint64_t server_echo_accepted = 0;
@@ -217,6 +229,11 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
       if (!measure_started && loop_now >= measure_begin) {
         ps.mark_measure_begin();
         measure_started = true;
+      }
+      // §5.1: トラフィック終了で計測窓を閉じる（以降の sample は no-op）。
+      if (!measure_ended && loop_now >= traffic_end) {
+        ps.mark_measure_end();
+        measure_ended = true;
       }
       sample_proc_if_due(ps, loop_now, next_rss_sample);
     }
@@ -273,6 +290,9 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   }
   ps.end();
   ConnectionStats cs = a.connection_stats();
+  // §6.2: close() 前に snapshot（adapter 内 inbound queue の drop 累計）。
+  uint64_t inbox_dropped =
+      inbound_queue_dropped_total().load(std::memory_order_relaxed);
   auto t_close0 = std::chrono::steady_clock::now();
   a.close();
   uint64_t close_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -310,6 +330,9 @@ CsvRow run_server(Adapter& a, const ScenarioConfig& cfg) {
   row.conn_peak = cs.connected_peak;
   row.conn_disc_transport = cs.shutdown_by_transport;
   row.conn_disc_peer = cs.shutdown_by_peer;
+  row.inbox_dropped = inbox_dropped;
+  row.cc_algo = a.congestion_control();
+  row.thread_model = a.thread_model();
   return row;
 }
 
@@ -318,6 +341,11 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   ProcSampler ps;
   LatencyHist rtt_r;
   LatencyHist rtt_u;
+  // §5.3: coordinated omission 診断用。スケジュール時刻（sched.next_send）
+  // 基準の corrected RTT。送信ループが停滞すると実送信基準の rtt_* は
+  // 楽観側に偏るため、その差を可視化する。
+  LatencyHist rtt_sched_r;
+  LatencyHist rtt_sched_u;
   ThroughputCounter th;
   DeliveryTracker dt;
   ClientTickStats tick;
@@ -389,6 +417,14 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   uint64_t delivered_u = 0;
   uint32_t expected_per_send =
       (cfg.mode == ServerMode::Broadcast) ? cfg.fanout_conns : 1;
+  // §6.1: outstanding は「このプロセスに実際に戻ってくる見込みの echo 数」で
+  // 勘定する。broadcast の fanout は部屋全体（fanout_conns）に配られるが、
+  // 自プロセスは担当 conn 数（cfg.conns）分の copy しか受信しない。従来の
+  // expected_per_send（=fanout 全量）加算では outstanding が単調増加して
+  // (1) client_outstanding_max が無意味な巨大値になり
+  // (2) outstanding==0 を要求する adaptive idle が一切発火しなかった。
+  uint32_t expected_local_per_send =
+      (cfg.mode == ServerMode::Broadcast) ? cfg.conns : 1;
   uint64_t combined_rate = static_cast<uint64_t>(cfg.rate_r) + cfg.rate_u;
   uint64_t target_attempted =
       combined_rate * cfg.conns * cfg.duration_s * expected_per_send;
@@ -407,11 +443,13 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
     if (!sched.active()) return;
     if (now < sched.next_send[i]) return;
     did_work = true;
+    // §5.3: このメッセージの「予定送信時刻」。coordinated omission 可視化の
+    // ため payload に載せ、受信側で t_recv - sched を rtt_sched_* に記録する。
+    auto t_sched = sched.next_send[i];
     uint64_t lag_us = 0;
-    if (now > sched.next_send[i]) {
+    if (now > t_sched) {
       lag_us = static_cast<uint64_t>(
-          std::chrono::duration_cast<std::chrono::microseconds>(
-              now - sched.next_send[i])
+          std::chrono::duration_cast<std::chrono::microseconds>(now - t_sched)
               .count());
     }
     bool in_active = now >= warmup_end && now < run_end;
@@ -419,13 +457,25 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
     uint64_t local_seq = seq_counter[i]++;
     uint64_t origin_id = static_cast<uint64_t>(cfg.conn_id_offset) + i;
     uint64_t global_seq = (origin_id << 32) | local_seq;
+    // §5.2: payload に書く送信時刻は tick 先頭の now を共有せず、送信直前に
+    // 取り直す。高 conns で 1 tick が数十ms に伸びると、共有 now では tick
+    // 後半のメッセージの RTT が最大 tick 長ぶん過大に出る（受信側 t_recv は
+    // 毎回 fresh で非対称）。steady_clock::now() は ~20ns 程度なので
+    // メッセージ毎に呼んで問題ない。pacing 判定用の now とは分離。
     uint64_t ts = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      now.time_since_epoch()).count();
+                      clock::now().time_since_epoch()).count();
     std::memcpy(payload.data(), &global_seq, 8);
     std::memcpy(payload.data() + 8, &ts, 8);
+    bool has_sched_ts = payload.size() >= kSchedTsOffset + 8;
+    if (has_sched_ts) {
+      uint64_t ts_sched = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              t_sched.time_since_epoch()).count();
+      std::memcpy(payload.data() + kSchedTsOffset, &ts_sched, 8);
+    }
     payload[kReliableFlagOffset] =
         (sched.reliable ? kPayloadFlagReliable : 0) |
-        (in_active ? kPayloadFlagMeasured : 0);
+        (in_active ? kPayloadFlagMeasured : 0) |
+        (has_sched_ts ? kPayloadFlagSchedTs : 0);
     if (a.send(ids[i], payload.data(), payload.size(), sched.reliable) == 0) {
       // M4: gate accepted on the SAME bounded window as attempted (in_active).
       // try_send_on only runs while now < run_end so this matches in_measure in
@@ -443,7 +493,7 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
         } else {
           accepted_u += expected_per_send;
         }
-        outstanding += expected_per_send;
+        outstanding += expected_local_per_send;  // §6.1: 自プロセス受信見込み分
         tick.record_outstanding(outstanding);
       }
     }
@@ -493,20 +543,38 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
       std::memcpy(&ts, rxbuf.data() + 8, 8);
       bool reliable_msg = (rxbuf[kReliableFlagOffset] & kPayloadFlagReliable) != 0;
       bool measured_msg = (rxbuf[kReliableFlagOffset] & kPayloadFlagMeasured) != 0;
+      bool sched_msg = (rxbuf[kReliableFlagOffset] & kPayloadFlagSchedTs) != 0;
       auto t_recv = clock::now();
       uint64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                             t_recv.time_since_epoch()).count();
       uint64_t rtt_us = (now_ns - ts) / 1000;
+      // §6.1: outstanding の減算は自 origin のメッセージだけ対象にする。
+      // broadcast では他プロセス origin の copy も届くが、それは他プロセスの
+      // outstanding であってこのプロセスの送信勘定には含まれていない。
+      uint32_t origin = static_cast<uint32_t>(seq >> 32);
+      bool own_origin = origin >= cfg.conn_id_offset &&
+                        origin - cfg.conn_id_offset < cfg.conns;
       if (in_measure(t_recv) && measured_msg) {
         (reliable_msg ? rtt_r : rtt_u).record_us(rtt_us);
-        th.record(n);
+        if (sched_msg && n >= kSchedTsOffset + 8) {
+          uint64_t ts_sched;
+          std::memcpy(&ts_sched, rxbuf.data() + kSchedTsOffset, 8);
+          uint64_t rtt_sched_us =
+              now_ns > ts_sched ? (now_ns - ts_sched) / 1000 : 0;
+          (reliable_msg ? rtt_sched_r : rtt_sched_u).record_us(rtt_sched_us);
+        }
+        // §5.4: throughput/msg_per_sec の分子は run_end までの到着に限定する。
+        // tail 到着分まで足すのに duration_s で割ると過大になるため。
+        // delivery 判定（mark_received 以下）は従来どおり tail 込み — loss 下の
+        // reliable 再送は run_end 後に正当に戻ってくる。
+        if (t_recv < run_end) th.record(n);
         if (dt.mark_received(seq, cid)) {
           if (reliable_msg) {
             ++delivered_r;
           } else {
             ++delivered_u;
           }
-          if (outstanding > 0) --outstanding;
+          if (own_origin && outstanding > 0) --outstanding;
         }
       }
     }
@@ -526,6 +594,9 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   ps.end();
   // close() は自己 shutdown を発生させるので、観測値はその前に snapshot。
   ConnectionStats cs = a.connection_stats();
+  // §6.2: adapter 内 inbound queue の drop 累計も close() 前に snapshot。
+  uint64_t inbox_dropped =
+      inbound_queue_dropped_total().load(std::memory_order_relaxed);
   // L6: time teardown. A lib that cannot synchronously tear down (e.g. msquic,
   // whose close() is a deliberate no-op) shows close_ms≈0, which is itself the
   // lifecycle-health signal — it is not measuring a clean shutdown.
@@ -552,6 +623,12 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.rtt_u_p50_us = rtt_u.percentile_us(0.50);
   row.rtt_u_p95_us = rtt_u.percentile_us(0.95);
   row.rtt_u_p99_us = rtt_u.percentile_us(0.99);
+  row.rtt_sched_r_p50_us = rtt_sched_r.percentile_us(0.50);
+  row.rtt_sched_r_p95_us = rtt_sched_r.percentile_us(0.95);
+  row.rtt_sched_r_p99_us = rtt_sched_r.percentile_us(0.99);
+  row.rtt_sched_u_p50_us = rtt_sched_u.percentile_us(0.50);
+  row.rtt_sched_u_p95_us = rtt_sched_u.percentile_us(0.95);
+  row.rtt_sched_u_p99_us = rtt_sched_u.percentile_us(0.99);
   if (!cfg.bins_r_out_path.empty()) {
     std::ofstream f(cfg.bins_r_out_path, std::ios::binary);
     rtt_r.write_binary(f);
@@ -597,6 +674,9 @@ CsvRow run_client(Adapter& a, const ScenarioConfig& cfg) {
   row.conn_peak = cs.connected_peak;
   row.conn_disc_transport = cs.shutdown_by_transport;
   row.conn_disc_peer = cs.shutdown_by_peer;
+  row.inbox_dropped = inbox_dropped;
+  row.cc_algo = a.congestion_control();
+  row.thread_model = a.thread_model();
   row.delivery_dedup_policy = DeliveryTracker::dedup_policy();
   // tick_ok means "this run produced trustworthy data", not "every send was
   // perfectly on time". Functional correctness is `attempted == target`

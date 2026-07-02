@@ -54,6 +54,9 @@ var passthroughFromFirst = []string{
 	"idle_policy",
 	"flush_policy",
 	"delivery_dedup_policy",
+	// 公平性メタデータ（improvements §3.2-3.3）。全 proc 同一値なので先頭から。
+	"cc_algo",
+	"thread_model",
 }
 
 // toInt parses a string to int, returning 0 on failure (matches Python to_int).

@@ -1,6 +1,7 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
 #include "harness/inbound_queue.h"
+#include "harness/socket_buffer.h"
 
 extern "C" {
 #include "ikcp.h"
@@ -13,11 +14,13 @@ extern "C" {
 #include <unistd.h>
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -42,6 +45,7 @@ static constexpr uint8_t PREFIX_RAW = 0x00;
 static constexpr int KCP_MTU     = 1400;
 static constexpr int KCP_MAX_FRAME = KCP_MTU + 32;
 static constexpr size_t RECV_BUF_SIZE = 65536 + 8;
+static constexpr size_t kDefaultSendQueueByteLimit = 32u * 1024u * 1024u;
 
 // kcp tuning. Defaults are the config chosen by the 2026-05-31 tuning sweep
 // (see docs/measurements/2026-05-31-kcp-tuning). Env overrides exist only to
@@ -62,6 +66,7 @@ static constexpr size_t RECV_BUF_SIZE = 65536 + 8;
 //   KCP_RESEND     fastresend dup-ack threshold            (default 2)
 //   KCP_NC         nocwnd (1=disable congestion window)    (default 1)
 //   KCP_MINRTO     min RTO ms override (0=nodelay default 30)
+//   KCP_DEAD_LINK  xmit count before ikcp marks state=-1   (default stock)
 //   KCP_DRAIN_CHUNK  re-drain socket every N conns during scan (0=off, rejected)
 //   KCP_DESYNC     stagger per-conn flush phase (0/1, rejected as neutral)
 struct KcpTuning {
@@ -78,6 +83,44 @@ inline const KcpTuning& kcp_tuning() {
                      gi("KCP_DRAIN_CHUNK", 0), gi("KCP_DESYNC", 0)};
   }();
   return t;
+}
+
+inline IUINT32 kcp_dead_link_override() {
+  const char* v = std::getenv("KCP_DEAD_LINK");
+  if (!v || !*v) return 0;
+  int parsed = std::atoi(v);
+  return parsed > 0 ? static_cast<IUINT32>(parsed) : 0;
+}
+
+size_t kcp_send_queue_limit() {
+  const char* v = std::getenv("KCP_SEND_QUEUE_BYTES");
+  if (!v || !*v) return kDefaultSendQueueByteLimit;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return kDefaultSendQueueByteLimit;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
+}
+
+size_t kcp_segment_queue_bytes(iqueue_head* queue) {
+  size_t bytes = 0;
+  iqueue_head* it = queue->next;
+  while (it != queue) {
+    auto* seg = iqueue_entry(it, IKCPSEG, node);
+    bytes += seg->len;
+    it = it->next;
+  }
+  return bytes;
+}
+
+size_t kcp_pending_send_bytes(ikcpcb* kcp) {
+  return kcp_segment_queue_bytes(&kcp->snd_queue) +
+         kcp_segment_queue_bytes(&kcp->snd_buf);
 }
 
 inline IUINT32 now_ms() {
@@ -99,6 +142,9 @@ static inline void kcp_apply_tuning(ikcpcb* kcp, IUINT32 conv) {
   if (t.minrto > 0) kcp->rx_minrto = static_cast<IUINT32>(t.minrto);
   ikcp_setmtu(kcp, KCP_MTU);
   ikcp_wndsize(kcp, t.wnd, t.wnd);
+  if (IUINT32 dead_link = kcp_dead_link_override(); dead_link > 0) {
+    kcp->dead_link = dead_link;
+  }
   if (t.desync && t.interval > 1) {
     kcp->updated = 1;  // skip ikcp_update's "first call" ts_flush reset
     kcp->ts_flush = now_ms() + (conv % static_cast<IUINT32>(t.interval));
@@ -114,15 +160,14 @@ static void set_nonblock(int fd) {
 // buffer HURTS kcp — a 2026-05-31 A/B at 1000conn showed 1MB bufferbloats the
 // ARQ (more queued segments -> spurious RTO retransmits), dropping 0.78 -> 0.52.
 // 256KB is best for kcp. KCP_RCVBUF_KB overrides (sweeps only).
-static void tune_socket_buffers(int fd) {
+static void tune_socket_buffers(int fd, const char* socket_role) {
   int kb = 256;
   if (const char* v = std::getenv("KCP_RCVBUF_KB"); v && *v) {
     int e = std::atoi(v);
     if (e > 0) kb = e;
   }
   int bytes = kb * 1024;
-  ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
-  ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
+  rudp_bench::tune_udp_socket_buffers(fd, bytes, bytes, "kcp", socket_role);
 }
 
 static uint64_t addr_key(const sockaddr_in& a) {
@@ -213,7 +258,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     a.sin_port = htons(port);
     if (::bind(server_fd_, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0)
       std::abort();
-    tune_socket_buffers(server_fd_);  // L17
+    tune_socket_buffers(server_fd_, "server");  // L17
     set_nonblock(server_fd_);
   }
 
@@ -226,7 +271,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     if (client_fd_ < 0) {
       client_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
       if (client_fd_ < 0) std::abort();
-      tune_socket_buffers(client_fd_);  // L17
+      tune_socket_buffers(client_fd_, "client");  // L17
       set_nonblock(client_fd_);
       sockaddr_in srv{};
       srv.sin_family = AF_INET;
@@ -252,7 +297,12 @@ class KcpAdapter : public rudp_bench::Adapter {
 
   bool is_connected(uint32_t conn_id) override {
     auto it = conns_.find(conn_id);
-    return it != conns_.end() && it->second->connected;
+    if (it == conns_.end()) return false;
+    KcpConn* conn = it->second.get();
+    if (conn->connected && conn->kcp && conn->kcp->state == static_cast<IUINT32>(-1)) {
+      mark_dead(conn);
+    }
+    return conn->connected;
   }
 
   // ----------------------------------------------------------
@@ -266,9 +316,13 @@ class KcpAdapter : public rudp_bench::Adapter {
     auto it = conns_.find(conn_id);
     if (it == conns_.end()) return -1;
     KcpConn* conn = it->second.get();
+    if (!conn->connected) return -1;
 
     if (reliable) {
       ensure_kcp(conn);
+      size_t limit = kcp_send_queue_limit();
+      size_t pending = kcp_pending_send_bytes(conn->kcp);
+      if (pending > limit || len > limit - pending) return -1;
       if (ikcp_send(conn->kcp, static_cast<const char*>(data),
                     static_cast<int>(len)) < 0) {
         return -1;
@@ -279,6 +333,11 @@ class KcpAdapter : public rudp_bench::Adapter {
     }
 
     // unreliable bypass: raw UDP with conv header
+    // §3.1 backpressure 注記: unreliable は KCP を経由せず生 sendto で即時送出
+    // するため、adapter/KCP 側に送信キューが存在しない。よって
+    // KCP_SEND_QUEUE_BYTES (32MiB) の cap 対象は reliable のみで、unreliable は
+    // カウント対象外(= cap 不要)という設計判断。ソケットバッファ満杯時は
+    // sendto が失敗して -1 を返すので、backpressure はカーネル側で完結する。
     raw_send_scratch_.resize(5 + len);
     raw_send_scratch_[0] = PREFIX_RAW;
     std::memcpy(raw_send_scratch_.data() + 1, &conn->conv, 4);
@@ -315,7 +374,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     int since_drain = 0;
     for (auto& [id, conn] : conns_) {
       (void)id;
-      if (!conn->kcp) continue;
+      if (!conn->connected || !conn->kcp) continue;
       // Interleave socket draining so a long 1000-conn update scan does not
       // starve the receive side (input piling in the socket buffer -> overflow
       // -> KCP retransmit -> window stall). Refresh `now` after re-draining so
@@ -328,6 +387,10 @@ class KcpAdapter : public rudp_bench::Adapter {
       if (conn->update_due || conn->next_update == 0 ||
           time_due(now, conn->next_update)) {
         ikcp_update(conn->kcp, now);
+        if (conn->kcp->state == static_cast<IUINT32>(-1)) {
+          mark_dead(conn.get());
+          continue;
+        }
         drain_kcp(conn.get());
         conn->next_update = ikcp_check(conn->kcp, now);
         conn->update_due = false;
@@ -346,6 +409,7 @@ class KcpAdapter : public rudp_bench::Adapter {
     id_by_addrconv_.clear();
     if (server_fd_ >= 0) { ::close(server_fd_); server_fd_ = -1; }
     if (client_fd_ >= 0) { ::close(client_fd_); client_fd_ = -1; }
+    shutdown_by_transport_ = 0;
   }
 
   const char* name() const override { return "kcp"; }
@@ -357,6 +421,11 @@ class KcpAdapter : public rudp_bench::Adapter {
     return reliable ? "poll_update" : "immediate";
   }
   bool encryption_on() const override { return false; }
+  rudp_bench::ConnectionStats connection_stats() const override {
+    rudp_bench::ConnectionStats s;
+    s.shutdown_by_transport = shutdown_by_transport_;
+    return s;
+  }
 
  private:
   int server_fd_ = -1;
@@ -373,10 +442,11 @@ class KcpAdapter : public rudp_bench::Adapter {
   std::vector<uint8_t> raw_send_scratch_;
   std::array<uint8_t, RECV_BUF_SIZE> recv_scratch_{};
   rudp_bench::ReusableInboundQueue inbox_;
+  uint32_t shutdown_by_transport_ = 0;
 
   // KCP インスタンスを持つか確認、なければ生成 (server 側の遅延生成)
   void ensure_kcp(KcpConn* conn) {
-    if (conn->kcp) return;
+    if (!conn || !conn->connected || conn->kcp) return;
     conn->kcp = ikcp_create(conn->conv, &conn->out_ctx);
     ikcp_setoutput(conn->kcp, kcp_output_cb);
     kcp_apply_tuning(conn->kcp, conn->conv);
@@ -421,7 +491,9 @@ class KcpAdapter : public rudp_bench::Adapter {
                         ? alloc_server_conn(src, conv)
                         : it->second;
           auto& conn = conns_[id];
+          if (!conn->connected) continue;
           ensure_kcp(conn.get());
+          if (!conn->kcp) continue;
           ikcp_input(conn->kcp, reinterpret_cast<char*>(raw + 1),
                      static_cast<long>(n - 1));
           conn->update_due = true;
@@ -433,6 +505,7 @@ class KcpAdapter : public rudp_bench::Adapter {
           uint32_t id = (it == id_by_addrconv_.end())
                         ? alloc_server_conn(src, conv)
                         : it->second;
+          if (!conns_[id]->connected) continue;
           enqueue_raw(id, raw + 5, static_cast<size_t>(n - 5));
         }
       }
@@ -445,7 +518,7 @@ class KcpAdapter : public rudp_bench::Adapter {
         if (prefix == PREFIX_KCP && n > 5) {
           IUINT32 conv = ikcp_getconv(raw + 1);
           auto it = conns_.find(static_cast<uint32_t>(conv));
-          if (it != conns_.end() && it->second->kcp) {
+          if (it != conns_.end() && it->second->connected && it->second->kcp) {
             ikcp_input(it->second->kcp, reinterpret_cast<char*>(raw + 1),
                        static_cast<long>(n - 1));
             it->second->update_due = true;
@@ -454,7 +527,7 @@ class KcpAdapter : public rudp_bench::Adapter {
         } else if (prefix == PREFIX_RAW && n >= 5) {
           IUINT32 conv; std::memcpy(&conv, raw + 1, 4);
           auto it = conns_.find(static_cast<uint32_t>(conv));
-          if (it != conns_.end()) {
+          if (it != conns_.end() && it->second->connected) {
             enqueue_raw(it->second->conn_id, raw + 5, static_cast<size_t>(n - 5));
           }
         }
@@ -475,6 +548,13 @@ class KcpAdapter : public rudp_bench::Adapter {
 
   void enqueue_raw(uint32_t conn_id, const uint8_t* data, size_t len) {
     inbox_.enqueue(conn_id, data, len);
+  }
+
+  void mark_dead(KcpConn* conn) {
+    if (!conn || !conn->connected) return;
+    conn->connected = false;
+    conn->update_due = false;
+    ++shutdown_by_transport_;
   }
 };
 

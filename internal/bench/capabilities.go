@@ -93,7 +93,7 @@ func init() {
 			Encryption: "off",
 			MaxConns:   -1,
 			Modes: map[string]ModeCapability{
-				"r": {MaxPayload: 65536, FlushPolicy: "blocking_stream", Transport: "stream"},
+				"r": {MaxPayload: 65536, FlushPolicy: "nonblocking_stream_pending_queue", Transport: "stream"},
 			},
 		},
 		"yojimbo": {

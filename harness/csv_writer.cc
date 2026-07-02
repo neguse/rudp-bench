@@ -25,7 +25,12 @@ void write_header(std::ostream& os) {
      << "client_recv_drained_p99,client_recv_drained_max,"
      << "client_outstanding_max,client_tick_ok,"
      << "conn_peak,conn_disc_transport,conn_disc_peer,"
-     << "delivery_dedup_policy,cpu_pct_peak,close_ms\n";
+     << "delivery_dedup_policy,cpu_pct_peak,close_ms,"
+     // 新規診断列は末尾追加のみ（Go 側リーダーはヘッダ名ベース。既存列の
+     // 削除・改名・順序変更は互換性破壊なので禁止）。
+     << "rtt_sched_r_p50_us,rtt_sched_r_p95_us,rtt_sched_r_p99_us,"
+     << "rtt_sched_u_p50_us,rtt_sched_u_p95_us,rtt_sched_u_p99_us,"
+     << "inbox_dropped,cc_algo,thread_model\n";
 }
 
 void write_row(std::ostream& os, const CsvRow& r) {
@@ -59,7 +64,13 @@ void write_row(std::ostream& os, const CsvRow& r) {
      << r.conn_peak << ',' << r.conn_disc_transport << ','
      << r.conn_disc_peer << ','
      << r.delivery_dedup_policy << ','
-     << std::setprecision(2) << r.cpu_pct_peak << ',' << r.close_ms << '\n';
+     << std::setprecision(2) << r.cpu_pct_peak << ',' << r.close_ms << ','
+     << r.rtt_sched_r_p50_us << ',' << r.rtt_sched_r_p95_us << ','
+     << r.rtt_sched_r_p99_us << ','
+     << r.rtt_sched_u_p50_us << ',' << r.rtt_sched_u_p95_us << ','
+     << r.rtt_sched_u_p99_us << ','
+     << r.inbox_dropped << ','
+     << r.cc_algo << ',' << r.thread_model << '\n';
 }
 
 }  // namespace rudp_bench

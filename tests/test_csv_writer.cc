@@ -45,4 +45,9 @@ TEST(CsvWriter, WritesHeaderAndRow) {
   EXPECT_NE(out.find("mode,idle_policy,flush_policy"), std::string::npos);
   EXPECT_NE(out.find("raw_udp,off,1,0,100,64,1,0.000"), std::string::npos);
   EXPECT_NE(out.find("sliding_window_65536_per_conn"), std::string::npos);
+  // §5.3/§6.2: 診断列は既存列の末尾に追加のみ（順序変更・改名は禁止）。
+  EXPECT_NE(out.find("close_ms,rtt_sched_r_p50_us"), std::string::npos);
+  EXPECT_NE(out.find("rtt_sched_u_p99_us,inbox_dropped,"), std::string::npos);
+  // §3.2-3.3: 公平性メタデータ列（cc_algo / thread_model）も末尾追加。
+  EXPECT_NE(out.find("inbox_dropped,cc_algo,thread_model\n"), std::string::npos);
 }

@@ -5,10 +5,12 @@
 #include <enet/enet.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -21,6 +23,42 @@ namespace {
 // without limit. 65536 messages is generous headroom over the harness's
 // per-poll drain (kServerRecvDrainLimit=1024); overflow drops oldest + counts.
 constexpr size_t kEnetInboxLimit = 1u << 16;
+constexpr size_t kDefaultReliableQueueLimit = 32u * 1024u * 1024u;
+
+size_t enet_reliable_queue_limit() {
+  const char* v = std::getenv("ENET_RELIABLE_QUEUE_BYTES");
+  if (!v || !*v) return kDefaultReliableQueueLimit;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return kDefaultReliableQueueLimit;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
+}
+
+size_t enet_reliable_payload_bytes(ENetList* list) {
+  size_t bytes = 0;
+  ENetListIterator it = enet_list_begin(list);
+  ENetListIterator end = enet_list_end(list);
+  while (it != end) {
+    auto* cmd = reinterpret_cast<ENetOutgoingCommand*>(it);
+    if (cmd->packet != nullptr &&
+        (cmd->command.header.command & ENET_PROTOCOL_COMMAND_FLAG_ACKNOWLEDGE)) {
+      bytes += cmd->fragmentLength;
+    }
+    it = enet_list_next(it);
+  }
+  return bytes;
+}
+
+size_t enet_reliable_pending_bytes(ENetPeer* peer) {
+  return enet_reliable_payload_bytes(&peer->outgoingSendReliableCommands) +
+         enet_reliable_payload_bytes(&peer->sentReliableCommands);
+}
 
 // --- Optional pooling allocator (ENET_POOL=1, default on) ----------------
 // enet does ~3 small mallocs per message (ENetPacket + data buffer +
@@ -278,6 +316,7 @@ class EnetAdapter : public rudp_bench::Adapter {
   }
 
   int send(uint32_t conn_id, const void* data, size_t len, bool reliable) override {
+    if (len > max_payload_bytes(reliable)) return -1;
     auto it = peer_by_id_.find(conn_id);
     if (it == peer_by_id_.end()) return -1;
     ENetPeer* peer = it->second;
@@ -289,6 +328,9 @@ class EnetAdapter : public rudp_bench::Adapter {
     if (reliable) {
       channel = 0;
       flags = ENET_PACKET_FLAG_RELIABLE;
+      size_t limit = enet_reliable_queue_limit();
+      size_t pending = enet_reliable_pending_bytes(peer);
+      if (pending > limit || len > limit - pending) return -1;
     } else {
       channel = 1;
       flags = enet_unsequenced_unreliable_enabled() ? ENET_PACKET_FLAG_UNSEQUENCED : 0;
@@ -357,6 +399,9 @@ class EnetAdapter : public rudp_bench::Adapter {
     return policy.c_str();
   }
   bool encryption_on() const override { return false; }
+  // window ベースではない確率的 throttle。slow start なし（audit §5）。
+  const char* congestion_control() const override { return "enet_throttle"; }
+  const char* thread_model() const override { return "single"; }
   rudp_bench::ConnectionStats connection_stats() const override { return stats_; }
 
  private:
@@ -369,21 +414,29 @@ class EnetAdapter : public rudp_bench::Adapter {
     return id;
   }
 
+  // id 採番と connected_ids_ 登録をまとめて行う。RECEIVE で未知 peer に id を
+  // 採番したときも connected_ids_ に入れ、is_connected() と整合させる
+  // (以前は CONNECT 経由でしか登録されず is_connected()=false になりえた)。
+  uint32_t register_connected_peer(ENetPeer* peer) {
+    uint32_t id = peer_id(peer);
+    if (connected_ids_.insert(id).second) {
+      ++connected_current_;
+      if (connected_current_ > stats_.connected_peak) {
+        stats_.connected_peak = connected_current_;
+      }
+    }
+    return id;
+  }
+
   void handle_event(ENetEvent& ev) {
     switch (ev.type) {
       case ENET_EVENT_TYPE_CONNECT: {
         enet_configure_peer(ev.peer);
-        uint32_t id = peer_id(ev.peer);
-        if (connected_ids_.insert(id).second) {
-          ++connected_current_;
-          if (connected_current_ > stats_.connected_peak) {
-            stats_.connected_peak = connected_current_;
-          }
-        }
+        register_connected_peer(ev.peer);
         break;
       }
       case ENET_EVENT_TYPE_RECEIVE: {
-        uint32_t id = peer_id(ev.peer);
+        uint32_t id = register_connected_peer(ev.peer);
         inbox_.enqueue(id, ev.packet->data, ev.packet->dataLength);
         enet_packet_destroy(ev.packet);
         break;

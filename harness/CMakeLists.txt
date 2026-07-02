@@ -5,6 +5,7 @@ add_library(rudp_bench_harness STATIC
   csv_writer.cc
   proc_sampler.cc
   runner.cc
+  socket_buffer.cc
 )
 target_include_directories(rudp_bench_harness PUBLIC ${CMAKE_SOURCE_DIR})
 

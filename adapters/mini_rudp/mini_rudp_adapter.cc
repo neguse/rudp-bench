@@ -1,6 +1,7 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
 #include "harness/sliding_dedup_window.h"
+#include "harness/socket_buffer.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -8,8 +9,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -31,8 +35,11 @@ namespace {
 constexpr uint16_t FLAG_ACK = 1;
 constexpr uint16_t FLAG_REL = 2;
 constexpr size_t MAX_UDP_PAYLOAD = 65507;
-constexpr size_t MAX_PENDING_RELIABLE_PER_CONN = 65'536;
+// §3.1: 未 ACK reliable のバックプレッシャはバイト基準 32MiB(他 adapter と統一。
+// 以前はメッセージ数基準 65536 件で、accepted_ratio の意味が lib 毎に違った)。
+constexpr size_t DEFAULT_PENDING_RELIABLE_BYTES = 32u * 1024u * 1024u;
 constexpr auto RETX_TIMEOUT = std::chrono::milliseconds(50);
+constexpr int DEFAULT_RELIABLE_TIMEOUT_MS = 10'000;
 // L17: 256KB, uniform across the UDP adapters. A 2026-05-31 A/B confirmed a
 // bigger buffer is no help (enet) or harmful (kcp bufferbloat), so 256KB stays.
 constexpr int UDP_SOCKET_BUFFER_BYTES = 256 * 1024;
@@ -47,6 +54,7 @@ using clock_type = std::chrono::steady_clock;
 
 struct PendingSend {
   std::vector<uint8_t> bytes;
+  clock_type::time_point first_sent_at;
   clock_type::time_point sent_at;
 };
 
@@ -54,7 +62,9 @@ struct Conn {
   sockaddr_in peer{};
   uint32_t conv = 0;       // wire 上の論理 conn id
   uint32_t next_seq = 1;
+  bool active = true;
   std::unordered_map<uint32_t, PendingSend> pending;  // 未 ACK (reliable)
+  size_t pending_bytes = 0;                           // 未 ACK バイト合計
   rudp_bench::SlidingDedupWindow received_seq;        // bounded duplicate suppress
 };
 
@@ -90,10 +100,33 @@ void set_nonblock(int fd) {
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-void tune_socket_buffers(int fd) {
-  int bytes = UDP_SOCKET_BUFFER_BYTES;
-  ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
-  ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes));
+void tune_socket_buffers(int fd, const char* socket_role) {
+  rudp_bench::tune_udp_socket_buffers(fd, UDP_SOCKET_BUFFER_BYTES,
+                                      UDP_SOCKET_BUFFER_BYTES, "mini_rudp",
+                                      socket_role);
+}
+
+size_t pending_reliable_byte_limit() {
+  const char* v = std::getenv("MINI_RUDP_PENDING_BYTES");
+  if (!v || !*v) return DEFAULT_PENDING_RELIABLE_BYTES;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return DEFAULT_PENDING_RELIABLE_BYTES;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
+}
+
+std::chrono::milliseconds reliable_timeout() {
+  const char* v = std::getenv("MINI_RUDP_RELIABLE_TIMEOUT_MS");
+  if (!v || !*v) return std::chrono::milliseconds(DEFAULT_RELIABLE_TIMEOUT_MS);
+  int parsed = std::atoi(v);
+  if (parsed <= 0) return std::chrono::milliseconds(DEFAULT_RELIABLE_TIMEOUT_MS);
+  return std::chrono::milliseconds(parsed);
 }
 
 class MiniRudpAdapter : public rudp_bench::Adapter {
@@ -104,7 +137,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     server_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     int reuse = 1;
     ::setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    tune_socket_buffers(server_fd_);  // L17
+    tune_socket_buffers(server_fd_, "server");  // L17
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -117,7 +150,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     // L11: 1 本の共有ソケットを初回だけ生成。以降の conn は全てこの fd を多重化。
     if (client_fd_ < 0) {
       client_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
-      tune_socket_buffers(client_fd_);  // L17
+      tune_socket_buffers(client_fd_, "client");  // L17
       set_nonblock(client_fd_);
     }
     uint32_t id = next_id_++;
@@ -130,19 +163,26 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     return id;
   }
 
-  bool is_connected(uint32_t) override { return true; }
+  bool is_connected(uint32_t conn_id) override {
+    Conn* c = find_conn(conn_id);
+    return c != nullptr && c->active;
+  }
 
   int send(uint32_t conn_id, const void* data, size_t len, bool reliable) override {
     if (len > max_payload_bytes(reliable)) return -1;
     auto* c = find_conn(conn_id);
-    if (!c) return -1;
-    if (reliable && c->pending.size() >= MAX_PENDING_RELIABLE_PER_CONN) {
-      return -1;
+    if (!c || !c->active) return -1;
+    if (reliable) {
+      size_t limit = pending_reliable_byte_limit();
+      size_t pkt_size = sizeof(Header) + len;
+      if (c->pending_bytes > limit || pkt_size > limit - c->pending_bytes) {
+        return -1;
+      }
     }
     Header h;
     h.flags = reliable ? FLAG_REL : 0;
     h.conv = c->conv;
-    h.seq = c->next_seq++;
+    h.seq = next_packet_seq(*c);
 
     if (reliable) {
       // L12: 送信バッファをプールから取り、未 ACK の間 pending が保持。ACK で
@@ -156,7 +196,8 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
         return -1;
       }
       auto now = clock_type::now();
-      c->pending[h.seq] = PendingSend{std::move(pkt), now};
+      c->pending_bytes += pkt.size();
+      c->pending[h.seq] = PendingSend{std::move(pkt), now, now};
       schedule_retx(now);
       return 0;
     }
@@ -202,12 +243,14 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
           id = it->second;
         }
         c = &conns_[id];
+        if (!c->active) continue;
         c->peer = src;  // path 変化に追従
         out_id = id;
       } else {
         auto it = conns_.find(h.conv);
         if (it == conns_.end()) continue;  // 未知 conv は捨てる
         c = &it->second;
+        if (!c->active) continue;
         out_id = h.conv;
       }
 
@@ -230,10 +273,17 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     if (now < earliest_retx_) return;
 
     auto next_earliest = clock_type::time_point::max();
+    auto timeout = reliable_timeout();
+    std::vector<uint32_t> timed_out;
     for (auto& [id, c] : conns_) {
-      (void)id;
+      if (!c.active) continue;
+      bool conn_timed_out = false;
       for (auto& [seq, ps] : c.pending) {
         (void)seq;
+        if (now - ps.first_sent_at >= timeout) {
+          conn_timed_out = true;
+          break;
+        }
         auto due = ps.sent_at + RETX_TIMEOUT;
         if (now >= due) {
           raw_send(c, ps.bytes.data(), ps.bytes.size());
@@ -242,6 +292,10 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
         }
         if (due < next_earliest) next_earliest = due;
       }
+      if (conn_timed_out) timed_out.push_back(id);
+    }
+    for (uint32_t id : timed_out) {
+      expire_conn(id);
     }
     earliest_retx_ = next_earliest;  // max() = 未 ACK 無し → 次回も即 early-out
   }
@@ -253,6 +307,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     id_by_key_.clear();
     free_buffers_.clear();
     earliest_retx_ = clock_type::time_point::max();
+    shutdown_by_transport_ = 0;
   }
 
   const char* name() const override { return "mini_rudp"; }
@@ -264,11 +319,44 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
     return reliable ? "immediate_retransmit_poll" : "immediate";
   }
   bool encryption_on() const override { return false; }
+  const char* congestion_control() const override { return "none"; }
+  const char* thread_model() const override { return "single"; }
+  rudp_bench::ConnectionStats connection_stats() const override {
+    rudp_bench::ConnectionStats s;
+    s.shutdown_by_transport = shutdown_by_transport_;
+    return s;
+  }
 
  private:
   Conn* find_conn(uint32_t id) {
     auto it = conns_.find(id);
     return it == conns_.end() ? nullptr : &it->second;
+  }
+
+  uint32_t next_packet_seq(Conn& c) {
+    uint32_t seq = c.next_seq++;
+    if (seq == 0) seq = c.next_seq++;
+    return seq;
+  }
+
+  void expire_conn(uint32_t id) {
+    auto it = conns_.find(id);
+    if (it == conns_.end()) return;
+    it->second.active = false;
+    for (auto& [seq, ps] : it->second.pending) {
+      (void)seq;
+      recycle_buffer(std::move(ps.bytes));
+    }
+    it->second.pending.clear();
+    it->second.pending_bytes = 0;
+    ++shutdown_by_transport_;
+    for (auto map_it = id_by_key_.begin(); map_it != id_by_key_.end();) {
+      if (map_it->second == id) {
+        map_it = id_by_key_.erase(map_it);
+      } else {
+        ++map_it;
+      }
+    }
   }
 
   // 共有 fd 経由で c.peer 宛てに送る（server/client 共通）。
@@ -304,6 +392,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
   void ack_pending(Conn& c, uint32_t seq) {
     auto it = c.pending.find(seq);
     if (it == c.pending.end()) return;
+    c.pending_bytes -= it->second.bytes.size();
     recycle_buffer(std::move(it->second.bytes));
     c.pending.erase(it);
   }
@@ -335,6 +424,7 @@ class MiniRudpAdapter : public rudp_bench::Adapter {
   uint8_t recv_scratch_[MAX_UDP_PAYLOAD];
   clock_type::time_point earliest_retx_ = clock_type::time_point::max();
   uint32_t next_id_ = 1;
+  uint32_t shutdown_by_transport_ = 0;
 };
 
 }  // namespace

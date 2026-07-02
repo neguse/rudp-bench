@@ -131,6 +131,54 @@ func AppendRow(path string, fields []string, row map[string]string) error {
 	return w.Error()
 }
 
+// RemoveRows rewrites the CSV at path without the rows for which match
+// returns true, preserving the original header. Returns the number of rows
+// removed. A missing or empty file is a no-op.
+// resume/再実行時に result.Append の追記で同一 run の行が重複しないよう、
+// 事前に既存行を除去するために使う。
+func RemoveRows(path string, match func(row map[string]string) bool) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	r := csv.NewReader(f)
+	header, err := r.Read()
+	if err != nil {
+		f.Close()
+		return 0, nil // empty file
+	}
+	var kept []map[string]string
+	removed := 0
+	for {
+		record, err := r.Read()
+		if err != nil {
+			break
+		}
+		row := make(map[string]string, len(header))
+		for i, col := range header {
+			if i < len(record) {
+				row[col] = record[i]
+			}
+		}
+		if match(row) {
+			removed++
+			continue
+		}
+		kept = append(kept, row)
+	}
+	f.Close()
+	if removed == 0 {
+		return 0, nil
+	}
+	if err := WriteCSV(path, header, kept); err != nil {
+		return removed, err
+	}
+	return removed, nil
+}
+
 // CombineCSV globs the given patterns, combines all matching CSVs into one
 // output file, and returns the total row count. The header is taken from the
 // first file found.

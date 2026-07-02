@@ -1,6 +1,7 @@
 #include "harness/metrics.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <ostream>
 
@@ -61,7 +62,16 @@ void LatencyHist::write_binary(std::ostream& os) const {
 uint64_t LatencyHist::percentile_us(double p) {
   if (count_ == 0) return 0;
   double q = std::clamp(p, 0.0, 1.0);
-  uint64_t target = static_cast<uint64_t>(q * static_cast<double>(count_ - 1)) + 1;
+  // §5.4: ランク定義は nearest-rank（ceil(count * p)）に統一。runner.cc の
+  // BoundedHistogram::percentile_per_mille（ceil(count*pm/1000)）と同じ規約。
+  // 旧実装 floor(q*(count-1))+1 は端数条件によって 1 ランク楽観側に出ていた。
+  // 注意: internal/result/histogram.go の PercentileUS は旧規約のままなので、
+  // bin ファイルから Go 側が再計算した値とは端数ケースで 1 ランクずれうる
+  //（bin ファイルフォーマット自体は不変）。
+  uint64_t target = static_cast<uint64_t>(
+      std::ceil(q * static_cast<double>(count_)));
+  if (target == 0) target = 1;
+  if (target > count_) target = count_;
   uint64_t seen = 0;
   for (size_t i = 0; i < bins_.size(); ++i) {
     seen += bins_[i];

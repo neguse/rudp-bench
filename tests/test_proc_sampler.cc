@@ -50,6 +50,34 @@ TEST(ProcSampler, CpuPeakSurfacesSpikeAndMeasureBeginExcludesWarmup) {
   EXPECT_GE(s.cpu_samples(), 2u);
 }
 
+// §5.1: mark_measure_end() 後の busy 区間・sample・end() は計測に入らない。
+// サーバの tail（無トラフィック区間）が cpu_pct の分母を希釈しないことの担保。
+TEST(ProcSampler, MarkMeasureEndFreezesWindow) {
+  auto burn = [](std::chrono::milliseconds d) {
+    auto t0 = std::chrono::steady_clock::now();
+    volatile uint64_t x = 0;
+    while (std::chrono::steady_clock::now() - t0 < d) {
+      for (int i = 0; i < 100000; ++i) x += i;
+    }
+    (void)x;
+  };
+  ProcSampler s;
+  s.begin();
+  burn(std::chrono::milliseconds(60));
+  s.mark_measure_end();
+  double frozen = s.cpu_pct();
+  uint64_t rss_frozen = s.rss_max_mb();
+  EXPECT_GT(frozen, 0.0);
+
+  // "tail": idle しつつ sample を続けても集計は変わらない。
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  s.sample_cpu();
+  s.sample_rss();
+  s.end();
+  EXPECT_DOUBLE_EQ(s.cpu_pct(), frozen);
+  EXPECT_EQ(s.rss_max_mb(), rss_frozen);
+}
+
 TEST(ProcSampler, RssReadable) {
   ProcSampler s;
   s.begin();

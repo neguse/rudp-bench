@@ -15,9 +15,12 @@ extern int g_cbUDPSocketBufferSize;
 }
 
 #include <arpa/inet.h>
+#include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -27,6 +30,22 @@ namespace {
 
 // Larger batch now that one ReceiveMessagesOnPollGroup call drains all conns.
 constexpr int GNS_RECV_BATCH = 256;
+constexpr size_t kDefaultGnsInboxLimit = 1u << 16;
+
+size_t gns_inbox_limit() {
+  const char* v = std::getenv("GNS_INBOX_MESSAGES");
+  if (!v || !*v) return kDefaultGnsInboxLimit;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return kDefaultGnsInboxLimit;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
+}
 
 struct GnsOptions {
   // Nagle ON by default: the canonical broadcast profiles are syscall-bound
@@ -91,6 +110,7 @@ class GnsAdapter : public rudp_bench::Adapter {
   explicit GnsAdapter(GnsOptions options = {}) : options_(options) {
     ensure_gns_init(options_.socket_buffer_bytes);
     iface_ = SteamNetworkingSockets();
+    inbox_.set_limit(gns_inbox_limit());
     // One poll group for ALL connections so receive draining is a few
     // ReceiveMessagesOnPollGroup calls per tick instead of one
     // ReceiveMessagesOnConnection per conn. The per-conn path took the global
@@ -271,8 +291,10 @@ class GnsAdapter : public rudp_bench::Adapter {
     }
 
     std::vector<HSteamNetConnection> to_close;
+    uint64_t inbox_dropped = 0;
     {
       std::lock_guard<std::mutex> lock(mtx_);
+      inbox_dropped = inbox_.dropped();
       for (auto& [id, hConn] : id_to_conn_) to_close.push_back(hConn);
       id_to_conn_.clear();
       conn_to_id_.clear();
@@ -288,6 +310,11 @@ class GnsAdapter : public rudp_bench::Adapter {
       iface_->DestroyPollGroup(poll_group_);
       poll_group_ = k_HSteamNetPollGroup_Invalid;
     }
+    if (inbox_dropped > 0) {
+      std::fprintf(stderr, "gns_inbox_dropped: %llu\n",
+                   (unsigned long long)inbox_dropped);
+      std::fflush(stderr);
+    }
   }
 
   const char* name() const override { return "gns"; }
@@ -300,6 +327,17 @@ class GnsAdapter : public rudp_bench::Adapter {
     return options_.use_nagle ? "nagle" : "no_nagle";
   }
   bool encryption_on() const override { return options_.encrypted; }
+  // TFRC + token bucket。adapter が SendRateMax を 256MB/s に引き上げて
+  // レート制御を実質無効化している（audit §10）。
+  const char* congestion_control() const override { return "tfrc_maxrate_boosted"; }
+  const char* thread_model() const override { return "internal_worker"; }
+
+  // connected_ids_ の推移から conn_peak / 切断数を報告する (以前は未オーバー
+  // ライドで常に {0,0,0} だった)。callback スレッドから更新されるため atomic。
+  rudp_bench::ConnectionStats connection_stats() const override {
+    return {connected_peak_.load(), shutdown_by_transport_.load(),
+            shutdown_by_peer_.load()};
+  }
 
   // gns_status_callback から呼ばれる (g_gns.mtx は既に解放済み)
   void on_status_changed(SteamNetConnectionStatusChangedCallback_t* info) {
@@ -343,7 +381,14 @@ class GnsAdapter : public rudp_bench::Adapter {
         std::lock_guard<std::mutex> lock(mtx_);
         auto it = conn_to_id_.find(hConn);
         if (it != conn_to_id_.end()) {
-          connected_ids_.insert(it->second);
+          if (connected_ids_.insert(it->second).second) {
+            uint32_t now =
+                static_cast<uint32_t>(connected_ids_.size());
+            uint32_t peak = connected_peak_.load();
+            while (now > peak &&
+                   !connected_peak_.compare_exchange_weak(peak, now)) {
+            }
+          }
         }
         break;
       }
@@ -355,7 +400,14 @@ class GnsAdapter : public rudp_bench::Adapter {
         auto it = conn_to_id_.find(hConn);
         if (it != conn_to_id_.end()) {
           uint32_t id = it->second;
-          connected_ids_.erase(id);
+          if (connected_ids_.erase(id) > 0) {
+            // connected 状態から落ちた接続だけ切断としてカウントする
+            if (state == k_ESteamNetworkingConnectionState_ClosedByPeer) {
+              shutdown_by_peer_.fetch_add(1, std::memory_order_relaxed);
+            } else {
+              shutdown_by_transport_.fetch_add(1, std::memory_order_relaxed);
+            }
+          }
           id_to_conn_.erase(id);
           conn_to_id_.erase(it);
         }
@@ -406,6 +458,12 @@ class GnsAdapter : public rudp_bench::Adapter {
   std::unordered_map<HSteamNetConnection, uint32_t> conn_to_id_;
   std::unordered_set<uint32_t> connected_ids_;
   uint32_t next_id_ = 1;
+
+  // 接続イベントの累計 (connection_stats() で読み取る)。更新は mtx_ 保持下の
+  // callback から行うが、読み取りが const メソッドなので atomic にしている。
+  std::atomic<uint32_t> connected_peak_{0};
+  std::atomic<uint32_t> shutdown_by_transport_{0};
+  std::atomic<uint32_t> shutdown_by_peer_{0};
 
   rudp_bench::ReusableInboundQueue inbox_;
 

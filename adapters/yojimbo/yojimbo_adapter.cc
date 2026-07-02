@@ -90,6 +90,12 @@ public:
 
 // ----- 共通設定ファクトリ -----
 
+// §3.1 backpressure 注記: yojimbo は送信キュー残量をメッセージ数でしか公開しない
+// (CanSendMessage / messageSendQueueSize。キュー内バイト数の取得 API は無い)。
+// 送信 cap は CanSendMessage 事前チェック(4096 件/channel)のままとするが、
+// 1 メッセージ最大 kMaxPayloadBytes=4096B なので実質バイト上限は
+// 4096 件 × 4096B = 16MiB/channel と、他 adapter の 32MiB バイト基準の範囲内に
+// 収まっており、adapter 側で追加のバイトカウンタを併設する意味は薄い。
 static yojimbo::ClientServerConfig MakeConfig() {
     yojimbo::ClientServerConfig cfg;
     cfg.protocolId = kProtocolId;
@@ -243,6 +249,8 @@ public:
     uint32_t max_connections() const override { return yojimbo::MaxClients; }
     const char* flush_policy(bool /*reliable*/) const override { return "poll_send_packets"; }
     bool encryption_on() const override { return true; }
+    const char* congestion_control() const override { return "none"; }
+    const char* thread_model() const override { return "single"; }
 
 private:
     void drain_server_messages() {

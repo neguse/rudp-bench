@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -7,6 +8,16 @@
 #include <vector>
 
 namespace rudp_bench {
+
+// §6.2: プロセス全体の inbound queue drop 累計。キューは各 adapter の内部に
+// 埋まっていて Adapter インターフェースからは見えないため、runner が CSV の
+// 診断列（inbox_dropped）に出せるようここでも集計する。adapter によっては
+// 別スレッドから enqueue するので atomic（relaxed で十分: 単調カウンタを
+// run 終了後に snapshot するだけ）。
+inline std::atomic<uint64_t>& inbound_queue_dropped_total() {
+  static std::atomic<uint64_t> total{0};
+  return total;
+}
 
 class ReusableInboundQueue {
  public:
@@ -23,6 +34,7 @@ class ReusableInboundQueue {
       ready_.pop_front();
       recycle(std::move(old.data));
       ++dropped_;
+      inbound_queue_dropped_total().fetch_add(1, std::memory_order_relaxed);
     }
     std::vector<uint8_t> buf;
     if (!free_.empty()) {

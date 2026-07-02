@@ -3,6 +3,7 @@
 #include "harness/adapter_registry.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -19,6 +20,35 @@ class RakNetRegistrar {
 static RakNetRegistrar registrar;
 
 using namespace rudp_bench;
+
+namespace {
+
+class ScopedEnv {
+ public:
+  ScopedEnv(const char* name, const char* value) : name_(name) {
+    const char* old = std::getenv(name);
+    if (old) {
+      had_old_ = true;
+      old_ = old;
+    }
+    ::setenv(name_.c_str(), value, 1);
+  }
+
+  ~ScopedEnv() {
+    if (had_old_) {
+      ::setenv(name_.c_str(), old_.c_str(), 1);
+    } else {
+      ::unsetenv(name_.c_str());
+    }
+  }
+
+ private:
+  std::string name_;
+  std::string old_;
+  bool had_old_ = false;
+};
+
+}  // namespace
 
 TEST(RakNetSmoke, MultiConnectionReliableEcho) {
   auto server = create_adapter("raknet");
@@ -91,6 +121,37 @@ TEST(RakNetSmoke, MultiConnectionReliableEcho) {
   }
 
   EXPECT_EQ(got.size(), expected.size());
+  client->close();
+  server->close();
+}
+
+TEST(RakNetSmoke, OutgoingQueueCapReturnsBackpressure) {
+  ScopedEnv cap("RAKNET_OUTGOING_BYTES", "4096");
+  auto server = create_adapter("raknet");
+  auto client = create_adapter("raknet");
+  ASSERT_NE(server, nullptr);
+  ASSERT_NE(client, nullptr);
+
+  constexpr uint16_t kPort = 0xC502;
+  server->server_listen(kPort);
+  uint32_t cid = client->client_connect("127.0.0.1", kPort);
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < deadline &&
+         !client->is_connected(cid)) {
+    server->poll();
+    client->poll();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(client->is_connected(cid));
+
+  std::string too_large(5000, 'x');
+  EXPECT_EQ(client->send(cid, too_large.data(), too_large.size(), true), -1);
+  EXPECT_TRUE(client->is_connected(cid));
+
+  const char ok[] = "ok";
+  EXPECT_EQ(client->send(cid, ok, sizeof(ok), true), 0);
+
   client->close();
   server->close();
 }

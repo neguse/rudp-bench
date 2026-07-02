@@ -36,6 +36,7 @@ type ExecOpts struct {
 	OutDir        string // directory for raw files
 	RunID         string
 	ScenarioID    string
+	Profile       string // profile name recorded in the scenarios CSV
 	LitenetlibBin string
 	DryRun        bool
 	// Paths for reduce output
@@ -152,8 +153,12 @@ func Exec(ctx context.Context, opts ExecOpts) error {
 		writeEmpty(sStdout)
 		writeEmpty(cStdout)
 		msg := fmt.Sprintf("%s binary not found: %s\n", opts.Library, bin)
-		os.WriteFile(sStderr, []byte(msg), 0o644)
-		os.WriteFile(cStderr, []byte(msg), 0o644)
+		if err := os.WriteFile(sStderr, []byte(msg), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing %s: %v\n", sStderr, err)
+		}
+		if err := os.WriteFile(cStderr, []byte(msg), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: writing %s: %v\n", cStderr, err)
+		}
 
 		return result.Append(result.AppendOpts{
 			Results:      opts.Results,
@@ -170,6 +175,7 @@ func Exec(ctx context.Context, opts ExecOpts) error {
 			RunID:        opts.RunID,
 			ScenarioID:   opts.ScenarioID,
 			Library:      opts.Library,
+			Profile:      opts.Profile,
 			RateR:        strconv.Itoa(opts.RateR),
 			RateU:        strconv.Itoa(opts.RateU),
 			Size:         strconv.Itoa(opts.Size),
@@ -302,6 +308,7 @@ func Exec(ctx context.Context, opts ExecOpts) error {
 		RunID:        opts.RunID,
 		ScenarioID:   opts.ScenarioID,
 		Library:      opts.Library,
+		Profile:      opts.Profile,
 		RateR:        strconv.Itoa(opts.RateR),
 		RateU:        strconv.Itoa(opts.RateU),
 		Size:         strconv.Itoa(opts.Size),
@@ -460,23 +467,30 @@ func replaceArg(args []string, prefix, replacement string) []string {
 }
 
 // concatFiles concatenates the contents of srcPaths into dst.
+// I/O エラーはベンチ続行を妨げないが、ログ欠損に気づけるよう warning を出す。
 func concatFiles(srcPaths []string, dst string) {
 	out, err := os.Create(dst)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: creating %s: %v\n", dst, err)
 		return
 	}
 	defer out.Close()
 	for _, p := range srcPaths {
 		f, err := os.Open(p)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: opening %s: %v\n", p, err)
 			continue
 		}
-		io.Copy(out, f)
+		if _, err := io.Copy(out, f); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: copying %s to %s: %v\n", p, dst, err)
+		}
 		f.Close()
 	}
 }
 
 // writeEmpty creates an empty file (or truncates an existing one).
 func writeEmpty(path string) {
-	os.WriteFile(path, nil, 0o644)
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: writing %s: %v\n", path, err)
+	}
 }

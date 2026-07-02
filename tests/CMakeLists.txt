@@ -26,6 +26,10 @@ add_executable(test_proc_sampler test_proc_sampler.cc)
 target_link_libraries(test_proc_sampler PRIVATE rudp_bench_harness GTest::gtest_main)
 add_test(NAME test_proc_sampler COMMAND test_proc_sampler)
 
+add_executable(test_socket_buffer test_socket_buffer.cc)
+target_link_libraries(test_socket_buffer PRIVATE rudp_bench_harness GTest::gtest_main)
+add_test(NAME test_socket_buffer COMMAND test_socket_buffer)
+
 add_executable(test_inbound_queue test_inbound_queue.cc)
 target_link_libraries(test_inbound_queue PRIVATE rudp_bench_harness GTest::gtest_main)
 add_test(NAME test_inbound_queue COMMAND test_inbound_queue)
@@ -85,6 +89,14 @@ add_test(NAME test_gns_smoke COMMAND test_gns_smoke)
 add_executable(test_msquic_smoke test_msquic_smoke.cc)
 target_link_libraries(test_msquic_smoke PRIVATE adapter_msquic GTest::gtest_main)
 add_test(NAME test_msquic_smoke COMMAND test_msquic_smoke)
+
+add_executable(test_quiche_smoke test_quiche_smoke.cc)
+target_link_libraries(test_quiche_smoke PRIVATE adapter_quiche GTest::gtest_main)
+add_test(NAME test_quiche_smoke COMMAND test_quiche_smoke)
+
+add_executable(test_lsquic_smoke test_lsquic_smoke.cc)
+target_link_libraries(test_lsquic_smoke PRIVATE adapter_lsquic GTest::gtest_main)
+add_test(NAME test_lsquic_smoke COMMAND test_lsquic_smoke)
 
 # LiteNetLib smoke test — shell script (NOT a C++ GTest; invokes the .NET binary on loopback)
 find_program(DOTNET_EXECUTABLE dotnet)

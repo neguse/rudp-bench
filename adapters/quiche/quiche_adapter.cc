@@ -1,6 +1,7 @@
 #include "harness/adapter.h"
 #include "harness/adapter_registry.h"
 #include "harness/inbound_queue.h"
+#include "harness/socket_buffer.h"
 
 #include <quiche.h>
 
@@ -12,10 +13,12 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <string>
@@ -27,6 +30,22 @@ namespace {
 
 constexpr size_t MAX_DATAGRAM_SIZE = 1350;
 constexpr size_t kInboxLimit = 1u << 16;
+constexpr size_t kDefaultStreamPendingByteLimit = 32u * 1024u * 1024u;
+
+size_t stream_pending_byte_limit() {
+  const char* v = std::getenv("QUICHE_STREAM_PENDING_BYTES");
+  if (!v || !*v) return kDefaultStreamPendingByteLimit;
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = std::strtoull(v, &end, 10);
+  if (end == v || *end != '\0' || errno == ERANGE || parsed == 0) {
+    return kDefaultStreamPendingByteLimit;
+  }
+  if (parsed > std::numeric_limits<size_t>::max()) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return static_cast<size_t>(parsed);
+}
 
 struct CertPaths {
   std::string cert;
@@ -53,6 +72,11 @@ const CertPaths& ensure_cert() {
         paths.key + " -out " + paths.cert +
         " -subj '/CN=rudp-bench' 2>/dev/null";
     if (std::system(cmd.c_str()) != 0) std::abort();
+    // /tmp に生成した一時 pem を process 終了時に掃除する
+    std::atexit([]() {
+      ::unlink(paths.cert.c_str());
+      ::unlink(paths.key.c_str());
+    });
   });
   return paths;
 }
@@ -63,8 +87,8 @@ int make_nonblocking_udp(uint16_t port, bool bind_it) {
   int flags = ::fcntl(fd, F_GETFL, 0);
   ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
   int buf = 256 * 1024;
-  ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
-  ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
+  rudp_bench::tune_udp_socket_buffers(fd, buf, buf, "quiche",
+                                      bind_it ? "server" : "client");
   if (bind_it) {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -82,6 +106,16 @@ void get_local_addr(int fd, sockaddr_storage* out, socklen_t* out_len) {
   ::getsockname(fd, reinterpret_cast<sockaddr*>(out), out_len);
 }
 
+// ストリーム ID ごとの受信フレーム解析状態。旧実装は全 readable ストリームを
+// 単一バッファに連結しており、「1接続1受信ストリーム」で偶然成立しているだけ
+// だった(複数ストリームが readable になるとフレーム境界が壊れる)。
+struct StreamRecvState {
+  std::vector<uint8_t> buf;
+  size_t offset = 0;
+  uint32_t frame_len = 0;
+  bool have_frame_len = false;
+};
+
 struct QuicheConn {
   quiche_conn* conn = nullptr;
   uint32_t id = 0;
@@ -90,11 +124,10 @@ struct QuicheConn {
   bool established = false;
   bool closed = false;
   uint64_t next_stream_id = 0;
-  // per-connection stream framing state
-  std::vector<uint8_t> stream_recv_buf;
-  size_t stream_recv_offset = 0;
-  uint32_t frame_len = 0;
-  bool have_frame_len = false;
+  // per-stream framing state (keyed by stream id)
+  std::unordered_map<uint64_t, StreamRecvState> stream_recv;
+  std::vector<uint8_t> stream_send_buf;
+  size_t stream_send_offset = 0;
 };
 
 class QuicheAdapter : public rudp_bench::Adapter {
@@ -160,6 +193,7 @@ class QuicheAdapter : public rudp_bench::Adapter {
 
   int send(uint32_t conn_id, const void* data, size_t len,
            bool reliable) override {
+    if (len > max_payload_bytes(reliable)) return -1;
     auto it = conn_by_id_.find(conn_id);
     if (it == conn_by_id_.end()) return -1;
     QuicheConn* c = it->second;
@@ -215,6 +249,9 @@ class QuicheAdapter : public rudp_bench::Adapter {
   }
   const char* flush_policy(bool) const override { return "poll_send"; }
   bool encryption_on() const override { return true; }
+  // adapter が quiche 既定の CUBIC を BBRv2 に上書きしている（audit §10）。
+  const char* congestion_control() const override { return "bbr2"; }
+  const char* thread_model() const override { return "single"; }
   rudp_bench::ConnectionStats connection_stats() const override {
     return stats_;
   }
@@ -409,11 +446,13 @@ class QuicheAdapter : public rudp_bench::Adapter {
         inbox_.enqueue(c->id, dgram_buf, static_cast<size_t>(dglen));
       }
 
-      // Drain readable streams
+      // Drain readable streams — framing state is per stream id so that
+      // multiple readable streams cannot interleave into one buffer.
       quiche_stream_iter* iter = quiche_conn_readable(c->conn);
       if (iter) {
         uint64_t stream_id;
         while (quiche_stream_iter_next(iter, &stream_id)) {
+          StreamRecvState& st = c->stream_recv[stream_id];
           uint8_t stream_buf[65536];
           bool fin = false;
           uint64_t err_code = 0;
@@ -422,10 +461,13 @@ class QuicheAdapter : public rudp_bench::Adapter {
                 c->conn, stream_id, stream_buf, sizeof(stream_buf), &fin,
                 &err_code);
             if (slen <= 0) break;
-            c->stream_recv_buf.insert(c->stream_recv_buf.end(), stream_buf,
-                                      stream_buf + slen);
+            st.buf.insert(st.buf.end(), stream_buf, stream_buf + slen);
           }
-          drain_frames(c.get());
+          drain_frames(c.get(), st);
+          // fin まで読み切って残バイトが無ければ状態を解放する
+          if (fin && st.buf.size() == st.offset && !st.have_frame_len) {
+            c->stream_recv.erase(stream_id);
+          }
         }
         quiche_stream_iter_free(iter);
       }
@@ -464,6 +506,7 @@ class QuicheAdapter : public rudp_bench::Adapter {
 
     for (auto& c : conns_) {
       if (!c->conn || c->closed) continue;
+      flush_stream_pending(c.get());
       for (;;) {
         quiche_send_info send_info{};
         ssize_t written =
@@ -486,19 +529,19 @@ class QuicheAdapter : public rudp_bench::Adapter {
 
   int send_stream(QuicheConn* c, const void* data, size_t len) {
     // Length-prefix framing (4-byte big-endian + payload), same as msquic
-    uint64_t stream_id = c->next_stream_id;
-    uint64_t err_code = 0;
+    compact_stream_send_buf(c);
+    size_t frame_size = 4 + len;
+    size_t pending = stream_pending_size(*c);
+    size_t limit = stream_pending_byte_limit();
+    if (pending > limit || frame_size > limit - pending) return -1;
 
-    // Combine header + payload into single buffer to avoid partial writes
-    std::vector<uint8_t> frame(4 + len);
+    size_t start = c->stream_send_buf.size();
+    c->stream_send_buf.resize(start + frame_size);
     uint32_t nlen = htonl(static_cast<uint32_t>(len));
-    std::memcpy(frame.data(), &nlen, 4);
-    std::memcpy(frame.data() + 4, data, len);
+    std::memcpy(c->stream_send_buf.data() + start, &nlen, 4);
+    std::memcpy(c->stream_send_buf.data() + start + 4, data, len);
 
-    ssize_t sent = quiche_conn_stream_send(
-        c->conn, stream_id, frame.data(), frame.size(), false, &err_code);
-    if (sent < 0) return -1;
-    return 0;
+    return flush_stream_pending(c) ? 0 : -1;
   }
 
   int send_dgram(QuicheConn* c, const void* data, size_t len) {
@@ -507,33 +550,70 @@ class QuicheAdapter : public rudp_bench::Adapter {
     return rc >= 0 ? 0 : -1;
   }
 
-  void drain_frames(QuicheConn* c) {
-    auto& rb = c->stream_recv_buf;
-    auto available = [&]() -> size_t { return rb.size() - c->stream_recv_offset; };
+  void drain_frames(QuicheConn* c, StreamRecvState& st) {
+    auto& rb = st.buf;
+    auto available = [&]() -> size_t { return rb.size() - st.offset; };
     while (true) {
-      if (!c->have_frame_len) {
+      if (!st.have_frame_len) {
         if (available() < 4) break;
         uint32_t nlen;
-        std::memcpy(&nlen, rb.data() + c->stream_recv_offset, 4);
-        c->stream_recv_offset += 4;
-        c->frame_len = ntohl(nlen);
-        c->have_frame_len = true;
+        std::memcpy(&nlen, rb.data() + st.offset, 4);
+        st.offset += 4;
+        st.frame_len = ntohl(nlen);
+        st.have_frame_len = true;
       }
-      if (available() < c->frame_len) break;
-      inbox_.enqueue(c->id, rb.data() + c->stream_recv_offset, c->frame_len);
-      c->stream_recv_offset += c->frame_len;
-      c->have_frame_len = false;
+      if (available() < st.frame_len) break;
+      inbox_.enqueue(c->id, rb.data() + st.offset, st.frame_len);
+      st.offset += st.frame_len;
+      st.have_frame_len = false;
     }
-    if (c->stream_recv_offset == rb.size()) {
+    if (st.offset == rb.size()) {
       rb.clear();
-      c->stream_recv_offset = 0;
-    } else if (c->stream_recv_offset > 4096 &&
-               c->stream_recv_offset * 2 >= rb.size()) {
-      rb.erase(rb.begin(),
-               rb.begin() +
-                   static_cast<std::ptrdiff_t>(c->stream_recv_offset));
-      c->stream_recv_offset = 0;
+      st.offset = 0;
+    } else if (st.offset > 4096 && st.offset * 2 >= rb.size()) {
+      rb.erase(rb.begin(), rb.begin() + static_cast<std::ptrdiff_t>(st.offset));
+      st.offset = 0;
     }
+  }
+
+  static size_t stream_pending_size(const QuicheConn& c) {
+    return c.stream_send_buf.size() - c.stream_send_offset;
+  }
+
+  static void compact_stream_send_buf(QuicheConn* c) {
+    if (c->stream_send_offset == 0) return;
+    if (c->stream_send_offset == c->stream_send_buf.size()) {
+      c->stream_send_buf.clear();
+      c->stream_send_offset = 0;
+      return;
+    }
+    if (c->stream_send_offset > 4096 &&
+        c->stream_send_offset * 2 >= c->stream_send_buf.size()) {
+      c->stream_send_buf.erase(
+          c->stream_send_buf.begin(),
+          c->stream_send_buf.begin() +
+              static_cast<std::ptrdiff_t>(c->stream_send_offset));
+      c->stream_send_offset = 0;
+    }
+  }
+
+  bool flush_stream_pending(QuicheConn* c) {
+    while (stream_pending_size(*c) > 0) {
+      uint64_t err_code = 0;
+      const uint8_t* data = c->stream_send_buf.data() + c->stream_send_offset;
+      size_t len = stream_pending_size(*c);
+      ssize_t sent = quiche_conn_stream_send(
+          c->conn, c->next_stream_id, data, len, false, &err_code);
+      if (sent == QUICHE_ERR_DONE || sent == 0) break;
+      if (sent < 0) {
+        c->stream_send_buf.clear();
+        c->stream_send_offset = 0;
+        return false;
+      }
+      c->stream_send_offset += static_cast<size_t>(sent);
+      compact_stream_send_buf(c);
+    }
+    return true;
   }
 
   bool is_server_ = false;

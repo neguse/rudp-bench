@@ -3,11 +3,16 @@
 [`checklist.md`](checklist.md) の各項目を本プロジェクトの14ライブラリで検証した結果。
 adapter コード + third_party ライブラリのソースコードを精読して得た具体的な値を記載。
 
+> **2026-07-02 更新**: [`improvements.md`](improvements.md) の改善実装により、
+> coop_rudp / apex_rudp の RTO・輻輳制御、各 adapter の backpressure 上限、
+> mini_rudp のキュー基準などは本文の記載から変わっている。主要な変更は各表に
+> 反映済みだが、細部は improvements.md の実装状況を優先すること。
+
 ---
 
 ## 1. ソケットバッファ
 
-全ライブラリで `getsockopt` による設定後確認なし。 `net.core.rmem_max`（既定 ~208KB）を超えた要求はサイレントにクランプされている可能性が高い。
+`raw_udp`, `mini_rudp`, `coop_rudp`, `apex_rudp`, `kcp`, `quiche`, `lsquic` は `SO_RCVBUF`/`SO_SNDBUF` 設定直後に `getsockopt` の raw actual / Linux effective / clamp 判定を stderr diagnostics へ `socket_buffer ...` 行として出す。 `enet`, `raknet`/`slikenet`, `yojimbo`, `gns`, `udt4`, `msquic` は library-owned socket 側の diagnostics patch が残作業。
 
 | lib | SO_RCVBUF | SO_SNDBUF | 設定箇所 | 備考 |
 |-----|-----------|-----------|---------|------|
@@ -15,13 +20,13 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | mini_rudp | 256KB | 256KB | adapter:95-96 | — |
 | coop_rudp | 4MB | 4MB | adapter:85-86 | — |
 | apex_rudp | 4MB | 4MB | adapter:146-147 | `APEX_RCVBUF_KB` env で変更可 |
-| enet | 256KB | 256KB | host.c:65-66 + adapter:208-209 | `ENET_RCVBUF_KB` env で変更可 |
+| enet | 256KB | 256KB | host.c:65-66 + adapter:208-209 | `ENET_RCVBUF_KB` env で変更可。library-owned socket diagnostics は未適用 |
 | kcp | 256KB | 256KB | adapter:124-125 | `KCP_RCVBUF_KB` env で変更可。1MB に増やすと delivery 0.78→0.52 に悪化（バッファブロート） |
 | raknet | 256KB | 16KB | RakNetSocket2_Berkley.cpp:39,54 | 送受信非対称。送信ボトルネック |
 | slikenet | 256KB | 16KB | RakNetSocket2_Berkley.cpp:39,54 | 同上 |
 | udt4 | 65KB(UDP層) | 65KB(UDP層) | channel.cpp:152-153 | UDT 層 recv buffer: 8192pkt×1500≈12MB |
-| yojimbo | 4MB | 4MB | netcode.c:55-58 | `#define` 固定、変更不可 |
-| gns | 4MB | 4MB | lowlevel.cpp:2065-2073 + adapter:75 | lib 既定 256KB を adapter が 4MB に上書き。`gns_smallbuf` variant で 256KB |
+| yojimbo | 4MB | 4MB | netcode.c:55-58 | `#define` 固定、変更不可。library-owned socket diagnostics は未適用 |
+| gns | 4MB | 4MB | lowlevel.cpp:2065-2073 + adapter:75 | lib 既定 256KB を adapter が 4MB に上書き。`gns_smallbuf` variant で 256KB。library-owned socket diagnostics は未適用 |
 | msquic | INT32_MAX | 未設定 | datapath_epoll.c:702-709 | 2.1GB を要求。確実にクランプされている |
 | quiche | 256KB | 256KB | adapter:66-67 | — |
 | lsquic | 256KB | 256KB | adapter:228-230 | — |
@@ -57,8 +62,8 @@ adapter コード + third_party ライブラリのソースコードを精読し
 |-----|---------|-------|------|------|----------|----------------|
 | enet | Jacobson/Karels | SRTT=0 時 peer default | — | — | 2× exponential | なし |
 | kcp | Jacobson/Karels | 200ms | 100ms / 30ms(nodelay) | 60s | 2×/1.5×/+RTO/2 | あり（dup ACK=2, fastlimit=5） |
-| coop_rudp | 固定（SRTT 未使用） | 100ms | — | — | なし | あり（3pkt gap, SACK bitmap） |
-| apex_rudp | 固定 | 100ms | — | — | なし | なし |
+| coop_rudp | 適応（SRTT+4×RTTVAR、2026-07-02〜） | 100ms（サンプル前） | 20ms | 10s | 2^n（ラウンド毎、max 2^6） | あり（3pkt gap, SACK bitmap） |
+| apex_rudp | 適応（SRTT+RTTVAR、Karn 対応、2026-07-02〜） | 100ms | 10ms | 2s | 2^n（max 3s） | あり（SACK 穴×3） |
 | mini_rudp | 固定（RTT 未測定） | 50ms | — | — | なし | なし |
 | yojimbo | 固定 | 100ms | — | — | なし | なし |
 | gns | 3×SRTT+60ms | 1s(ping 未知時) | — | — | NACK ベース | あり（NACK, 3ms） |
@@ -96,16 +101,16 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | lib | 再送上限 | 死活検知 | keepalive | timeout |
 |-----|---------|---------|-----------|---------|
 | enet | ~5-6回 | reliable timeout chain | 500ms PING | 5-30s |
-| kcp | dead_link=20/seg | `kcp->state=-1` adapter 未参照 | なし | なし |
-| coop_rudp | 無制限 | なし | なし | なし |
-| apex_rudp | 無制限 | なし | なし | なし |
-| mini_rudp | 無制限 | なし（`is_connected()`常にtrue） | なし | なし |
+| kcp | dead_link=20/seg | adapter が `kcp->state=-1` を切断扱い | なし | dead_link 到達 |
+| coop_rudp | adapter既定64回(`COOP_MAX_RETRANSMITS`) | max retransmit / idle timeout | なし | 10s(`COOP_IDLE_TIMEOUT_MS`) |
+| apex_rudp | 10s reliable pending timeout(adapter) | 未 ACK reliable timeout | なし | 10s (`APEX_RELIABLE_TIMEOUT_MS`) |
+| mini_rudp | 10s reliable pending timeout(adapter) | 未 ACK reliable timeout | なし | 10s (`MINI_RUDP_RELIABLE_TIMEOUT_MS`) |
 | yojimbo | 無制限(msg level) | netcode keepalive | 100ms(10Hz) | 10s |
 | gns | 無制限 | TimeoutConnected | 10s(active)/60s(idle) | 10s |
 | msquic | 無制限(PTO backoff) | DisconnectTimeout | 無効(既定) | idle:30s, disconnect:16s |
 | quiche | 無制限(PTO 2^20 まで) | idle timeout | なし | 30s |
 | lsquic | 無制限(2^10 まで) | idle+no-progress | 15s PING | idle:30s, handshake:10s |
-| udt4 | 無制限 | EXP_COUNT>16 AND >5s | EXP timer 時 | ~5s+ |
+| udt4 | 無制限 | adapter が UDT `BROKEN`/`CLOSED`/`NONEXIST` を切断扱い | EXP timer 時 | ~5s+ |
 | raknet | 無制限 | AckTimeout | timeoutTime/2 | 10s(release)/30s(debug) |
 | slikenet | 同上 | 同上 | 同上 | 同上 |
 | litenetlib | 無制限 | DisconnectTimeout | 1000ms Ping/Pong | 5s |
@@ -118,7 +123,7 @@ adapter コード + third_party ライブラリのソースコードを精読し
 |-----|-----------|-----------|----------|------|
 | enet | custom bandwidth throttle | 65536byte(max, slow start なし) | throttle−=2/32 per RTT | window ベースではなく確率的 |
 | kcp | TCP Reno AIMD | cwnd=0→1, ssthresh=2 | ssthresh=cwnd/2, cwnd=1 | adapter で無効化（nocwnd=1） |
-| coop_rudp | custom rate-based AIMD | UINT32_MAX（~4.3Gbps） | safe_bps/=2 | 初期レート実質無制限。slow start なし |
+| coop_rudp | custom rate-based AIMD + pacing token gate | UINT32_MAX（~4.3Gbps） | safe_bps/=2（1 RTT に 1 回） | 2026-07-02 から pacing_bps が実際に flush をゲートする。初期レートは実質無制限のまま |
 | apex_rudp | なし | — | — | — |
 | mini_rudp | なし | pending cap=65536 のみ | — | — |
 | yojimbo | なし | — | — | — |
@@ -140,8 +145,8 @@ adapter コード + third_party ライブラリのソースコードを精読し
 | enet | 16-bit(per-channel) | windowed(16窓×4096seq) | 0.65s | 0.065s |
 | kcp | 32-bit | signed cast half-space | 11.9h | 71.6min |
 | coop_rudp | 32-bit(pkt) / 16-bit(ch) | `seq32_after()`: diff<0x80000000 | 11.9h | 71.6min |
-| apex_rudp | 32-bit | なし（plain `>`） | 11.9h | 71.6min で破綻 |
-| mini_rudp | 32-bit | なし（equality のみ） | 11.9h | 71.6min |
+| apex_rudp | 32-bit | `seq32_after()` half-space + seq 0 skip | 11.9h | 71.6min（wrap 処理済み） |
+| mini_rudp | 32-bit | bounded equality dedup + seq 0 skip + 10s pending timeout | 11.9h | 71.6min |
 | yojimbo | 16-bit(reliable) / 64-bit(netcode) | half-space(32768) | 0.65s | 0.065s |
 | gns | 64-bit(内部) / 16-bit(wire) | 16bit gap→64bit 展開 | 実質なし | 実質なし |
 | msquic | 64-bit(QUIC var-int) | monotonic increasing | 実質なし | 実質なし |
@@ -158,20 +163,20 @@ adapter コード + third_party ライブラリのソースコードを精読し
 
 | lib | 送信キュー上限 | 受信キュー上限 | 満杯時の挙動 |
 |-----|-------------|-------------|------------|
-| enet | 無制限（unreliable は throttle drop） | lib 32MB/peer + adapter inbox 65536 | reliable 滞留 / unreliable throttle / adapter inbox 満杯で oldest drop |
-| kcp | 無制限（<128 frags で成功） | rcv_wnd(256, adapter設定) | window→0 で sender 停止 |
-| coop_rudp | per_conn_queue_cap(min 1024)/ring | max_recv_events | RUDP_SEND_QUEUE_FULL 返却 |
-| apex_rudp | reliable 4096/conn + async TX 1M（server unreliable 既定 ON） | inbox: 1M | send: reliable 満杯で -1 / async TX 満杯で drop / recv: oldest drop |
-| mini_rudp | 65536/conn | なし（直接配信） | send: -1 |
+| enet | reliable adapter cap 32MiB(`ENET_RELIABLE_QUEUE_BYTES`) / unreliable は throttle drop | lib 32MB/peer + adapter inbox 65536 | reliable cap で -1 / unreliable throttle / adapter inbox 満杯で oldest drop |
+| kcp | adapter cap 32MiB(`KCP_SEND_QUEUE_BYTES`)（1 message は <128 frags） | rcv_wnd(256, adapter設定) | adapter cap で -1 / window→0 で sender 停止 |
+| coop_rudp | per_conn_queue_cap(min 1024)/ring + reliable 発行は un-ACK 最古から 64 seq 以内にゲート | max_recv_events | RUDP_SEND_QUEUE_FULL 返却 |
+| apex_rudp | reliable 4096/conn（送出は SACK 幅 64 の in-flight ゲート） + 10s timeout + async TX 1M（server unreliable 既定 ON） | inbox: 1M | send: reliable 満杯で -1 / timeout で conn inactive / async TX 満杯で drop / recv: oldest drop |
+| mini_rudp | 32MiB バイト基準(`MINI_RUDP_PENDING_BYTES`) + 10s timeout | なし（直接配信） | send: -1 / timeout で conn inactive |
 | yojimbo | 4096/channel/direction | 4096/ch/dir | send: -1（adapter が CanSendMessage で事前チェック） |
-| gns | SendBuffer=32MB | RecvBuffer=32MB / Msgs=1M | k_EResultLimitExceeded |
-| msquic | datagram:無制限 / stream:flow control | 16MB flow control | datagram: queue→cancel |
-| quiche | datagram:65536 / stream:flow control（adapter backpressure なし） | datagram:1200 / inbox:65536 | datagram:Error::Done / stream:逼迫時の partial write は破棄（再送・滞留なし） |
-| lsquic | datagram:64(adapter) / stream:adapter pending_writes(無制限)→flow control | inbox:65536 | datagram: -1(drop) / stream: adapter が先にバッファ |
-| udt4 | adapter out_pending(無制限)→8192pkt(動的拡張) | 8192pkt | adapter バッファ後に async:EASYNCSND / sync:block |
-| raknet | outgoing:無制限 / resend:512 | 無制限 | resend full→reliable blocked |
-| slikenet | 同上 | 同上 | 同上 |
-| litenetlib | outgoing:無制限 / pending window:64 | 無制限 | window full→outgoing 蓄積 |
+| gns | SendBuffer=32MB | lib RecvBuffer=32MB/Msgs=1M + adapter inbox 65536(`GNS_INBOX_MESSAGES`) | send:k_EResultLimitExceeded / inbox oldest drop + stderr |
+| msquic | 未完了送信 32MiB(`MSQUIC_PENDING_SEND_BYTES`、datagram/stream とも) | 16MB flow control + adapter inbox 65536(`MSQUIC_INBOX_MESSAGES`) | 32MiB 超で -1 / inbox oldest drop + stderr |
+| quiche | datagram:65536 / stream:adapter pending 32MiB(`QUICHE_STREAM_PENDING_BYTES`)→flow control | datagram:1200 / inbox:65536 | datagram:Error::Done / stream:adapter cap で -1 / partial write は pending |
+| lsquic | datagram: 32MiB(`LSQUIC_DGRAM_PENDING_BYTES`) / stream:adapter pending_writes 32MiB(`LSQUIC_PENDING_WRITE_BYTES`)→flow control | inbox:65536 | cap 超で -1 / partial write は pending |
+| udt4 | adapter out_pending 32MiB(`UDT4_OUT_PENDING_BYTES`)→8192pkt(動的拡張) | 8192pkt | adapter cap で -1 / async:EASYNCSND なら保持 |
+| raknet | outgoing adapter cap 32MiB(`RAKNET_OUTGOING_BYTES`/`RAK_FAMILY_OUTGOING_BYTES`) / resend:512 | 無制限 | adapter cap で -1 / resend full→reliable blocked |
+| slikenet | outgoing adapter cap 32MiB(`SLIKENET_OUTGOING_BYTES`/`RAK_FAMILY_OUTGOING_BYTES`) / resend:512 | 無制限 | adapter cap で -1 / resend full→reliable blocked |
+| litenetlib | reliable outgoing adapter cap 32MiB(`LNL_OUTGOING_BYTES`) / pending window:64 | 無制限 | adapter cap で backpressure / window full→outgoing 蓄積 |
 
 ---
 
@@ -243,22 +248,39 @@ adapter コード + third_party ライブラリのソースコードを精読し
 
 ### 危険（正確性・安定性リスク）
 
-1. apex_rudp: シーケンス番号ラップアラウンド未処理。 plain `>` comparison。1M PPS で ~71 分で破綻
-2. coop_rudp, apex_rudp, mini_rudp: 死活検知なし。 crashed peer に無限再送、リソースリーク
-3. kcp: dead_link=20 を adapter が無視。 `kcp->state` が -1 になっても参照されない
-4. yojimbo: send queue full 時、lib 本体はコネクションエラーを起こすが adapter が CanSendMessage で事前チェックし -1 を返却（backpressure）
-5. raknet/slikenet: SO_SNDBUF=16KB のみ。 送信バッファが受信の 1/16
-6. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
-7. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
+#### 改善済み
+
+1. apex_rudp: シーケンス番号ラップアラウンドを `seq32_after()` half-space 比較に変更。seq 0 も送信側で skip
+2. apex_rudp, mini_rudp: 未 ACK reliable が 10s 残った接続を inactive 化し、pending buffer を解放
+3. kcp: `dead_link` 到達後の `kcp->state=-1` を adapter が切断扱いに反映
+4. yojimbo: send queue full は adapter が `CanSendMessage` で事前チェックし、切断ではなく -1 backpressure として扱う
+5. udt4: UDT `BROKEN`/`CLOSED`/`NONEXIST` を切断扱いにし、adapter `out_pending` に byte cap/backpressure を追加
+6. quiche: stream partial write の残りを adapter pending に保持し、cap 超過は -1 backpressure として扱う
+7. lsquic: stream `pending_writes` に byte cap/backpressure を追加
+8. gns/msquic: adapter inbox に message cap と oldest-drop diagnostics を追加
+9. enet: reliable queue に byte cap/backpressure を追加
+10. kcp: send queue に byte cap/backpressure を追加
+11. raknet/slikenet: outgoing queue に byte cap/backpressure を追加
+12. litenetlib: reliable outgoing queue に byte cap/backpressure を追加
+13. coop_rudp: per-conn abort と max retransmit/idle timeout で crashed peer の reliable queue を解放
+14. native UDP socket buffer: `raw_udp`, `mini_rudp`, `coop_rudp`, `apex_rudp`, `kcp`, `quiche`, `lsquic` は設定直後の `getsockopt` 実値と clamp 判定を stderr diagnostics に出力
+
+#### 残存
+
+1. enet, raknet/slikenet, yojimbo, gns: library-owned UDP socket の `getsockopt` diagnostics patch が未適用
+2. udt4: UDT4 SDK は FetchContent tarball の `channel.cpp` が UDP socket buffer を設定しており、実値 diagnostics patch が未適用
+3. msquic: SO_RCVBUF に INT32_MAX を要求、SO_SNDBUF 未設定
+4. raknet/slikenet: SO_SNDBUF=16KB のみ。送信バッファが受信の 1/16
+5. raknet/slikenet: recv thread 停止バグ。 RAKPEER_USER_THREADED=1 でも生成→Shutdown で UAF。adapter は abandon で回避（意図的リーク）
 
 ### 意外な設計選択
 
-1. coop_rudp: SRTT を計算するが RTO に使わない。 status 表示専用
+1. ~~coop_rudp: SRTT を計算するが RTO に使わない~~ → 2026-07-02 に適応 RTO（SRTT+4×RTTVAR + 指数バックオフ）へ移行済み
 2. coop_rudp: ホットパスゼロアロケーション。 14ライブラリ中唯一
 3. mini_rudp: ACK ごとに 10byte 専用パケットを sendto。 ピギーバックなし
 4. litenetlib: RTT 推定が cumulative mean（sum/count）。 EWMA ではなく全サンプル均等。3 秒ごとにリセット
 5. enet: slow start なし。 初期 window が最大値から開始
-6. coop_rudp: 初期送信レート = UINT32_MAX（~4.3Gbps）。 ramp-up なし
+6. coop_rudp: 初期送信レート = UINT32_MAX（~4.3Gbps）。 ramp-up なし（2026-07-02 から loss 後は pacing token gate が実際に送出を絞る）
 7. quiche BBRv2: beta=0.3（70% 削減）。 標準の 50% multiplicative decrease より攻撃的
 8. raknet/slikenet: loss で cwnd=1MTU（Tahoe 動作）。 min MTU=576 で初期 window=548byte
 9. lsquic: QUIC 実装で唯一 ACK を別 datagram で送信
