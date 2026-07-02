@@ -369,7 +369,11 @@ internal sealed class SendPipe
 
     public SendPipe(IBenchHub hub, uint originId, int payloadSize, BenchMetrics metrics, object metricsGate)
     {
-        this.hub = hub;
+        // 送信は fire-and-forget proxy 経由にする。素の hub proxy はサーバ応答まで
+        // ValueTask が完了せず、送信ループが RTT に律速されて loss-tolerant が
+        // ほぼ全部 coalesce される(wired 10ms RTT で attempted 0.47 の実測)。
+        // latest-value 送信で応答を待たないのが idiomatic な使い方。
+        this.hub = hub.FireAndForget();
         this.originId = originId;
         this.payloadSize = payloadSize;
         this.metrics = metrics;

@@ -83,6 +83,11 @@ func NewServer(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen control socket: %w", err)
 	}
+	// sudo 実行時、権限降下したベンチマークプロセスからも接続できるようにする
+	if err := os.Chmod(cfg.SocketPath, 0o666); err != nil {
+		_ = ln.Close()
+		return nil, fmt.Errorf("chmod control socket: %w", err)
+	}
 	return &Server{
 		cfg:           cfg,
 		ln:            ln,

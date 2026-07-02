@@ -1,0 +1,22 @@
+{
+  "transport": "msquic",
+  "server_command": ["build-v2-msquic/msquic_server", "--port", "42918"],
+  "client_command": ["build-v2-msquic/msquic_client",
+    "--host", "10.200.0.1", "--port", "42918",
+    "--conns", "{conns}", "--proc-index", "{proc_index}",
+    "--origin-base", "{origin_id_start}",
+    "--rate-lt", "50", "--rate-md", "50", "--payload", "64",
+    "--deadline-ns", "150000000", "--staleness-period-ns", "10000000"],
+  "client_procs": 2,
+  "total_conns": 4,
+  "warmup": "1s",
+  "duration": "5s",
+  "drain": "2s",
+  "deadline_ns": 150000000,
+  "staleness_period_ns": 10000000,
+  "netem": {
+    "server_egress": {"delay_ms": 10, "jitter_ms": 1, "loss_pct": 0.1, "limit": 10000},
+    "client_egress": {"delay_ms": 10, "jitter_ms": 1, "loss_pct": 0.1, "limit": 10000}
+  },
+  "output_dir": "results-v2/wired-msquic"
+}

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -60,6 +61,11 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 	}
 	if err := os.MkdirAll(metricsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir metrics dir: %w", err)
+	}
+	// sudo 実行時、権限降下したベンチマークプロセスが metrics を書けるよう
+	// 出力ディレクトリを元ユーザーに chown する
+	if err := chownDirsToSudoUser(cfg.OutputDir, logDir, metricsDir); err != nil {
+		return nil, err
 	}
 
 	resultPath := filepath.Join(cfg.OutputDir, "result.json")
@@ -380,12 +386,48 @@ func startOne(ctx context.Context, controlSock, logDir string, cmdCfg CommandCon
 	return nil
 }
 
+// sudo 実行時に出力ディレクトリを SUDO_UID/SUDO_GID へ chown する。
+// 非 root や SUDO_* 不在なら何もしない。
+func chownDirsToSudoUser(dirs ...string) error {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	uidStr, gidStr := os.Getenv("SUDO_UID"), os.Getenv("SUDO_GID")
+	if uidStr == "" || gidStr == "" {
+		return nil
+	}
+	uid, err := strconv.Atoi(uidStr)
+	if err != nil {
+		return fmt.Errorf("parse SUDO_UID: %w", err)
+	}
+	gid, err := strconv.Atoi(gidStr)
+	if err != nil {
+		return fmt.Errorf("parse SUDO_GID: %w", err)
+	}
+	for _, d := range dirs {
+		if err := os.Chown(d, uid, gid); err != nil {
+			return fmt.Errorf("chown %s: %w", d, err)
+		}
+	}
+	return nil
+}
+
 func namespaceCommand(cmd CommandConfig, netns string) (string, []string) {
 	if netns == "" {
 		return cmd.Path, append([]string(nil), cmd.Args...)
 	}
-	args := make([]string, 0, 3+len(cmd.Args))
-	args = append(args, "netns", "exec", netns, cmd.Path)
+	args := make([]string, 0, 8+len(cmd.Args))
+	args = append(args, "netns", "exec", netns)
+	// sudo 実行時はベンチマークプロセスを元ユーザーに降格する。
+	// root のままだと msquic が datapath 初期化で SIGABRT する(v1 の教訓)ほか、
+	// 結果ファイルの所有権も root になってしまう。netns 進入には root が必要な
+	// ため、ip netns exec の内側で setpriv により降格する。
+	if os.Geteuid() == 0 {
+		if uid, gid := os.Getenv("SUDO_UID"), os.Getenv("SUDO_GID"); uid != "" && gid != "" {
+			args = append(args, "setpriv", "--reuid", uid, "--regid", gid, "--init-groups")
+		}
+	}
+	args = append(args, cmd.Path)
 	args = append(args, cmd.Args...)
 	return "ip", args
 }
