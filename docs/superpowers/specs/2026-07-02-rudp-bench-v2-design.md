@@ -204,9 +204,9 @@ AQM/bufferbloat の忠実な再現は非目標(本ワークロードの per-conn
 無限帯域前提になるため上限だけは入れる)。
 
 **lifecycle バリアプロトコル(two-phase)**: 各プロセスが自分の起動時刻から窓を
-計算する方式を全廃する。orchestrator が control channel(TCP, line-delimited JSON。
-**netem を通らない out-of-band 経路** — 被測定経路の delay/loss の影響を受けない)で
-全プロセスと接続し:
+計算する方式を全廃する。orchestrator が control channel(Unix domain socket,
+line-delimited JSON。netns をファイルシステム経由で越えるため、被測定経路の netem の
+影響を受けない out-of-band 経路)で全プロセスと接続し:
 
 ```
 process → orchestrator: HELLO {role, lib, pid, proc_index}
