@@ -2,6 +2,13 @@
 
 Reliable UDP / RUDP / QUIC implementations を同じ workload で比較する benchmark harness。
 
+## v2 移行中
+
+設計: [`docs/superpowers/specs/2026-07-02-rudp-bench-v2-design.md`](docs/superpowers/specs/2026-07-02-rudp-bench-v2-design.md)
+
+v1(`harness/`, `adapters/`, `cmd/rudp-benchctl`, `scripts/`)は**凍結中** — バグ修正含め手を入れない。
+新規開発は v2 ディレクトリ(`benchspec/`, `benchkit/`, `servers/`, `orchestrator/`, `calibration/`)のみ。
+
 ## Prerequisites
 
 Linux-first. `tc netem`, systemd CPU isolation, vendored native libraries を使う。
