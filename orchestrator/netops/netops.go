@@ -28,11 +28,11 @@ func (c Command) String() string {
 }
 
 type Netem struct {
-	DelayMS     int
-	JitterMS    int
-	LossPercent float64
-	Rate        string
-	Limit       int
+	DelayMS     int     `json:"delay_ms,omitempty"`
+	JitterMS    int     `json:"jitter_ms,omitempty"`
+	LossPercent float64 `json:"loss_pct,omitempty"`
+	Rate        string  `json:"rate,omitempty"`
+	Limit       int     `json:"limit,omitempty"`
 }
 
 func (n Netem) Enabled() bool {
