@@ -189,3 +189,38 @@ func TestJudgeNoNetemFloors(t *testing.T) {
 		t.Fatalf("floor_staleness=%d, want 60ms", j.FloorStaleNS)
 	}
 }
+
+func TestJudgePacingStallCensored(t *testing.T) {
+	// client 自身の送信遅延が staleness 予算を超える → server に帰属不能 → censored
+	w, _ := run.LookupWorkload("r10p128") // interval 100ms、netem なし予算 = 110+100 = 210ms
+	res := validResult(0.99, 1.0, 819_000_000)
+	cls := res.Metrics.Classes["loss_tolerant"]
+	cls.LatencySchedNS = run.Histogram{Count: 100, P99NS: 819_000_000}
+	res.Metrics.Classes["loss_tolerant"] = cls
+	j := Judge(res, w, 66, nil, samplePeriodNS)
+	if !j.Censored || !strings.Contains(j.Cause, "pacing stall") {
+		t.Fatalf("expected pacing-stall censor: %+v", j)
+	}
+
+	// end-to-end が予算内なら sched が高くても censor しない(帰属フィルタ)
+	res = validResult(0.99, 1.0, 150_000_000) // 予算 210ms 内
+	cls = res.Metrics.Classes["loss_tolerant"]
+	cls.LatencySchedNS = run.Histogram{Count: 100, P99NS: 500_000_000}
+	res.Metrics.Classes["loss_tolerant"] = cls
+	j = Judge(res, w, 66, nil, samplePeriodNS)
+	if !j.OK || j.Censored {
+		t.Fatalf("passing point must stay OK despite sched noise: %+v", j)
+	}
+}
+
+func TestJudgeHealthySchedNotCensored(t *testing.T) {
+	w, _ := run.LookupWorkload("r10p128")
+	res := validResult(0.99, 1.0, 120_000_000)
+	cls := res.Metrics.Classes["loss_tolerant"]
+	cls.LatencySchedNS = run.Histogram{Count: 100, P99NS: 35_000_000}
+	res.Metrics.Classes["loss_tolerant"] = cls
+	j := Judge(res, w, 64, nil, samplePeriodNS)
+	if !j.OK || j.Censored {
+		t.Fatalf("expected OK: %+v", j)
+	}
+}

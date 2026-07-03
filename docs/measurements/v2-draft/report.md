@@ -35,16 +35,16 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 <!-- generated:capacity-wired -->
 | workload | enet | gns | litenetlib | msquic | websocket | magiconion |
 |---|---|---|---|---|---|---|
-| r10p128 | 108 (dl) | 112 (st) | ≥128 (farm) | 223 (st) | 68 (st) | 65 (st) |
-| r10p200 | 95 (dl) | 111 (st) | ≥128 (farm) | 214 (st) | 63 (st) | 66 (st) |
-| r10p1000 | 47 (dl) | 25 (st) | ≥64 (farm) | 95 (st) | 68 (st) | 67 (dl) |
-| r20p128 ⚓br | 98 (st) | 81 (st) | ≥128 (farm) | 164 (st) | 68 (st) | 67 (dl) |
-| r20p200 | 87 (st) | 60 (st) | ≥128 (farm) | 162 (st) | 68 (st) | 67 (dl) |
-| r20p1000 ⚓video | 49 (st) | 12 (st) | ≥64 (farm) | 63 (st) | 72 (st) | 67 (dl) |
-| r60p128 | 98 (st) | 32 (st) | 0 (st) | 96 (st) | 65 (st) | 64 (st) |
-| r60p200 ⚓vr | 90 (st) | 20 (st) | 0 (st) | 96 (st) | 64 (st) | 64 (st) |
-| r60p1000 | 42 (st) | 4 (st) | 0 (st) | 33 (st) | 60 (st) | 64 (st) |
-| echo (synthetic) | 801 (inv) | 836 (st) | 0 (st) | 799 (st) | 60 (st) | 60 (st) |
+| r10p128 | 108 (dl) | 112 (st) | ≥128 (farm) | ≥223 (farm) | ≥68 (farm) | ≥65 (farm) |
+| r10p200 | 95 (dl) | 111 (st) | ≥128 (farm) | ≥214 (farm) | ≥63 (farm) | ≥66 (farm) |
+| r10p1000 | 47 (dl) | ≥25 (farm) | ≥64 (farm) | ≥95 (farm) | ≥68 (farm) | 67 (dl) |
+| r20p128 ⚓br | 98 (st) | ≥81 (farm) | ≥128 (farm) | ≥164 (farm) | ≥68 (farm) | 67 (dl) |
+| r20p200 | 87 (st) | 60 (st) | ≥128 (farm) | ≥162 (farm) | ≥68 (farm) | 67 (dl) |
+| r20p1000 ⚓video | 49 (st) | ≥12 (farm) | ≥64 (farm) | ≥63 (farm) | ≥72 (farm) | 67 (dl) |
+| r60p128 | ≥98 (farm) | ≥32 (farm) | ≥1 | ≥96 (farm) | ≥65 (farm) | ≥65 (farm) |
+| r60p200 ⚓vr | 90 (st) | ≥20 (farm) | ≥1 | ≥96 (farm) | ≥64 (farm) | ≥64 (farm) |
+| r60p1000 | ≥42 (farm) | ≥4 (farm) | ≥1 | ≥33 (farm) | ≥60 (farm) | ≥64 (farm) |
+| echo (synthetic) | 801 (inv) | 836 (st) | ≥1 | 799 (st) | ≥60 (farm) | 60 (st) |
 | reliable_echo (synthetic) | ≥1024 | ≥1024 | ≥1024 | ≥1024 | 114 (md) | 336 (md) |
 
 *凡例: `N (code)` = capacity N・break 原因(st=staleness / dl=delivery_lt / md=delivery_md / inv=validity)、`≥N` = 探索上限まで OK、`≥N (farm)` = farm 律速で打ち切り(server の break ではない)。詳細は sweep 出力の capacity.json / results.jsonl。*
@@ -69,6 +69,7 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 | r20p1000 ⚓video | magiconion | 73ms | 150ms | ✓ |
 | r60p200 ⚓vr | enet | 53ms | 150ms | ✓ |
 | r60p200 ⚓vr | gns | 47ms | 150ms | ✓ |
+| r60p200 ⚓vr | litenetlib | 63ms | 150ms | ✓ |
 | r60p200 ⚓vr | msquic | 51ms | 150ms | ✓ |
 | r60p200 ⚓vr | websocket | 32ms | 150ms | ✓ |
 | r60p200 ⚓vr | magiconion | 34ms | 150ms | ✓ |

@@ -37,6 +37,17 @@ func main() {
 		boundaryMain(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "rejudge" {
+		fs := flag.NewFlagSet("rejudge", flag.ExitOnError)
+		dir := fs.String("dir", "", "sweep output dir to re-judge from stored run results")
+		exitOnErr(fs.Parse(os.Args[2:]))
+		if *dir == "" {
+			fmt.Fprintln(os.Stderr, "rejudge -dir is required")
+			os.Exit(1)
+		}
+		exitOnErr(sweep.Rejudge(*dir))
+		return
+	}
 
 	var (
 		sock       = flag.String("sock", filepath.Join(os.TempDir(), fmt.Sprintf("rudp-bench-%d.sock", os.Getpid())), "control Unix domain socket path")

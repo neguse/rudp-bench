@@ -29,6 +29,7 @@ type Judgment struct {
 	DeliveryLT    float64 `json:"delivery_lt,omitempty"`
 	DeliveryMD    float64 `json:"delivery_md,omitempty"`
 	StalenessP99  uint64  `json:"staleness_p99_ns,omitempty"`
+	SchedP99      uint64  `json:"sched_p99_ns,omitempty"` // client 送信スケジュール遅延(farm 診断)
 	FloorDelivery float64 `json:"floor_delivery,omitempty"`
 	FloorStaleNS  uint64  `json:"floor_staleness_ns,omitempty"`
 }
@@ -161,12 +162,29 @@ func Judge(result *run.Result, w run.Workload, totalConns int, netem *run.NetemR
 		intervalNS := uint64(1e9 / w.RateLT)
 		j.FloorStaleNS = stalenessFloorNS(w, totalConns, netem, intervalNS, samplePeriodNS)
 		budget := j.FloorStaleNS + stalenessAllowanceIntervals*intervalNS
+
+		if lt, ok := result.Metrics.Classes["loss_tolerant"]; ok {
+			j.SchedP99 = lt.LatencySchedNS.P99NS
+		}
+
 		st := result.Metrics.StalenessNS
 		j.StalenessP99 = st.P99NS
 		if st.Count == 0 {
 			causes = append(causes, "staleness histogram empty")
 		} else if st.P99NS > budget {
 			causes = append(causes, fmt.Sprintf("staleness_p99=%dms over floor(%dms)+%d interval", st.P99NS/1_000_000, j.FloorStaleNS/1_000_000, stalenessAllowanceIntervals))
+		}
+
+		// farm 十分性: pacing 遅延(design spec の3点セットの1つ、v1 client_tick
+		// gate の v2 版)。**失敗の帰属フィルタ**であり単独 gate ではない —
+		// end-to-end が予算内なら client の sched 揺れは結果が吸収済み。
+		// gate が落ち、かつ client 自身の送信遅延が staleness 予算を超えている
+		// 場合のみ「劣化を server に帰属できない」→ censored。
+		if len(causes) > 0 && j.SchedP99 > budget {
+			j.Censored = true
+			j.Cause = fmt.Sprintf("farm_limited: client sched p99=%dms exceeds staleness budget %dms (pacing stall); %s",
+				j.SchedP99/1_000_000, budget/1_000_000, strings.Join(causes, "; "))
+			return j
 		}
 	}
 
