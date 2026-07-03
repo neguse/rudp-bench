@@ -14,11 +14,16 @@ import (
 	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/netops"
 	orun "github.com/neguse/rudp-bench/orchestrator/run"
+	"github.com/neguse/rudp-bench/orchestrator/sweep"
 )
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "run" {
 		runMain(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "sweep" {
+		sweepMain(os.Args[2:])
 		return
 	}
 
@@ -104,6 +109,32 @@ func runMain(args []string) {
 			os.Exit(2)
 		}
 	}
+}
+
+func sweepMain(args []string) {
+	fs := flag.NewFlagSet("sweep", flag.ExitOnError)
+	configPath := fs.String("config", "", "sweep config JSON path")
+	exitOnErr(fs.Parse(args))
+	if *configPath == "" {
+		fmt.Fprintln(os.Stderr, "sweep -config is required")
+		os.Exit(1)
+	}
+
+	cfg, err := sweep.LoadConfig(*configPath)
+	exitOnErr(err)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	s, err := sweep.New(cfg)
+	exitOnErr(err)
+	defer s.Close()
+
+	cells, err := s.Run(ctx)
+	if len(cells) > 0 {
+		fmt.Fprintf(os.Stderr, "capacity: %s\n", filepath.Join(cfg.OutputDir, "capacity.json"))
+	}
+	exitOnErr(err)
 }
 
 func exitOnErr(err error) {

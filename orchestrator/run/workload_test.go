@@ -180,3 +180,22 @@ func TestLoadConfigUnknownWorkload(t *testing.T) {
 		t.Fatalf("expected unknown workload error, got %v", err)
 	}
 }
+
+func TestPrepareClampsClientProcs(t *testing.T) {
+	cfg := RunConfig{
+		Transport:     "enet",
+		ServerCommand: CommandConfig{Path: "srv"},
+		ClientCommand: CommandConfig{Path: "cli"},
+		ClientProcs:   4,
+		TotalConns:    1,
+		Duration:      Duration{time.Second},
+		OutputDir:     "out",
+	}
+	got, err := cfg.Prepare()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ClientProcs != 1 {
+		t.Fatalf("client_procs=%d, want clamp to 1", got.ClientProcs)
+	}
+}

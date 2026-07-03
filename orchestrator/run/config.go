@@ -144,6 +144,12 @@ func LoadConfig(path string) (RunConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
+	return cfg.Prepare()
+}
+
+// Prepare はプログラム生成された config を LoadConfig と同じ経路で確定する
+// (workload 展開 → defaults → validation)。
+func (cfg RunConfig) Prepare() (RunConfig, error) {
 	if err := cfg.applyWorkload(); err != nil {
 		return cfg, err
 	}
@@ -175,6 +181,10 @@ func (cfg *RunConfig) applyWorkload() error {
 func (cfg RunConfig) withDefaults() RunConfig {
 	if cfg.AttemptedThreshold == 0 {
 		cfg.AttemptedThreshold = defaultAttemptedThreshold
+	}
+	// 0-conn client proc は起動できない(全 client が --conns > 0 を要求する)
+	if cfg.TotalConns > 0 && cfg.ClientProcs > cfg.TotalConns {
+		cfg.ClientProcs = cfg.TotalConns
 	}
 	if cfg.ControlTimeout.Duration == 0 {
 		cfg.ControlTimeout.Duration = defaultControlTimeout
