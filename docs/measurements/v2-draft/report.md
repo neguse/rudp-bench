@@ -92,10 +92,10 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 <!-- generated:anchors-loss-worst -->
 | anchor | transport | capacity 点の staleness p99 | 予算 | 判定 |
 |---|---|---|---|---|
-| r20p128 ⚓br | enet | 262ms | 100ms | ✗ 予算超過 |
-| r20p128 ⚓br | gns | 163ms | 100ms | ✗ 予算超過 |
-| r20p128 ⚓br | litenetlib | 163ms | 100ms | ✗ 予算超過 |
-| r20p128 ⚓br | msquic | 147ms | 100ms | ✗ 予算超過 |
+| r20p128 ⚓br | enet | 262ms | 100ms | infeasible(フロア 234ms > 予算) |
+| r20p128 ⚓br | gns | 163ms | 100ms | infeasible(フロア 119ms > 予算) |
+| r20p128 ⚓br | litenetlib | 163ms | 100ms | infeasible(フロア 164ms > 予算) |
+| r20p128 ⚓br | msquic | 147ms | 100ms | infeasible(フロア 115ms > 予算) |
 | r20p1000 ⚓video | enet | 155ms | 150ms | ✗ 予算超過 |
 | r20p1000 ⚓video | litenetlib | 155ms | 150ms | ✗ 予算超過 |
 | r60p200 ⚓vr | enet | 147ms | 150ms | ✓ |

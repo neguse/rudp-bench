@@ -176,7 +176,12 @@ func (sd *SweepData) AnchorVerdicts() string {
 				continue
 			}
 			verdict := "✓"
-			if pt.Judgment.StalenessP99 > budget {
+			switch {
+			case pt.Judgment.FloorStaleNS > budget:
+				// 2段判定: フロアが予算を超える組は regime の性質であって
+				// transport の評価ではない(design spec「フロアと2段判定」)
+				verdict = fmt.Sprintf("infeasible(フロア %dms > 予算)", pt.Judgment.FloorStaleNS/1_000_000)
+			case pt.Judgment.StalenessP99 > budget:
 				verdict = "✗ 予算超過"
 			}
 			b.WriteString(fmt.Sprintf("| %s ⚓%s | %s | %dms | %dms | %s |\n",
