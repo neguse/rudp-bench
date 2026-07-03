@@ -80,11 +80,28 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 環境劣化への頑健性を表す:
 
 <!-- generated:capacity-loss-worst -->
-*未測定*
+| workload | enet | gns | litenetlib | msquic | websocket | magiconion |
+|---|---|---|---|---|---|---|
+| r20p128 ⚓br | 7 (st) | 84 (st) | 15 (st) | 143 (st) | 0 (st) | 0 (st) |
+| r20p1000 ⚓video | 63 (dl) | 0 (st) | ≥64 (farm) | 0 (st) | 0 (inv) | 0 (inv) |
+| r60p200 ⚓vr | 5 (st) | 21 (st) | 0 (st) | 0 (st) | 0 (inv) | 0 (st) |
+
+*凡例: `N (code)` = capacity N・break 原因(st=staleness / dl=delivery_lt / md=delivery_md / inv=validity)、`≥N` = 探索上限まで OK、`≥N (farm)` = farm 律速で打ち切り(server の break ではない)。詳細は sweep 出力の capacity.json / results.jsonl。*
 <!-- /generated:capacity-loss-worst -->
 
 <!-- generated:anchors-loss-worst -->
-*未測定*
+| anchor | transport | capacity 点の staleness p99 | 予算 | 判定 |
+|---|---|---|---|---|
+| r20p128 ⚓br | enet | 262ms | 100ms | ✗ 予算超過 |
+| r20p128 ⚓br | gns | 163ms | 100ms | ✗ 予算超過 |
+| r20p128 ⚓br | litenetlib | 163ms | 100ms | ✗ 予算超過 |
+| r20p128 ⚓br | msquic | 147ms | 100ms | ✗ 予算超過 |
+| r20p1000 ⚓video | enet | 155ms | 150ms | ✗ 予算超過 |
+| r20p1000 ⚓video | litenetlib | 155ms | 150ms | ✗ 予算超過 |
+| r60p200 ⚓vr | enet | 147ms | 150ms | ✓ |
+| r60p200 ⚓vr | gns | 98ms | 150ms | ✓ |
+
+*anchor 予算判定は探索済み capacity 点での近似(平面 gate で探索した点のみ使用)。*
 <!-- /generated:anchors-loss-worst -->
 
 *anchor の room 主張範囲(br 〜128 / vr 〜80 / video 〜49)を超える capacity
