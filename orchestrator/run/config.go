@@ -99,7 +99,12 @@ func (c *CommandConfig) UnmarshalJSON(data []byte) error {
 }
 
 type RunConfig struct {
-	Transport          string        `json:"transport"`
+	Transport string `json:"transport"`
+	// Workload は docs/profiles.md のセル名(r{pps}p{bytes} / echo /
+	// reliable_echo)。指定時は orchestrator が共通フラグ(--rate-* /
+	// --payload-* / --broadcast-*)を client_command に付与し、duration
+	// 未指定なら loss イベント数規則から自動導出する。
+	Workload           string        `json:"workload,omitempty"`
 	ServerCommand      CommandConfig `json:"server_command"`
 	ClientCommand      CommandConfig `json:"client_command"`
 	ClientProcs        int           `json:"client_procs"`
@@ -139,8 +144,32 @@ func LoadConfig(path string) (RunConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
+	if err := cfg.applyWorkload(); err != nil {
+		return cfg, err
+	}
 	cfg = cfg.withDefaults()
 	return cfg, cfg.validate()
+}
+
+// applyWorkload はセル名を解決して client 引数と duration に展開する。
+func (cfg *RunConfig) applyWorkload() error {
+	if cfg.Workload == "" {
+		return nil
+	}
+	w, ok := LookupWorkload(cfg.Workload)
+	if !ok {
+		return fmt.Errorf("unknown workload %q (defined: %s)", cfg.Workload, strings.Join(WorkloadNames(), ", "))
+	}
+	for _, arg := range cfg.ClientCommand.Args {
+		if strings.HasPrefix(arg, "--rate-") || strings.HasPrefix(arg, "--payload") || strings.HasPrefix(arg, "--broadcast-") {
+			return fmt.Errorf("workload %q conflicts with explicit client arg %q", cfg.Workload, arg)
+		}
+	}
+	cfg.ClientCommand.Args = append(cfg.ClientCommand.Args, w.ClientArgs()...)
+	if cfg.Duration.Duration == 0 {
+		cfg.Duration.Duration = autoDuration(w, cfg.TotalConns, cfg.Netem)
+	}
+	return nil
 }
 
 func (cfg RunConfig) withDefaults() RunConfig {

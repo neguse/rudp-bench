@@ -37,7 +37,8 @@ struct ClientConfig {
   double rate_md = 0.0;
   bool broadcast_lt = false;
   bool broadcast_md = false;
-  size_t payload_size = 0;
+  size_t payload_lt = 0;  // class 別 payload(0 = 未指定)
+  size_t payload_md = 0;
   uint64_t deadline_ns = 0;
   uint64_t staleness_period_ns = 0;
 };
@@ -62,6 +63,7 @@ void usage(const char *argv0) {
   std::fprintf(stderr,
                "usage: %s --host HOST --port PORT --conns N --proc-index N "
                "--origin-base N --rate-lt HZ --rate-md HZ --payload BYTES "
+               "[--payload-lt BYTES] [--payload-md BYTES] "
                "--deadline-ns NS --staleness-period-ns NS\n",
                argv0);
 }
@@ -192,10 +194,18 @@ int parse_args(int argc, char **argv, ClientConfig *cfg) {
       continue;
     }
     if (std::strcmp(argv[i], "--payload") == 0 && i + 1 < argc) {
-      have_payload =
-          parse_size(argv[++i], &cfg->payload_size) == 0 &&
-          cfg->payload_size >= BK_MIN_PAYLOAD &&
-          cfg->payload_size <= rudp_bench_msquic::kMaxPayloadBytes;
+      size_t v = 0;
+      have_payload = parse_size(argv[++i], &v) == 0;
+      cfg->payload_lt = v;
+      cfg->payload_md = v;
+      continue;
+    }
+    if (std::strcmp(argv[i], "--payload-lt") == 0 && i + 1 < argc) {
+      have_payload = parse_size(argv[++i], &cfg->payload_lt) == 0;
+      continue;
+    }
+    if (std::strcmp(argv[i], "--payload-md") == 0 && i + 1 < argc) {
+      have_payload = parse_size(argv[++i], &cfg->payload_md) == 0;
       continue;
     }
     if (std::strcmp(argv[i], "--deadline-ns") == 0 && i + 1 < argc) {
@@ -218,6 +228,17 @@ int parse_args(int argc, char **argv, ClientConfig *cfg) {
     return -1;
   }
   if (cfg->rate_lt == 0.0 && cfg->rate_md == 0.0) {
+    return -1;
+  }
+  // 有効な stream の payload が範囲内であること
+  if (cfg->rate_lt > 0.0 &&
+      (cfg->payload_lt < BK_MIN_PAYLOAD ||
+       cfg->payload_lt > rudp_bench_msquic::kMaxPayloadBytes)) {
+    return -1;
+  }
+  if (cfg->rate_md > 0.0 &&
+      (cfg->payload_md < BK_MIN_PAYLOAD ||
+       cfg->payload_md > rudp_bench_msquic::kMaxPayloadBytes)) {
     return -1;
   }
   if (static_cast<uint64_t>(cfg->origin_base) +
@@ -651,7 +672,7 @@ class ClientApp {
   }
 
   int run_schedule(const bk_schedule &schedule) {
-    std::vector<uint8_t> payload(cfg_.payload_size, 0);
+    std::vector<uint8_t> payload(std::max(cfg_.payload_lt, cfg_.payload_md), 0);
     bool marked_unsent = false;
     int rc = 0;
 
@@ -671,7 +692,10 @@ class ClientApp {
         for (ClientConn *conn : conns_) {
           bk_slot slot;
           while (bk_plan_next(conn->plan, now, &slot)) {
-            send_slot(conn, &slot, payload.data(), payload.size());
+            const size_t payload_size = (slot.flags & BK_FLAG_MUST_DELIVER)
+                                            ? cfg_.payload_md
+                                            : cfg_.payload_lt;
+            send_slot(conn, &slot, payload.data(), payload_size);
           }
         }
       } else if (!marked_unsent) {

@@ -32,7 +32,8 @@ typedef struct {
   double rate_md;
   bool broadcast_lt;
   bool broadcast_md;
-  size_t payload_size;
+  size_t payload_lt;  // class 別 payload(0 = 未指定)
+  size_t payload_md;
   uint64_t deadline_ns;
   uint64_t staleness_period_ns;
 } client_config;
@@ -61,6 +62,7 @@ static void usage(const char *argv0) {
   fprintf(stderr,
           "usage: %s --host HOST --port PORT --conns N --proc-index N "
           "--origin-base N --rate-lt HZ --rate-md HZ --payload BYTES "
+          "[--payload-lt BYTES] [--payload-md BYTES] "
           "--deadline-ns NS --staleness-period-ns NS\n",
           argv0);
 }
@@ -193,9 +195,18 @@ static int parse_args(int argc, char **argv, client_config *cfg) {
       continue;
     }
     if (strcmp(argv[i], "--payload") == 0 && i + 1 < argc) {
-      have_payload = parse_size(argv[++i], &cfg->payload_size) == 0 &&
-                     cfg->payload_size >= BK_MIN_PAYLOAD &&
-                     cfg->payload_size <= ENET_BENCH_MAX_PAYLOAD_BYTES;
+      size_t v = 0;
+      have_payload = parse_size(argv[++i], &v) == 0;
+      cfg->payload_lt = v;
+      cfg->payload_md = v;
+      continue;
+    }
+    if (strcmp(argv[i], "--payload-lt") == 0 && i + 1 < argc) {
+      have_payload = parse_size(argv[++i], &cfg->payload_lt) == 0;
+      continue;
+    }
+    if (strcmp(argv[i], "--payload-md") == 0 && i + 1 < argc) {
+      have_payload = parse_size(argv[++i], &cfg->payload_md) == 0;
       continue;
     }
     if (strcmp(argv[i], "--deadline-ns") == 0 && i + 1 < argc) {
@@ -217,6 +228,15 @@ static int parse_args(int argc, char **argv, client_config *cfg) {
     return -1;
   }
   if (cfg->rate_lt == 0.0 && cfg->rate_md == 0.0) {
+    return -1;
+  }
+  // 有効な stream の payload が範囲内であること
+  if (cfg->rate_lt > 0.0 && (cfg->payload_lt < BK_MIN_PAYLOAD ||
+                             cfg->payload_lt > ENET_BENCH_MAX_PAYLOAD_BYTES)) {
+    return -1;
+  }
+  if (cfg->rate_md > 0.0 && (cfg->payload_md < BK_MIN_PAYLOAD ||
+                             cfg->payload_md > ENET_BENCH_MAX_PAYLOAD_BYTES)) {
     return -1;
   }
   if ((uint64_t)cfg->origin_base + (uint64_t)cfg->conns > UINT32_MAX) {
@@ -500,7 +520,9 @@ static int run_client(const client_config *cfg) {
   }
 
   client_conn *conns = (client_conn *)calloc((size_t)cfg->conns, sizeof(*conns));
-  uint8_t *payload_buf = (uint8_t *)calloc(1, cfg->payload_size);
+  const size_t payload_buf_size =
+      cfg->payload_lt > cfg->payload_md ? cfg->payload_lt : cfg->payload_md;
+  uint8_t *payload_buf = (uint8_t *)calloc(1, payload_buf_size);
   if (conns == NULL || payload_buf == NULL) {
     fprintf(stderr, "allocation failed\n");
     free(payload_buf);
@@ -642,7 +664,10 @@ static int run_client(const client_config *cfg) {
       for (int i = 0; i < cfg->conns; ++i) {
         bk_slot slot;
         while (bk_plan_next(conns[i].plan, now, &slot)) {
-          if (send_slot(&conns[i], &slot, payload_buf, cfg->payload_size,
+          const size_t payload_size = (slot.flags & BK_FLAG_MUST_DELIVER)
+                                          ? cfg->payload_md
+                                          : cfg->payload_lt;
+          if (send_slot(&conns[i], &slot, payload_buf, payload_size,
                         metrics) == 0) {
             submitted_any = true;
           }

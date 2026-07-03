@@ -17,6 +17,7 @@ if (!config.Valid)
     Console.Error.WriteLine(
         "usage: MagicOnionBench.Client --host HOST --port PORT --conns N --proc-index N " +
         "--origin-base N --rate-lt HZ --rate-md HZ --payload BYTES " +
+        "[--payload-lt BYTES] [--payload-md BYTES] " +
         "--deadline-ns NS --staleness-period-ns NS");
     return 1;
 }
@@ -101,7 +102,7 @@ try
     foreach (var connection in connections)
     {
         connection.Plan = new BenchPlan(streams, planStartNs, schedule.StartAtNs, schedule.StopAtNs);
-        connection.SendPipe = new SendPipe(connection.Hub, connection.OriginId, config.PayloadSize, metrics, metricsGate);
+        connection.SendPipe = new SendPipe(connection.Hub, connection.OriginId, config.PayloadLt, config.PayloadMd, metrics, metricsGate);
     }
 
     var markedUnsent = false;
@@ -359,7 +360,8 @@ internal sealed class SendPipe
 {
     private readonly IBenchHub hub;
     private readonly uint originId;
-    private readonly int payloadSize;
+    private readonly int payloadSizeLt;
+    private readonly int payloadSizeMd;
     private readonly BenchMetrics metrics;
     private readonly object metricsGate;
     private readonly object gate = new();
@@ -367,7 +369,7 @@ internal sealed class SendPipe
     private BenchSlot? lossTolerantLatest;
     private bool accepting = true;
 
-    public SendPipe(IBenchHub hub, uint originId, int payloadSize, BenchMetrics metrics, object metricsGate)
+    public SendPipe(IBenchHub hub, uint originId, int payloadSizeLt, int payloadSizeMd, BenchMetrics metrics, object metricsGate)
     {
         // 送信は fire-and-forget proxy 経由にする。素の hub proxy はサーバ応答まで
         // ValueTask が完了せず、送信ループが RTT に律速されて loss-tolerant が
@@ -375,7 +377,8 @@ internal sealed class SendPipe
         // latest-value 送信で応答を待たないのが idiomatic な使い方。
         this.hub = hub.FireAndForget();
         this.originId = originId;
-        this.payloadSize = payloadSize;
+        this.payloadSizeLt = payloadSizeLt;
+        this.payloadSizeMd = payloadSizeMd;
         this.metrics = metrics;
         this.metricsGate = metricsGate;
         Completion = Task.Run(RunAsync);
@@ -493,6 +496,7 @@ internal sealed class SendPipe
     {
         var sendTsNs = BenchClock.NowNs();
         var header = new BenchHeader(slot.Seq, slot.SchedTsNs, sendTsNs, slot.Flags, originId);
+        var payloadSize = (slot.Flags & BenchConstants.FlagMustDeliver) != 0 ? payloadSizeMd : payloadSizeLt;
         var payload = new byte[payloadSize];
         if (!BenchPayload.TryWrite(payload, header))
         {
@@ -530,7 +534,8 @@ internal readonly record struct ClientConfig(
     double RateMd,
     bool BroadcastLt,
     bool BroadcastMd,
-    int PayloadSize,
+    int PayloadLt,
+    int PayloadMd,
     ulong DeadlineNs,
     ulong StalenessPeriodNs)
 {
@@ -545,7 +550,7 @@ internal readonly record struct ClientConfig(
         {
             if (args[i] == "--describe")
             {
-                return new ClientConfig(true, true, "", 0, 0, 0, 0, 0, 0, false, false, 0, 0, 0);
+                return new ClientConfig(true, true, "", 0, 0, 0, 0, 0, 0, false, false, 0, 0, 0, 0);
             }
             if (args[i] == "--host" && i + 1 < args.Length)
             {
@@ -605,9 +610,21 @@ internal readonly record struct ClientConfig(
                 continue;
             }
             if (args[i] == "--payload" && i + 1 < args.Length &&
-                int.TryParse(args[++i], NumberStyles.None, CultureInfo.InvariantCulture, out cfg.PayloadSize) &&
-                cfg.PayloadSize >= BenchConstants.MinPayloadBytes &&
-                cfg.PayloadSize <= BenchConstants.MaxPayloadBytes)
+                int.TryParse(args[++i], NumberStyles.None, CultureInfo.InvariantCulture, out var payloadValue))
+            {
+                cfg.PayloadLt = payloadValue;
+                cfg.PayloadMd = payloadValue;
+                cfg.HavePayload = true;
+                continue;
+            }
+            if (args[i] == "--payload-lt" && i + 1 < args.Length &&
+                int.TryParse(args[++i], NumberStyles.None, CultureInfo.InvariantCulture, out cfg.PayloadLt))
+            {
+                cfg.HavePayload = true;
+                continue;
+            }
+            if (args[i] == "--payload-md" && i + 1 < args.Length &&
+                int.TryParse(args[++i], NumberStyles.None, CultureInfo.InvariantCulture, out cfg.PayloadMd))
             {
                 cfg.HavePayload = true;
                 continue;
@@ -633,6 +650,17 @@ internal readonly record struct ClientConfig(
         {
             return Invalid();
         }
+        // 有効な stream の payload が範囲内であること
+        if (cfg.RateLt > 0 &&
+            (cfg.PayloadLt < BenchConstants.MinPayloadBytes || cfg.PayloadLt > BenchConstants.MaxPayloadBytes))
+        {
+            return Invalid();
+        }
+        if (cfg.RateMd > 0 &&
+            (cfg.PayloadMd < BenchConstants.MinPayloadBytes || cfg.PayloadMd > BenchConstants.MaxPayloadBytes))
+        {
+            return Invalid();
+        }
         if ((ulong)cfg.OriginBase + (ulong)cfg.Conns > uint.MaxValue)
         {
             return Invalid();
@@ -650,12 +678,13 @@ internal readonly record struct ClientConfig(
             cfg.RateMd,
             cfg.BroadcastLt,
             cfg.BroadcastMd,
-            cfg.PayloadSize,
+            cfg.PayloadLt,
+            cfg.PayloadMd,
             cfg.DeadlineNs,
             cfg.StalenessPeriodNs);
     }
 
-    private static ClientConfig Invalid() => new(false, false, "", 0, 0, 0, 0, 0, 0, false, false, 0, 0, 0);
+    private static ClientConfig Invalid() => new(false, false, "", 0, 0, 0, 0, 0, 0, false, false, 0, 0, 0, 0);
 
     private sealed class MutableConfig
     {
@@ -668,7 +697,8 @@ internal readonly record struct ClientConfig(
         public double RateMd;
         public bool BroadcastLt;
         public bool BroadcastMd;
-        public int PayloadSize;
+        public int PayloadLt;
+        public int PayloadMd;
         public ulong DeadlineNs;
         public ulong StalenessPeriodNs;
         public bool HaveHost;
