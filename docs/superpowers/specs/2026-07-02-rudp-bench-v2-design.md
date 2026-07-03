@@ -38,8 +38,10 @@ server capacity として読む場合の妥当性は、client farm の十分性 
 | `library-default` | ライブラリ既定値。ソケットバッファ含め一切いじらない |
 | `tuned-disclosed` | 調整可。ただし全調整項目を metadata で開示(cc_algo, buffers, thread 設定…) |
 
-publish では両ポリシーを常に併記する(見出し図に両方を出し、`tuned` の優位が
-チューニング量の差でないことを常時反証可能に保つ)。`tuned-disclosed` の調整は
+publish では **anchor セル(wired / loss 最悪点の capacity ペア)** で両ポリシーを
+併記する(`tuned` の優位がチューニング量の差でないことを反証可能に保つ。
+負荷平面の非 anchor セルと boundary は tuned-disclosed のみ — 併記の目的は
+公平性の反証可能性であり、代表点で足りる)。`tuned-disclosed` の調整は
 **upstream の公式ドキュメント・推奨に根拠を持つものに限る**(自由探索の最適化合戦に
 しない)。「この設定は公平か」という議論はこの2段への割当てで即決し、以後蒸し返さない。
 
@@ -216,6 +218,13 @@ HoL を人工的に頻発させ、RUDP に有利な藁人形になる。
 
 主張はすべて「loss p%・burst 長 b なら」という条件付きで行う(地名ラベルの
 外的妥当性論争を構造的に回避)。AQM の忠実な再現は非目標。
+
+**loss セルの run duration 規則**: 統計が loss イベント数で決まるため、duration は
+固定値でなく期待イベント数から導出する — duration ≥ 30 × burst長 / (loss率 ×
+リンク集約 pps)、下限 10s・上限 120s。orchestrator がセルのパラメータから自動計算
+する。5s 固定で b16 の p99 が不安定になる問題(ledger #3)の構造的解であり、
+低 loss 率セル(0.1%)も同じ式で正しく長くなる。イベント数閾値 30 は暫定 —
+E2 で反復間の p99 ばらつきを見て感度確認する。
 
 **lifecycle バリアプロトコル(two-phase)**: 各プロセスが自分の起動時刻から窓を
 計算する方式を全廃する。orchestrator が control channel(Unix domain socket,
@@ -537,4 +546,3 @@ transport 選択の境界条件)。進捗 = 埋まったセル数。
 - magiconion の構成詳細(serializer、Kestrel 設定、HTTP/2 のみか HTTP/3 も見るか)
 - litenetlib / magiconion の benchkit: P/Invoke か C# 再実装か
 - 外部アンカー(校正 §7)をどの lib まで整備するか
-- `library-default` 併走の範囲(全 profile か代表点のみか)
