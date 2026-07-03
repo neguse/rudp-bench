@@ -14,3 +14,7 @@ adapters/litenetlib/obj/
 results-v2/
 servers/magiconion/**/bin/
 servers/magiconion/**/obj/
+servers/litenetlib/**/bin/
+servers/litenetlib/**/obj/
+servers/websocket/**/bin/
+servers/websocket/**/obj/
