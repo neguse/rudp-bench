@@ -222,9 +222,16 @@ HoL を人工的に頻発させ、RUDP に有利な藁人形になる。
 **loss セルの run duration 規則**: 統計が loss イベント数で決まるため、duration は
 固定値でなく期待イベント数から導出する — duration ≥ 30 × burst長 / (loss率 ×
 リンク集約 pps)、下限 10s・上限 120s。orchestrator がセルのパラメータから自動計算
-する。5s 固定で b16 の p99 が不安定になる問題(ledger #3)の構造的解であり、
-低 loss 率セル(0.1%)も同じ式で正しく長くなる。イベント数閾値 30 は暫定 —
-E2 で反復間の p99 ばらつきを見て感度確認する。
+する。5s 固定で b16 の p99 が不安定になる問題(ledger #3)の構造的解。
+イベント数閾値 30 は暫定 — E2 で反復間の p99 ばらつきを見て感度確認する。
+
+**規則の適用範囲**: loss の効果が判定そのものに載るセル(loss 平面・loss 最悪点
+の capacity ペア・boundary スライス)に適用する。**wired の capacity スクリーニング
+には適用しない** — wired(0.1%)では delivery floor 0.998 に対し gate が
+0.95×floor で、loss の寄与(0.2%)は gate マージン(5%)の 1/25。loss 統計の
+精度は判定に影響しないため固定 10s(sweep config の duration 明示)で足りる。
+同様に、netem 実効値 gate(ping/iperf3)は netem 設定が不変な sweep 内では
+最初の実走で1回検証すれば足りる(qdisc echo back は毎 run)。
 
 **lifecycle バリアプロトコル(two-phase)**: 各プロセスが自分の起動時刻から窓を
 計算する方式を全廃する。orchestrator が control channel(Unix domain socket,

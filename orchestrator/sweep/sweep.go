@@ -100,6 +100,10 @@ type Sweep struct {
 	cfg   Config
 	cache map[string]PointRecord
 	log   *os.File
+	// netem 実効値 gate(ping/iperf3)は sweep 内で netem 設定が不変のため
+	// 最初の実走で1回検証すれば足りる。以降の run はスキップして単価を下げる
+	// (qdisc echo back は毎 run 行われる)
+	gateVerified bool
 }
 
 func New(cfg Config) (*Sweep, error) {
@@ -182,6 +186,7 @@ func (s *Sweep) runPoint(ctx context.Context, transport, workload string, conns 
 		DeadlineNS:        s.cfg.DeadlineNS,
 		StalenessPeriodNS: s.cfg.StalenessPeriodNS,
 		Netem:             s.cfg.Netem,
+		NetemGateOff:      s.gateVerified,
 		OutputDir:         runDir,
 	}
 	cfg, err := cfg.Prepare()
@@ -194,6 +199,10 @@ func (s *Sweep) runPoint(ctx context.Context, transport, workload string, conns 
 	result, err := run.Run(ctx, cfg)
 	if err != nil {
 		return PointRecord{}, fmt.Errorf("%s: run: %w", key, err)
+	}
+
+	if !s.gateVerified && result.Netem != nil && result.Netem.Gate != nil && result.Netem.Gate.OK() {
+		s.gateVerified = true
 	}
 
 	rec := PointRecord{
