@@ -211,7 +211,7 @@ func (s *Sweep) runPoint(ctx context.Context, transport, workload string, conns 
 		Regime:    s.cfg.Regime,
 		Conns:     conns,
 		Verdict:   result.Verdict,
-		Judgment:  Judge(result, w, s.cfg.Netem, s.cfg.StalenessPeriodNS),
+		Judgment:  Judge(result, w, conns, s.cfg.Netem, s.cfg.StalenessPeriodNS),
 		DurationS: time.Since(start).Seconds(),
 		RunDir:    runDir,
 	}

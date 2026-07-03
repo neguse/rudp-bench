@@ -1,6 +1,7 @@
 package netops
 
 import (
+	"math"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -66,7 +67,7 @@ func ParseIperfLossPct(jsonOut string) (float64, error) {
 	return *doc.End.Sum.LostPercent, nil
 }
 
-// 許容: RTT は ±(20% + 2ms)。loss は二項ばらつきを見込み ±(相対 50% + 絶対 0.3pt)。
+// 許容: RTT は ±(20% + 2ms)。
 func checkRTT(actual, expected float64) error {
 	tol := expected*0.2 + 2.0
 	if diff := actual - expected; diff > tol || diff < -tol {
@@ -75,10 +76,17 @@ func checkRTT(actual, expected float64) error {
 	return nil
 }
 
-func checkLoss(actual, expected float64, direction string) error {
-	tol := expected*0.5 + 0.3
-	if diff := actual - expected; diff > tol || diff < -tol {
-		return fmt.Errorf("iperf3 %s loss %.3f%%, want %.3f%% ±%.3f%%", direction, actual, expected, tol)
+// burst loss はイベント数が 1/burst 長になり実測分散が burst 長倍に膨らむため、
+// 上側の相対許容を √burst でスケールする。下側は expected/4 を下限とし、
+// 「netem が適用されていない(実測 ≈ 0)」の検出力は維持する。
+func checkLoss(actual, expected, burstLen float64, direction string) error {
+	if burstLen < 1 {
+		burstLen = 1
+	}
+	upper := expected*(1+0.5*math.Sqrt(burstLen)) + 0.3
+	lower := expected/4.0 - 0.3
+	if actual > upper || actual < lower {
+		return fmt.Errorf("iperf3 %s loss %.3f%%, want %.3f%% (allowed %.3f%%..%.3f%%, burst=%g)", direction, actual, expected, lower, upper, burstLen)
 	}
 	return nil
 }
@@ -143,7 +151,7 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 		return report, err
 	}
 	report.LossC2SPct = loss
-	if err := checkLoss(loss, report.ExpectedC2SPct, "c2s"); err != nil {
+	if err := checkLoss(loss, report.ExpectedC2SPct, spec.ClientEgress.LossBurstLen, "c2s"); err != nil {
 		report.Failures = append(report.Failures, err.Error())
 	}
 
@@ -163,7 +171,7 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 		return report, err
 	}
 	report.LossS2CPct = loss
-	if err := checkLoss(loss, report.ExpectedS2CPct, "s2c"); err != nil {
+	if err := checkLoss(loss, report.ExpectedS2CPct, spec.ServerEgress.LossBurstLen, "s2c"); err != nil {
 		report.Failures = append(report.Failures, err.Error())
 	}
 

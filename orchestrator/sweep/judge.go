@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/neguse/rudp-bench/orchestrator/netops"
 	"github.com/neguse/rudp-bench/orchestrator/run"
 )
 
@@ -69,17 +70,35 @@ func deliveryFloorLT(netem *run.NetemRegime) float64 {
 	return floor
 }
 
-// stalenessFloorNS = 片道遅延(両リンク合算)+ 送信間隔 + サンプル周期。
-func stalenessFloorNS(netem *run.NetemRegime, intervalNS, samplePeriodNS uint64) uint64 {
-	var delayNS uint64
+// stalenessFloorNS = 片道遅延(両リンク合算)+ 送信間隔 + サンプル周期
+// + バースト黒塗り項。Gilbert-Elliott の loss burst 中はリンク全体が
+// 落ちるため、burst長/リンクpps の間は transport 非依存に update が
+// 届かない(loss 率 ≥ 1% ならこの黒塗りが p99 サンプルに載る)。
+// 一次近似として両方向の黒塗り時間をフロアに加算する。
+func stalenessFloorNS(w run.Workload, totalConns int, netem *run.NetemRegime, intervalNS, samplePeriodNS uint64) uint64 {
+	var delayNS, burstNS uint64
 	if netem != nil {
 		delayNS = uint64(netem.ClientEgress.DelayMS+netem.ServerEgress.DelayMS) * 1_000_000
+		uplink, downlink := w.LinkPPS(totalConns)
+		burstNS += burstGapNS(netem.ClientEgress, uplink)
+		burstNS += burstGapNS(netem.ServerEgress, downlink)
 	}
-	return delayNS + intervalNS + samplePeriodNS
+	return delayNS + burstNS + intervalNS + samplePeriodNS
+}
+
+func burstGapNS(egress netops.Netem, linkPPS float64) uint64 {
+	if egress.LossPercent <= 0 || linkPPS <= 0 {
+		return 0
+	}
+	burst := egress.LossBurstLen
+	if burst < 1 {
+		burst = 1
+	}
+	return uint64(burst / linkPPS * 1e9)
 }
 
 // Judge は run 結果を平面 gate(archetype 非依存)で判定する。
-func Judge(result *run.Result, w run.Workload, netem *run.NetemRegime, samplePeriodNS uint64) Judgment {
+func Judge(result *run.Result, w run.Workload, totalConns int, netem *run.NetemRegime, samplePeriodNS uint64) Judgment {
 	j := Judgment{}
 
 	var causes []string
@@ -140,7 +159,7 @@ func Judge(result *run.Result, w run.Workload, netem *run.NetemRegime, samplePer
 		}
 
 		intervalNS := uint64(1e9 / w.RateLT)
-		j.FloorStaleNS = stalenessFloorNS(netem, intervalNS, samplePeriodNS)
+		j.FloorStaleNS = stalenessFloorNS(w, totalConns, netem, intervalNS, samplePeriodNS)
 		budget := j.FloorStaleNS + stalenessAllowanceIntervals*intervalNS
 		st := result.Metrics.StalenessNS
 		j.StalenessP99 = st.P99NS

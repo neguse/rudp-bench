@@ -97,7 +97,7 @@ func (w Workload) perConnRate() float64 {
 // linkPPS は netem が掛かるリンクの集約 pps(方向別)。
 // uplink(client egress)は全 conn の送信合算。downlink(server egress)は
 // echo で同数、broadcast で conn 数倍の fanout。
-func (w Workload) linkPPS(totalConns int) (uplink, downlink float64) {
+func (w Workload) LinkPPS(totalConns int) (uplink, downlink float64) {
 	n := float64(totalConns)
 	uplink = n * w.perConnRate()
 	downlink = 0
@@ -129,7 +129,7 @@ const (
 func autoDuration(w Workload, totalConns int, netem *NetemRegime) time.Duration {
 	need := autoDurationMin
 	if netem != nil {
-		uplink, downlink := w.linkPPS(totalConns)
+		uplink, downlink := w.LinkPPS(totalConns)
 		for _, dir := range []struct {
 			egress netops.Netem
 			pps    float64
