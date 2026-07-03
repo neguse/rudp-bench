@@ -51,7 +51,7 @@ static void print_describe(void) {
        "\"class_mapping\":{\"loss_tolerant\":\"unreliable-unsequenced\","
        "\"must_deliver\":\"reliable\"},"
        "\"coalescing\":\"none\","
-       "\"cc_algo\":\"none\","
+       "\"cc_algo\":\"enet-packet-throttle(scale=32,default=32,accel=2,decel=2,interval=5000ms)\","
        "\"thread_model\":\"single\","
        "\"encryption\":false,"
        "\"max_payload_bytes\":65536,"
