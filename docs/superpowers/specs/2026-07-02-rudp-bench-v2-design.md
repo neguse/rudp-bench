@@ -341,12 +341,31 @@ regime)は全格子を埋めず、答えるべき2つの質問が住むスライ
 capacity を動かし、負荷は queueing で鮮度を break の手前から劣化させる)ため、
 すべての数字に断面(regime と負荷)を明示する。
 
+**計測意味論の核(フロアと2段判定)**: regime × profile ごとに transport 非依存の
+**物理フロア F** を解析的に定義する — delivery floor = (1−loss)^hops、
+staleness floor = path delay + interval + sample 周期、RTT floor = 往復 delay
+(echo/broadcast の path は server 経由 2 ホップ)。判定は2段:
+
+1. **Feasibility**: F が profile の絶対予算を超える cell は **infeasible** —
+   transport 比較から除外し、「この regime でこの要件は物理的に不可能」という
+   regime の性質として独立に報告する(悪環境で全 transport が capacity 0 に
+   なる退化を、ゴミ数字でなく宣言に変える)
+2. **Transport 評価はフロア相対**: delivery gate は 0.95 × floor、staleness は
+   excess(p99 − floor)で評価する。絶対値 gate は regime を測ってしまう
+   (v1 improvements §5.4 で既知の同型問題: gate 0.95 が loss 理論上限に近接)
+
+フロアは校正と同じ「答えの分かっている系」であり、実測との一致は確認済み
+(wired: フロア式 40ms vs 実測 41ms、loss 平面 25ms: 式 80ms vs 実測 74ms±bin)。
+以後、regime・profile・予算の角ケースはこの核からの導出で解決し、個別パッチしない。
+
 1. **capacity スライス**(Q: server はどこまで張れるか): conns スイープ(二分探索)を
    **wired + loss 平面の最悪点(3% × burst 16)の2条件**で全 profile に対して行う
    (v1 で loss 条件が break を1桁動かした実績 — msquic の CC、udt4 — があるため
    wired 単独は仮定が強すぎる。clean は wired と実質同等なので省く)。
-   OK の定義は **quality-bounded**: validity gates + delivery ≥ 0.95 +
-   staleness p99 ≤ profile の鮮度予算(「届いているが古い」を capacity に数えない)
+   OK の定義は **quality-bounded かつフロア相対**: validity gates +
+   delivery ≥ 0.95 × floor + staleness p99 ≤ max(profile 鮮度予算, floor + excess 許容)
+   (「届いているが古い」を capacity に数えず、かつ物理フロアを transport の
+   責任にしない)。floor が予算を超える cell は infeasible
 2. **boundary スライス**(Q: 条件によって transport の鮮度優劣はどう分かれるか): **loss 平面 3×3 グリッド**を
    latest-value 系 profile(media_relay / game_server)に対して行う(+ congested 1点)。
    conns は**負荷アンカー**で決める: 無負荷極限 + capacity@wired の ~25% / ~75%

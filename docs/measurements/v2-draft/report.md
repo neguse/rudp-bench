@@ -5,15 +5,22 @@
 - rig: home(Ryzen 7 PRO 5750GE、netns/veth、ARK/Minecraft 同居)
 
 **測定対象は1枚の応答曲面 R(transport, profile, conns, regime)** であり、
-以下の主張1・2はその直交する断面。capacity は regime の関数(loss は再送増幅・
-滞留・BDP を通じて break を動かす)、鮮度は負荷の関数(queueing で break の手前
-から劣化する)なので、どの断面かを常に明示する。
+以下の主張1・2はその直交する断面。capacity は regime の関数、鮮度は負荷の関数
+なので、どの断面かを常に明示する。
+
+**フロアと2段判定**: regime × profile ごとに transport 非依存の物理フロア
+(delivery = (1−loss)^hops、staleness = path delay + interval + sample 周期)を
+併記する。フロアが絶対予算を超える cell は **infeasible**(環境の宣言であって
+transport の評価ではない)。transport の評価はフロア相対(delivery / floor、
+staleness − floor)で行う。例: 3%×burst16 の delivery floor は 0.941 なので、
+そこで 0.94 を出す transport はフロア達成 = 満点であり「break」ではない。
 
 ## 主張1: capacity(server は何接続まで張れるか)
 
-**quality-bounded capacity**: OK = validity gates + delivery ≥ 0.95 +
-**staleness p99 ≤ profile の鮮度予算**(「届いているが古い」を capacity に
-数えない)。conns 二分探索。セルは **wired / loss 最悪点(3%×burst16)** の
+**quality-bounded capacity(フロア相対)**: OK = validity gates +
+delivery ≥ 0.95 × floor + staleness p99 が予算内(フロア超過分で評価)。
+「届いているが古い」を capacity に数えず、物理フロアを transport の責任に
+しない。floor が予算を超える cell は infeasible と表記。conns 二分探索。セルは **wired / loss 最悪点(3%×burst16)** の
 ペアで、両者の差が環境劣化への頑健性を表す。break には原因ラベル必須。
 
 | profile | enet | gns | litenetlib | msquic | websocket | magiconion |
