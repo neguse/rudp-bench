@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/netops"
+	"github.com/neguse/rudp-bench/orchestrator/report"
 	orun "github.com/neguse/rudp-bench/orchestrator/run"
 	"github.com/neguse/rudp-bench/orchestrator/sweep"
 )
@@ -24,6 +26,10 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "sweep" {
 		sweepMain(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "report" {
+		reportMain(os.Args[2:])
 		return
 	}
 
@@ -109,6 +115,25 @@ func runMain(args []string) {
 			os.Exit(2)
 		}
 	}
+}
+
+type repeatedFlag []string
+
+func (r *repeatedFlag) String() string     { return strings.Join(*r, ",") }
+func (r *repeatedFlag) Set(v string) error { *r = append(*r, v); return nil }
+
+func reportMain(args []string) {
+	fs := flag.NewFlagSet("report", flag.ExitOnError)
+	doc := fs.String("doc", "docs/measurements/v2-draft/report.md", "markdown doc with generated markers")
+	var sweeps repeatedFlag
+	fs.Var(&sweeps, "sweep", "sweep output dir (repeatable)")
+	exitOnErr(fs.Parse(args))
+	if len(sweeps) == 0 {
+		fmt.Fprintln(os.Stderr, "report -sweep is required (repeatable)")
+		os.Exit(1)
+	}
+	exitOnErr(report.UpdateDoc(*doc, sweeps))
+	fmt.Fprintf(os.Stderr, "updated: %s\n", *doc)
 }
 
 func sweepMain(args []string) {

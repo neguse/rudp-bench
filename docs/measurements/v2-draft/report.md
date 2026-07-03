@@ -27,33 +27,34 @@ infeasible と表記。conns 二分探索。break には原因ラベル必須。
 anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)での
 判定を**分析時に追加**する(ヒストグラムから再計算、run は増えない)。
 
+以下の表は `orchestrator report -sweep <dir>` が sweep 出力から自動生成する
+(手で編集しない)。
+
 **capacity @ wired(負荷平面 全 9 セル + synthetic)**:
 
-| workload | enet | gns | litenetlib | msquic | websocket | magiconion |
-|---|---|---|---|---|---|---|
-| r10p128 | — | — | — | — | — | — |
-| r10p200 | — | — | — | — | — | — |
-| r10p1000 | — | — | — | — | — | — |
-| r20p128 ⚓br | — | — | — | — | — | — |
-| r20p200 | — | — | — | — | — | — |
-| r20p1000 ⚓video | — | — | — | — | — | — |
-| r60p128 | — | — | — | — | — | — |
-| r60p200 ⚓vr | — | — | — | — | — | — |
-| r60p1000 | — | — | — | — | — | — |
-| echo (synthetic) | — | — | — | — | — | — |
-| reliable_echo (synthetic) | — | — | — | — | — | — |
+<!-- generated:capacity-wired -->
+*未測定(sweep 完了後に `orchestrator report` で生成)*
+<!-- /generated:capacity-wired -->
+
+**anchor 絶対予算判定 @ wired**(profiles.md の凍結予算、capacity 点での近似):
+
+<!-- generated:anchors-wired -->
+*未測定*
+<!-- /generated:anchors-wired -->
 
 **capacity @ loss 最悪点(3%×burst16、anchor のみ)** — wired とのペアで
 環境劣化への頑健性を表す:
 
-| anchor | enet | gns | litenetlib | msquic | websocket | magiconion |
-|---|---|---|---|---|---|---|
-| r20p128 ⚓br | — | — | — | — | — | — |
-| r20p1000 ⚓video | — | — | — | — | — | — |
-| r60p200 ⚓vr | — | — | — | — | — | — |
+<!-- generated:capacity-loss-worst -->
+*未測定*
+<!-- /generated:capacity-loss-worst -->
 
-*全セル未測定(E2 で draft、E3 で確定)。anchor の room 主張範囲
-(br 〜128 / vr 〜80 / video 〜49)を超える capacity 値は stress ceiling 表記。*
+<!-- generated:anchors-loss-worst -->
+*未測定*
+<!-- /generated:anchors-loss-worst -->
+
+*anchor の room 主張範囲(br 〜128 / vr 〜80 / video 〜49)を超える capacity
+値は stress ceiling として読む。*
 
 ## 主張2: boundary(ネットワーク条件で各 transport の鮮度特性はどう分かれるか)
 

@@ -148,7 +148,8 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		HelloTimeout: cfg.ControlTimeout.Duration,
 		ReadyTimeout: cfg.ControlTimeout.Duration,
 		AckTimeout:   cfg.ControlTimeout.Duration,
-		DoneTimeout:  cfg.ControlTimeout.Duration,
+		// done は schedule ack 直後から計時され、計測窓全体を跨いで待つ
+		DoneTimeout: cfg.Warmup.Duration + cfg.Duration.Duration + cfg.Drain.Duration + cfg.ControlTimeout.Duration,
 	})
 	if err != nil {
 		extraReasons = append(extraReasons, fmt.Sprintf("control server setup failed: %v", err))
