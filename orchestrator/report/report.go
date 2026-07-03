@@ -202,24 +202,16 @@ func ReplaceSection(md, name, content string) (string, error) {
 	return re.ReplaceAllString(md, "${1}"+strings.TrimSuffix(content, "\n")+"\n${2}"), nil
 }
 
-// UpdateDoc は sweep dir 群を読み、doc のマーカー区間を更新する。
-// 区間名は regime から決まる: capacity-<regime>、anchors-<regime>。
-// doc に無い区間はスキップ(まだ散文側が用意していない regime)。
-func UpdateDoc(docPath string, sweepDirs []string) error {
+// UpdateDoc は sweep / boundary dir 群を読み、doc のマーカー区間を更新する。
+// 区間名: capacity-<regime>、anchors-<regime>、boundary-<anchor>-<load>。
+// doc に無い区間はスキップ(まだ散文側が用意していない区間)。
+func UpdateDoc(docPath string, sweepDirs, boundaryDirs []string) error {
 	raw, err := os.ReadFile(docPath)
 	if err != nil {
 		return err
 	}
 	md := string(raw)
-	for _, dir := range sweepDirs {
-		sd, err := LoadSweep(dir)
-		if err != nil {
-			return err
-		}
-		sections := map[string]string{
-			"capacity-" + sd.Regime: sd.CapacityTable(sd.Regime != "wired"),
-			"anchors-" + sd.Regime:  sd.AnchorVerdicts(),
-		}
+	apply := func(sections map[string]string) {
 		for name, content := range sections {
 			updated, err := ReplaceSection(md, name, content)
 			if err != nil {
@@ -228,6 +220,29 @@ func UpdateDoc(docPath string, sweepDirs []string) error {
 			}
 			md = updated
 		}
+	}
+	for _, dir := range sweepDirs {
+		sd, err := LoadSweep(dir)
+		if err != nil {
+			return err
+		}
+		apply(map[string]string{
+			"capacity-" + sd.Regime: sd.CapacityTable(sd.Regime != "wired"),
+			"anchors-" + sd.Regime:  sd.AnchorVerdicts(),
+		})
+	}
+	for _, dir := range boundaryDirs {
+		bd, err := LoadBoundary(dir)
+		if err != nil {
+			return err
+		}
+		sections := map[string]string{}
+		for _, anchor := range bd.Anchors() {
+			for _, label := range bd.LoadLabels(anchor) {
+				sections["boundary-"+anchor+"-"+label] = bd.BoundaryTable(anchor, label)
+			}
+		}
+		apply(sections)
 	}
 	return os.WriteFile(docPath, []byte(md), 0o644)
 }

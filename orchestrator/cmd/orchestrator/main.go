@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/neguse/rudp-bench/orchestrator/boundary"
 	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/netops"
 	"github.com/neguse/rudp-bench/orchestrator/report"
@@ -30,6 +31,10 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "report" {
 		reportMain(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "boundary" {
+		boundaryMain(os.Args[2:])
 		return
 	}
 
@@ -125,15 +130,41 @@ func (r *repeatedFlag) Set(v string) error { *r = append(*r, v); return nil }
 func reportMain(args []string) {
 	fs := flag.NewFlagSet("report", flag.ExitOnError)
 	doc := fs.String("doc", "docs/measurements/v2-draft/report.md", "markdown doc with generated markers")
-	var sweeps repeatedFlag
-	fs.Var(&sweeps, "sweep", "sweep output dir (repeatable)")
+	var sweeps, boundaries repeatedFlag
+	fs.Var(&sweeps, "sweep", "capacity sweep output dir (repeatable)")
+	fs.Var(&boundaries, "boundary", "boundary sweep output dir (repeatable)")
 	exitOnErr(fs.Parse(args))
-	if len(sweeps) == 0 {
-		fmt.Fprintln(os.Stderr, "report -sweep is required (repeatable)")
+	if len(sweeps) == 0 && len(boundaries) == 0 {
+		fmt.Fprintln(os.Stderr, "report needs -sweep and/or -boundary")
 		os.Exit(1)
 	}
-	exitOnErr(report.UpdateDoc(*doc, sweeps))
+	exitOnErr(report.UpdateDoc(*doc, sweeps, boundaries))
 	fmt.Fprintf(os.Stderr, "updated: %s\n", *doc)
+}
+
+func boundaryMain(args []string) {
+	fs := flag.NewFlagSet("boundary", flag.ExitOnError)
+	configPath := fs.String("config", "", "boundary config JSON path")
+	exitOnErr(fs.Parse(args))
+	if *configPath == "" {
+		fmt.Fprintln(os.Stderr, "boundary -config is required")
+		os.Exit(1)
+	}
+	cfg, err := boundary.LoadConfig(*configPath)
+	exitOnErr(err)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	b, err := boundary.New(cfg)
+	exitOnErr(err)
+	defer b.Close()
+
+	points, err := b.Run(ctx)
+	if len(points) > 0 {
+		fmt.Fprintf(os.Stderr, "boundary: %s\n", filepath.Join(cfg.OutputDir, "boundary.json"))
+	}
+	exitOnErr(err)
 }
 
 func sweepMain(args []string) {
