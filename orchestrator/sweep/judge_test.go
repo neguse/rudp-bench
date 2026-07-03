@@ -82,15 +82,42 @@ func TestJudgeSelfScalingBudget(t *testing.T) {
 	}
 }
 
-func TestJudgeFarmLimitedCensored(t *testing.T) {
+func TestJudgeRecvDropCensored(t *testing.T) {
 	w, _ := run.LookupWorkload("r20p128")
 	res := &run.Result{
 		Verdict:        run.VerdictInvalid,
-		InvalidReasons: []string{"attempted_ratio=0.98 below threshold=0.99"},
+		InvalidReasons: []string{"client netns UDP drop delta non-zero: InErrors=361 RcvbufErrors=361"},
 	}
 	j := Judge(res, w, nil, samplePeriodNS)
 	if !j.Censored || j.OK {
 		t.Fatalf("expected censored: %+v", j)
+	}
+}
+
+func TestJudgeBackpressureIsBreakNotCensor(t *testing.T) {
+	// TCP 系の submit backpressure: attempted 低下は metric gate で正直に落ちる
+	w, _ := run.LookupWorkload("r20p128")
+	res := validResult(0.81, 0.82, 70_000_000)
+	res.Verdict = run.VerdictInvalid
+	res.InvalidReasons = []string{"attempted_ratio=0.8137 below threshold=0.99"}
+	j := Judge(res, w, nil, samplePeriodNS)
+	if j.Censored || j.OK {
+		t.Fatalf("expected honest break: %+v", j)
+	}
+	if !strings.Contains(j.Cause, "delivery_lt") || !strings.Contains(j.Cause, "submit backpressure") {
+		t.Fatalf("cause should name gate and note backpressure: %q", j.Cause)
+	}
+}
+
+func TestJudgeAttemptedShortfallAloneDoesNotFail(t *testing.T) {
+	// attempted 0.97 でも quality gate が通れば OK(分母には既に入っている)
+	w, _ := run.LookupWorkload("r20p128")
+	res := validResult(0.97, 0.98, 70_000_000)
+	res.Verdict = run.VerdictInvalid
+	res.InvalidReasons = []string{"attempted_ratio=0.97 below threshold=0.99"}
+	j := Judge(res, w, nil, samplePeriodNS)
+	if !j.OK {
+		t.Fatalf("expected OK when gates pass: %+v", j)
 	}
 }
 

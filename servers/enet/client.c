@@ -519,6 +519,18 @@ static int run_client(const client_config *cfg) {
     return -1;
   }
 
+  // 計測器(client farm)側の受信バッファ。broadcast fanout の高 pps 受信で
+  // kernel 既定 rcvbuf が溢れると server の delivery が過小観測される
+  // (farm 十分性の問題であり transport の tuning ではない。server 側は不変)
+  enet_socket_set_option(host->socket, ENET_SOCKOPT_RCVBUF, 4 * 1024 * 1024);
+  {
+    int effective = 0;
+    socklen_t optlen = sizeof(effective);
+    if (getsockopt(host->socket, SOL_SOCKET, SO_RCVBUF, &effective, &optlen) == 0) {
+      fprintf(stderr, "client rcvbuf effective=%d\n", effective);
+    }
+  }
+
   client_conn *conns = (client_conn *)calloc((size_t)cfg->conns, sizeof(*conns));
   const size_t payload_buf_size =
       cfg->payload_lt > cfg->payload_md ? cfg->payload_lt : cfg->payload_md;

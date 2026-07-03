@@ -32,11 +32,29 @@ type Judgment struct {
 	FloorStaleNS  uint64  `json:"floor_staleness_ns,omitempty"`
 }
 
-// farmLimitedReason は client farm の十分性 gate 発火を表す invalid reason か。
-// design spec: これらは server の break ではなく censored として扱う。
-func farmLimitedReason(reason string) bool {
-	return strings.Contains(reason, "attempted_ratio") ||
-		strings.Contains(reason, "UDP drop delta")
+// invalid reason の分類。
+// - 受信側 drop(UDP drop delta): farm の受信不足。delivery を過小に見せる
+//   計測器起因の欠測なので censored(design spec: farm 律速は打ち切り)
+// - attempted_ratio: 送信 slot の未 submit。TCP 系では transport backpressure
+//   そのもの(= 測定対象の挙動)であり、未送信 slot は delivery の分母に
+//   入っているので metric gate で正直に判定できる → censored にしない
+type reasonKind int
+
+const (
+	reasonAttempted reasonKind = iota
+	reasonRecvDrop
+	reasonOther
+)
+
+func classifyReason(reason string) reasonKind {
+	switch {
+	case strings.Contains(reason, "attempted_ratio"):
+		return reasonAttempted
+	case strings.Contains(reason, "UDP drop delta"):
+		return reasonRecvDrop
+	default:
+		return reasonOther
+	}
 }
 
 // deliveryFloorLT は loss-tolerant の物理フロア = Π(1 − link loss)。
@@ -64,28 +82,37 @@ func stalenessFloorNS(netem *run.NetemRegime, intervalNS, samplePeriodNS uint64)
 func Judge(result *run.Result, w run.Workload, netem *run.NetemRegime, samplePeriodNS uint64) Judgment {
 	j := Judgment{}
 
+	var causes []string
+	backpressureNote := ""
 	if result.Verdict != run.VerdictValid {
-		allFarm := len(result.InvalidReasons) > 0
+		hasDrop, hasOther := false, false
 		for _, r := range result.InvalidReasons {
-			if !farmLimitedReason(r) {
-				allFarm = false
-				break
+			switch classifyReason(r) {
+			case reasonRecvDrop:
+				hasDrop = true
+			case reasonOther:
+				hasOther = true
 			}
 		}
-		if allFarm {
+		switch {
+		case hasOther || len(result.InvalidReasons) == 0:
+			j.Cause = "invalid: " + strings.Join(result.InvalidReasons, "; ")
+			return j
+		case hasDrop:
 			j.Censored = true
 			j.Cause = "farm_limited: " + strings.Join(result.InvalidReasons, "; ")
-		} else {
-			j.Cause = "invalid: " + strings.Join(result.InvalidReasons, "; ")
+			return j
+		default:
+			// attempted_ratio のみ → 未 submit slot は delivery の分母に
+			// 入っているので metric gate に判定を委ねる。gate も落ちた場合
+			// のみ backpressure を原因に併記する(単独では点を落とさない)
+			backpressureNote = "submit backpressure (" + strings.Join(result.InvalidReasons, "; ") + ")"
 		}
-		return j
 	}
 	if result.Metrics == nil {
 		j.Cause = "invalid: metrics missing"
 		return j
 	}
-
-	var causes []string
 
 	if w.RateMD > 0 {
 		md, ok := result.Metrics.Classes["must_deliver"]
@@ -125,6 +152,9 @@ func Judge(result *run.Result, w run.Workload, netem *run.NetemRegime, samplePer
 	}
 
 	if len(causes) > 0 {
+		if backpressureNote != "" {
+			causes = append(causes, backpressureNote)
+		}
 		j.Cause = strings.Join(causes, "; ")
 		return j
 	}
