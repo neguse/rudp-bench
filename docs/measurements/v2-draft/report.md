@@ -4,24 +4,35 @@
 - 状態: **draft** — 空セル = 未測定(これがそのまま残作業)。draft 値は home rig・N=1
 - rig: home(Ryzen 7 PRO 5750GE、netns/veth、ARK/Minecraft 同居)
 
+**測定対象は1枚の応答曲面 R(transport, profile, conns, regime)** であり、
+以下の主張1・2はその直交する断面。capacity は regime の関数(loss は再送増幅・
+滞留・BDP を通じて break を動かす)、鮮度は負荷の関数(queueing で break の手前
+から劣化する)なので、どの断面かを常に明示する。
+
 ## 主張1: capacity(server は何接続まで張れるか)
 
-conns 二分探索 × {wired, loss平面最悪点}。break には原因ラベル必須。
+**quality-bounded capacity**: OK = validity gates + delivery ≥ 0.95 +
+**staleness p99 ≤ profile の鮮度予算**(「届いているが古い」を capacity に
+数えない)。conns 二分探索。セルは **wired / loss 最悪点(3%×burst16)** の
+ペアで、両者の差が環境劣化への頑健性を表す。break には原因ラベル必須。
 
 | profile | enet | gns | litenetlib | msquic | websocket | magiconion |
 |---|---|---|---|---|---|---|
-| echo (mixed) | — | — | — | — | — | — |
-| reliable_echo | — | — | — | — | — | — |
-| game_server 型 | — | — | — | — | — | — |
-| media_relay 型 | — | — | — | — | — | — |
+| echo (mixed) | — / — | — / — | — / — | — / — | — / — | — / — |
+| reliable_echo | — / — | — / — | — / — | — / — | — / — | — / — |
+| game_server 型 | — / — | — / — | — / — | — / — | — / — | — / — |
+| media_relay 型 | — / — | — / — | — / — | — / — | — / — | — / — |
 
 *全セル未測定(E2 で draft、E3 で確定)。*
 
 ## 主張2: boundary(ネットワーク条件で各 transport の鮮度特性はどう分かれるか)
 
-loss 平面(平均 loss% × 平均 burst 長、片道 25ms 固定、50Hz latest-value echo、
-c4)での **staleness p99 (ms)**。draft・N=1・5s run(burst 16 列はサンプル不足 —
-ledger #3)。
+loss 平面(平均 loss% × 平均 burst 長、片道 25ms 固定、50Hz latest-value echo)
+での **staleness p99 (ms)**。鮮度は負荷の関数でもあるため、本主張は
+**負荷アンカー付き**で測る: 無負荷極限(下表、c4)に加え、capacity@wired の
+~25% / ~75% 負荷での再測定を行う(主張1のセルが先に埋まる必要がある —
+E2 の実行順はこれで決まる)。下表は draft・N=1・5s run(burst 16 列は
+サンプル不足 — ledger #3)。
 
 | loss% × burst | enet | msquic | magiconion (TCP) |
 |---|---|---|---|
@@ -43,7 +54,9 @@ profile(media/game 型)での boundary、等高線の局所細分。
 
 ## 主張3: transport 選択の境界条件(暫定)
 
-片道 25ms・50Hz の latest-value トラフィックで:
+境界条件は **(regime, 負荷) の2軸**で条件付ける。現 draft は無負荷極限のみ:
+
+片道 25ms・50Hz・**無負荷極限(c4)** の latest-value トラフィックで:
 
 - **loss ~0.1% まで**: 3者の staleness は同等(~74ms、理論値どおり)。
   鮮度の観点では差がなく、選択は運用・インフラ等の別基準で決めてよい
@@ -53,7 +66,7 @@ profile(media/game 型)での boundary、等高線の局所細分。
 - burst 長の効果は現サンプル数では判定不能(ledger #3)
 
 *確定には: N≥3 ブロック反復、残り 3 transport、congested regime、
-media/game 型 profile での再確認が必要。*
+media/game 型 profile、および **25%/75% 負荷アンカーでの再測定**が必要。*
 
 ## 付録A: v1 published との突き合わせ(v2.0 完了条件)
 

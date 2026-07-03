@@ -336,14 +336,22 @@ publish は複数ブロックの確認実験、と2段階に分ける。
 **組み合わせの抑制(full factorial は回さない)**: 要因空間(profile × conns ×
 regime)は全格子を埋めず、答えるべき2つの質問が住むスライスだけを測る:
 
+測定対象の実体は**応答曲面 R(transport, profile, conns, regime)** であり、
+スライスはその断面。capacity と鮮度は独立ではない(loss は再送増幅・滞留・BDP で
+capacity を動かし、負荷は queueing で鮮度を break の手前から劣化させる)ため、
+すべての数字に断面(regime と負荷)を明示する。
+
 1. **capacity スライス**(Q: server はどこまで張れるか): conns スイープ(二分探索)を
    **wired + loss 平面の最悪点(3% × burst 16)の2条件**で全 profile に対して行う
    (v1 で loss 条件が break を1桁動かした実績 — msquic の CC、udt4 — があるため
-   wired 単独は仮定が強すぎる。clean は wired と実質同等なので省く)
+   wired 単独は仮定が強すぎる。clean は wired と実質同等なので省く)。
+   OK の定義は **quality-bounded**: validity gates + delivery ≥ 0.95 +
+   staleness p99 ≤ profile の鮮度予算(「届いているが古い」を capacity に数えない)
 2. **boundary スライス**(Q: 条件によって transport の鮮度優劣はどう分かれるか): **loss 平面 3×3 グリッド**を
-   代表 conns 固定で、latest-value 系 profile(media_relay / game_server)に対して
-   行う(+ congested 1点)。staleness p99 が一次指標。境界の等高線が通る近傍だけ
-   グリッドを局所細分する(逐次実験 — 面全体を細かくしない)
+   latest-value 系 profile(media_relay / game_server)に対して行う(+ congested 1点)。
+   conns は**負荷アンカー**で決める: 無負荷極限 + capacity@wired の ~25% / ~75%
+   (capacity スライスが先行する依存関係)。staleness p99 が一次指標。境界の等高線が
+   通る近傍だけグリッドを局所細分する(逐次実験 — 面全体を細かくしない)
 3. **交互作用プローブ**: スライス仮定の検証として、capacity の break 付近 × loss 平面
    の数セルを publish 時のみ実測。スライスの結論と矛盾したらその近傍だけ局所的に
    格子を広げる
