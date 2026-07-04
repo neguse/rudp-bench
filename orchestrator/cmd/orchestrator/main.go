@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/neguse/rudp-bench/orchestrator/aggregate"
 	"github.com/neguse/rudp-bench/orchestrator/block"
 	"github.com/neguse/rudp-bench/orchestrator/boundary"
 	"github.com/neguse/rudp-bench/orchestrator/control"
@@ -36,6 +37,33 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "boundary" {
 		boundaryMain(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "aggregate" {
+		fs := flag.NewFlagSet("aggregate", flag.ExitOnError)
+		var sweeps, boundaries repeatedFlag
+		fs.Var(&sweeps, "sweep", "same-regime sweep dir from each block (repeatable)")
+		fs.Var(&boundaries, "boundary", "boundary dir from each block (repeatable)")
+		anchorsOnly := fs.Bool("anchors-only", false, "capacity table restricted to anchor cells")
+		exitOnErr(fs.Parse(os.Args[2:]))
+		if len(sweeps) == 0 && len(boundaries) == 0 {
+			fmt.Fprintln(os.Stderr, "aggregate needs -sweep and/or -boundary (one per block)")
+			os.Exit(1)
+		}
+		if len(sweeps) > 0 {
+			aggs, regime, err := aggregate.AggregateCapacityWithRegime(sweeps)
+			exitOnErr(err)
+			fmt.Println(aggregate.CapacityCITable(aggs, regime, *anchorsOnly))
+		}
+		if len(boundaries) > 0 {
+			aggs, err := aggregate.AggregateBoundary(boundaries)
+			exitOnErr(err)
+			for _, anchor := range aggregate.BoundaryAnchors(aggs) {
+				for _, label := range aggregate.BoundaryLoadLabels(aggs, anchor) {
+					fmt.Printf("### %s / %s\n\n%s\n", anchor, label, aggregate.BoundaryCITable(aggs, anchor, label))
+				}
+			}
+		}
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "block" {
