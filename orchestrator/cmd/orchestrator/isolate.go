@@ -11,6 +11,11 @@ import (
 // レイアウト(5750GE 8C16T): OS/background 0-2,8-10 / client 3-6,11-14 / server 7,15。
 // bench プロセス側の割当は RunConfig の server_cpus / client_cpus(taskset)で行い、
 // ここでは OS 側 slice の退避・IRQ affinity・governor を設定する。
+//
+// 注意: setup 後は user.slice も OS コアに退避されるため、sweep/boundary は
+// bench slice の scope で起動しないと taskset が EINVAL になる:
+//   sudo systemd-run --scope --slice=bench.slice -p AllowedCPUs=3-7,11-15 \
+//     -p CPUWeight=10000 --quiet ./build-v2/orchestrator sweep -config ...
 const (
 	osCPUs    = "0-2,8-10"
 	benchCPUs = "3 4 5 6 7 11 12 13 14 15"
