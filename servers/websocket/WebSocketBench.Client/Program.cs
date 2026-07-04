@@ -5,6 +5,12 @@ using System.Text;
 using BenchKit.CS;
 
 var config = ClientConfig.Parse(args);
+
+// 計測器(client farm)側: ThreadPool の hill-climbing 起動遅延が送信 pacing の
+// stall(数百 ms 級)として観測されるため、最低スレッド数を先に確保する。
+// client 専用の farm 設定であり server には入れない
+System.Threading.ThreadPool.SetMinThreads(Environment.ProcessorCount * 4, Environment.ProcessorCount * 4);
+
 if (config.Describe)
 {
     Console.WriteLine(BenchDescribeWs.Json());
