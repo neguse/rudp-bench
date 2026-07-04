@@ -137,12 +137,22 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 		if reverse {
 			args = append(args, "-R")
 		}
-		cmd := exec.CommandContext(ctx, "ip", args...)
-		out, err := cmd.Output()
-		if err != nil {
-			return 0, fmt.Errorf("iperf3 client(reverse=%v): %w", reverse, err)
+		// iperf3 は接続タイミングで一過性に失敗することがある(listener 準備
+		// レース等)。tooling の flake で測定点を汚さないよう1回だけリトライ
+		var lastErr error
+		for attempt := 0; attempt < 2; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Second)
+			}
+			cmd := exec.CommandContext(ctx, "ip", args...)
+			out, err := cmd.Output()
+			if err != nil {
+				lastErr = fmt.Errorf("iperf3 client(reverse=%v): %w", reverse, err)
+				continue
+			}
+			return ParseIperfLossPct(string(out))
 		}
-		return ParseIperfLossPct(string(out))
+		return 0, lastErr
 	}
 
 	// c→s(client egress のみ通る)
