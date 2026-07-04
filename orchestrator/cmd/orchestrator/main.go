@@ -37,6 +37,10 @@ func main() {
 		boundaryMain(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "isolate" {
+		isolateMain(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "rejudge" {
 		fs := flag.NewFlagSet("rejudge", flag.ExitOnError)
 		dir := fs.String("dir", "", "sweep output dir to re-judge from stored run results")

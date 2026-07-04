@@ -36,6 +36,8 @@ type Config struct {
 	Drain             run.Duration                   `json:"drain"`
 	DeadlineNS        uint64                         `json:"deadline_ns"`
 	StalenessPeriodNS uint64                         `json:"staleness_period_ns"`
+	ServerCPUs        string                         `json:"server_cpus,omitempty"`
+	ClientCPUs        string                         `json:"client_cpus,omitempty"`
 	OutputDir         string                         `json:"output_dir"`
 }
 
@@ -240,6 +242,8 @@ func (b *Boundary) runPoint(ctx context.Context, c cell, loss, burst float64, lo
 		StalenessPeriodNS: b.cfg.StalenessPeriodNS,
 		Netem:             netem,
 		NetemGateOff:      b.gateDone[gateKey],
+		ServerCPUs:        b.cfg.ServerCPUs,
+		ClientCPUs:        b.cfg.ClientCPUs,
 		OutputDir:         runDir,
 	}
 	cfg, err := cfg.Prepare()

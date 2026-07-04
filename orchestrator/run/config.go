@@ -116,6 +116,11 @@ type RunConfig struct {
 	StalenessPeriodNS  uint64        `json:"staleness_period_ns"`
 	Netem              *NetemRegime  `json:"netem,omitempty"`
 	NetemGateOff       bool          `json:"netem_gate_off,omitempty"`
+	// 役割別 CPU 割当(taskset -c 形式)。v1 の役割隔離レイアウトを流用:
+	// OS/background 0-2,8-10 / client 3-6,11-14 / server 7,15。
+	// OS 側 slice の退避は `orchestrator isolate setup` で行う
+	ServerCPUs string `json:"server_cpus,omitempty"`
+	ClientCPUs string `json:"client_cpus,omitempty"`
 	OutputDir          string        `json:"output_dir"`
 	AttemptedThreshold float64       `json:"attempted_threshold,omitempty"`
 	ControlTimeout     Duration      `json:"control_timeout,omitempty"`

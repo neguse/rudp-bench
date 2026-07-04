@@ -179,7 +179,7 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		ProcIndex:  -1,
 		TotalConns: cfg.TotalConns,
 	})
-	if err := startOne(runCtx, ctrl.SocketPath(), logDir, serverCmd, serverNS, ProcessResult{
+	if err := startOne(runCtx, ctrl.SocketPath(), logDir, serverCmd, serverNS, cfg.ServerCPUs, ProcessResult{
 		Role:       "server",
 		ProcIndex:  -1,
 		ExitCode:   -1,
@@ -226,7 +226,7 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 				OriginIDEnd:   originEnd,
 				TotalConns:    cfg.TotalConns,
 			})
-			err := startOne(runCtx, ctrl.SocketPath(), logDir, clientCmd, clientNS, ProcessResult{
+			err := startOne(runCtx, ctrl.SocketPath(), logDir, clientCmd, clientNS, cfg.ClientCPUs, ProcessResult{
 				Role:          "client",
 				ProcIndex:     i,
 				Conns:         conns,
@@ -364,8 +364,8 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 	}, resultPath, summaryPath)
 }
 
-func startOne(ctx context.Context, controlSock, logDir string, cmdCfg CommandConfig, netns string, pr ProcessResult, processes *[]ProcessResult, handles *[]processHandle, waitCh chan<- waitEvent) error {
-	path, args := namespaceCommand(cmdCfg, netns)
+func startOne(ctx context.Context, controlSock, logDir string, cmdCfg CommandConfig, netns, cpus string, pr ProcessResult, processes *[]ProcessResult, handles *[]processHandle, waitCh chan<- waitEvent) error {
+	path, args := namespaceCommand(cmdCfg, netns, cpus)
 	pr.Command = append([]string{path}, args...)
 	stdoutPath := filepath.Join(logDir, fmt.Sprintf("%s-%d.stdout.log", pr.Role, pr.ProcIndex))
 	stderrPath := filepath.Join(logDir, fmt.Sprintf("%s-%d.stderr.log", pr.Role, pr.ProcIndex))
@@ -432,11 +432,14 @@ func chownDirsToSudoUser(dirs ...string) error {
 	return nil
 }
 
-func namespaceCommand(cmd CommandConfig, netns string) (string, []string) {
+func namespaceCommand(cmd CommandConfig, netns, cpus string) (string, []string) {
 	if netns == "" {
+		if cpus != "" {
+			return "taskset", append([]string{"-c", cpus, cmd.Path}, cmd.Args...)
+		}
 		return cmd.Path, append([]string(nil), cmd.Args...)
 	}
-	args := make([]string, 0, 8+len(cmd.Args))
+	args := make([]string, 0, 12+len(cmd.Args))
 	args = append(args, "netns", "exec", netns)
 	// sudo 実行時はベンチマークプロセスを元ユーザーに降格する。
 	// root のままだと msquic が datapath 初期化で SIGABRT する(v1 の教訓)ほか、
@@ -446,6 +449,11 @@ func namespaceCommand(cmd CommandConfig, netns string) (string, []string) {
 		if uid, gid := os.Getenv("SUDO_UID"), os.Getenv("SUDO_GID"); uid != "" && gid != "" {
 			args = append(args, "setpriv", "--reuid", uid, "--regid", gid, "--init-groups")
 		}
+	}
+	// 役割別 CPU 割当(v1 の役割隔離)。setpriv 後に置くことで降格ユーザーの
+	// プロセスに affinity が掛かる
+	if cpus != "" {
+		args = append(args, "taskset", "-c", cpus)
 	}
 	args = append(args, cmd.Path)
 	args = append(args, cmd.Args...)

@@ -40,6 +40,8 @@ type Config struct {
 	DeadlineNS        uint64                   `json:"deadline_ns"`
 	StalenessPeriodNS uint64                   `json:"staleness_period_ns"`
 	Netem             *run.NetemRegime         `json:"netem,omitempty"`
+	ServerCPUs        string                   `json:"server_cpus,omitempty"`
+	ClientCPUs        string                   `json:"client_cpus,omitempty"`
 	OutputDir         string                   `json:"output_dir"`
 }
 
@@ -187,6 +189,8 @@ func (s *Sweep) runPoint(ctx context.Context, transport, workload string, conns 
 		StalenessPeriodNS: s.cfg.StalenessPeriodNS,
 		Netem:             s.cfg.Netem,
 		NetemGateOff:      s.gateVerified,
+		ServerCPUs:        s.cfg.ServerCPUs,
+		ClientCPUs:        s.cfg.ClientCPUs,
 		OutputDir:         runDir,
 	}
 	cfg, err := cfg.Prepare()
