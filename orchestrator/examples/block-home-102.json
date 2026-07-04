@@ -1,0 +1,23 @@
+{
+ "rig": "orchestrator/rigs/home.json",
+ "seed": 102,
+ "output_dir": "results-v2/block-home-102",
+ "tar": true,
+ "sweeps": [
+  {
+   "name": "sweep-wired",
+   "config": "orchestrator/examples/sweep-wired.json"
+  },
+  {
+   "name": "sweep-loss-worst",
+   "config": "orchestrator/examples/sweep-loss-worst.json"
+  }
+ ],
+ "boundaries": [
+  {
+   "name": "boundary-plane",
+   "config": "orchestrator/examples/boundary-plane.json",
+   "capacity_from": "sweep-wired"
+  }
+ ]
+}
