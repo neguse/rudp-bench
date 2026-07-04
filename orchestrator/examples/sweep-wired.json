@@ -107,7 +107,7 @@
     "--staleness-period-ns",
     "10000000"
    ],
-   "client_procs": 8
+   "client_procs": 4
   },
   "litenetlib": {
    "server_command": [
