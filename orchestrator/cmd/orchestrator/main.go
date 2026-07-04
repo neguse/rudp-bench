@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/neguse/rudp-bench/orchestrator/block"
 	"github.com/neguse/rudp-bench/orchestrator/boundary"
 	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/netops"
@@ -35,6 +36,21 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "boundary" {
 		boundaryMain(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "block" {
+		fs := flag.NewFlagSet("block", flag.ExitOnError)
+		configPath := fs.String("config", "", "block config JSON path")
+		exitOnErr(fs.Parse(os.Args[2:]))
+		if *configPath == "" {
+			fmt.Fprintln(os.Stderr, "block -config is required")
+			os.Exit(1)
+		}
+		cfg, err := block.LoadConfig(*configPath)
+		exitOnErr(err)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		exitOnErr(block.Run(ctx, cfg))
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "isolate" {
