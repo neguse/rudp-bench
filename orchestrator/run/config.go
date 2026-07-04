@@ -121,6 +121,9 @@ type RunConfig struct {
 	// OS 側 slice の退避は `orchestrator isolate setup` で行う
 	ServerCPUs string `json:"server_cpus,omitempty"`
 	ClientCPUs string `json:"client_cpus,omitempty"`
+	// TCP 系(blocking send)では client の送信スケジュール遅延は transport の
+	// HoL/backpressure そのもの(測定対象)であり、farm 帰属フィルタを適用しない
+	SchedIsMeasurand bool `json:"sched_is_measurand,omitempty"`
 	OutputDir          string        `json:"output_dir"`
 	AttemptedThreshold float64       `json:"attempted_threshold,omitempty"`
 	ControlTimeout     Duration      `json:"control_timeout,omitempty"`

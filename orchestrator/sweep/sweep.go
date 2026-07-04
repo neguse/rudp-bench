@@ -21,6 +21,8 @@ type TransportSpec struct {
 	ServerCommand run.CommandConfig `json:"server_command"`
 	ClientCommand run.CommandConfig `json:"client_command"`
 	ClientProcs   int               `json:"client_procs"`
+	// TCP 系(blocking send)は true: sched 遅延を farm でなく transport に帰属
+	SchedIsMeasurand bool `json:"sched_is_measurand,omitempty"`
 }
 
 type ConnsRange struct {
@@ -191,6 +193,7 @@ func (s *Sweep) runPoint(ctx context.Context, transport, workload string, conns 
 		NetemGateOff:      s.gateVerified,
 		ServerCPUs:        s.cfg.ServerCPUs,
 		ClientCPUs:        s.cfg.ClientCPUs,
+		SchedIsMeasurand:  spec.SchedIsMeasurand,
 		OutputDir:         runDir,
 	}
 	cfg, err := cfg.Prepare()

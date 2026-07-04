@@ -150,7 +150,8 @@
     "--staleness-period-ns",
     "10000000"
    ],
-   "client_procs": 4
+   "client_procs": 4,
+   "sched_is_measurand": true
   },
   "magiconion": {
    "server_command": [
@@ -175,7 +176,8 @@
     "--staleness-period-ns",
     "10000000"
    ],
-   "client_procs": 4
+   "client_procs": 4,
+   "sched_is_measurand": true
   }
  },
  "server_cpus": "7,15",

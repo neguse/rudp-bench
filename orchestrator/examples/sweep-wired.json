@@ -167,7 +167,8 @@
      "DOTNET_gcServer=1"
     ]
    },
-   "client_procs": 8
+   "client_procs": 8,
+   "sched_is_measurand": true
   },
   "magiconion": {
    "server_command": [
@@ -197,7 +198,8 @@
      "DOTNET_gcServer=1"
     ]
    },
-   "client_procs": 8
+   "client_procs": 8,
+   "sched_is_measurand": true
   }
  },
  "duration": "10s",

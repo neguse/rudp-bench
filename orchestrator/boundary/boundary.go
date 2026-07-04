@@ -244,6 +244,7 @@ func (b *Boundary) runPoint(ctx context.Context, c cell, loss, burst float64, lo
 		NetemGateOff:      b.gateDone[gateKey],
 		ServerCPUs:        b.cfg.ServerCPUs,
 		ClientCPUs:        b.cfg.ClientCPUs,
+		SchedIsMeasurand:  spec.SchedIsMeasurand,
 		OutputDir:         runDir,
 	}
 	cfg, err := cfg.Prepare()

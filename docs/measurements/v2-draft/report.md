@@ -35,16 +35,16 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 <!-- generated:capacity-wired -->
 | workload | enet | gns | litenetlib | msquic | websocket | magiconion |
 |---|---|---|---|---|---|---|
-| r10p128 | 112 (dl) | ≥64 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) |
-| r10p200 | 87 (dl) | ≥64 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) |
-| r10p1000 | 49 (dl) | ≥16 (farm) | ≥64 (farm) | ≥64 (farm) | ≥128 (farm) | ≥64 (farm) |
-| r20p128 ⚓br | 115 (dl) | ≥64 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) | ≥64 (farm) |
-| r20p200 | ≥128 (farm) | ≥32 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) | ≥64 (farm) |
-| r20p1000 ⚓video | 51 (dl) | ≥8 (farm) | ≥64 (farm) | ≥64 (farm) | 15 (dl) | ≥64 (farm) |
-| r60p128 | ≥64 (farm) | ≥32 (farm) | 7 (st) | ≥64 (farm) | ≥64 (farm) | ≥32 (farm) |
-| r60p200 ⚓vr | ≥64 (farm) | ≥16 (farm) | 8 (st) | ≥64 (farm) | ≥64 (farm) | ≥32 (farm) |
-| r60p1000 | ≥32 (farm) | ≥4 (farm) | 8 (st) | ≥16 (farm) | ≥32 (farm) | ≥32 (farm) |
-| echo (synthetic) | 703 (md) | 784 (dl) | 6 (st) | ≥512 (farm) | ≥128 (farm) | 249 (st) |
+| r10p128 | 112 (dl) | ≥64 (farm) | ≥128 (farm) | ≥128 (farm) | 128 (st) | 128 (st) |
+| r10p200 | 87 (dl) | ≥64 (farm) | ≥128 (farm) | ≥128 (farm) | 128 (st) | 128 (st) |
+| r10p1000 | 49 (dl) | ≥16 (farm) | ≥64 (farm) | ≥64 (farm) | 128 (st) | 64 (st) |
+| r20p128 ⚓br | 115 (dl) | ≥64 (farm) | ≥128 (farm) | ≥128 (farm) | 128 (st) | 64 (st) |
+| r20p200 | ≥128 (farm) | ≥32 (farm) | ≥128 (farm) | ≥128 (farm) | 128 (st) | 64 (st) |
+| r20p1000 ⚓video | 51 (dl) | ≥8 (farm) | ≥64 (farm) | ≥64 (farm) | 15 (dl) | 64 (st) |
+| r60p128 | ≥64 (farm) | ≥32 (farm) | 7 (st) | ≥64 (farm) | 64 (st) | 32 (st) |
+| r60p200 ⚓vr | ≥64 (farm) | ≥16 (farm) | 8 (st) | ≥64 (farm) | 64 (st) | 32 (st) |
+| r60p1000 | ≥32 (farm) | ≥4 (farm) | 8 (st) | ≥16 (farm) | 32 (st) | 32 (st) |
+| echo (synthetic) | 703 (md) | 683 (st) | 6 (st) | ≥512 (farm) | 128 (st) | 249 (st) |
 | reliable_echo (synthetic) | 765 (md) | ≥1024 | ≥1024 | ≥1024 | 335 (md) | 761 (md) |
 
 *凡例: `N (code)` = capacity N・break 原因(st=staleness / dl=delivery_lt / md=delivery_md / inv=validity)、`≥N` = 探索上限まで OK、`≥N (farm)` = farm 律速で打ち切り(server の break ではない)。詳細は sweep 出力の capacity.json / results.jsonl。*
@@ -56,7 +56,7 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 | anchor | transport | capacity 点の staleness p99 | 予算 | 判定 |
 |---|---|---|---|---|
 | r20p128 ⚓br | enet | 73ms | 100ms | ✓ |
-| r20p128 ⚓br | gns | 94ms | 100ms | ✓ |
+| r20p128 ⚓br | gns | 102ms | 100ms | ✗ 予算超過 |
 | r20p128 ⚓br | litenetlib | 106ms | 100ms | ✗ 予算超過 |
 | r20p128 ⚓br | msquic | 73ms | 100ms | ✓ |
 | r20p128 ⚓br | websocket | 69ms | 100ms | ✓ |
@@ -83,9 +83,9 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 <!-- generated:capacity-loss-worst -->
 | workload | enet | gns | litenetlib | msquic | websocket | magiconion |
 |---|---|---|---|---|---|---|
-| r20p128 ⚓br | 7 (st) | 84 (st) | 15 (st) | 143 (st) | 0 (st) | 0 (st) |
-| r20p1000 ⚓video | 63 (dl) | 0 (st) | ≥64 (farm) | 0 (st) | 0 (inv) | 0 (inv) |
-| r60p200 ⚓vr | 5 (st) | 21 (st) | 0 (st) | 0 (st) | 0 (inv) | 0 (st) |
+| r20p128 ⚓br | 0 (st) | ≥64 (farm) | 0 (st) | ≥128 (farm) | 0 (st) | 0 (st) |
+| r20p1000 ⚓video | 0 (st) | ≥8 (farm) | ≥64 (farm) | 0 (st) | 0 (inv) | 0 (st) |
+| r60p200 ⚓vr | 0 (st) | ≥16 (farm) | 0 (st) | ≥64 (farm) | 0 (st) | 0 (st) |
 
 *凡例: `N (code)` = capacity N・break 原因(st=staleness / dl=delivery_lt / md=delivery_md / inv=validity)、`≥N` = 探索上限まで OK、`≥N (farm)` = farm 律速で打ち切り(server の break ではない)。詳細は sweep 出力の capacity.json / results.jsonl。*
 <!-- /generated:capacity-loss-worst -->
@@ -93,14 +93,12 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 <!-- generated:anchors-loss-worst -->
 | anchor | transport | capacity 点の staleness p99 | 予算 | 判定 |
 |---|---|---|---|---|
-| r20p128 ⚓br | enet | 262ms | 100ms | infeasible(フロア 234ms > 予算) |
-| r20p128 ⚓br | gns | 163ms | 100ms | infeasible(フロア 119ms > 予算) |
-| r20p128 ⚓br | litenetlib | 163ms | 100ms | infeasible(フロア 164ms > 予算) |
+| r20p128 ⚓br | gns | 147ms | 100ms | infeasible(フロア 122ms > 予算) |
 | r20p128 ⚓br | msquic | 147ms | 100ms | infeasible(フロア 115ms > 予算) |
-| r20p1000 ⚓video | enet | 155ms | 150ms | ✗ 予算超過 |
-| r20p1000 ⚓video | litenetlib | 155ms | 150ms | ✗ 予算超過 |
-| r60p200 ⚓vr | enet | 147ms | 150ms | ✓ |
-| r60p200 ⚓vr | gns | 98ms | 150ms | ✓ |
+| r20p1000 ⚓video | gns | 212ms | 150ms | infeasible(フロア 217ms > 予算) |
+| r20p1000 ⚓video | litenetlib | 139ms | 150ms | ✓ |
+| r60p200 ⚓vr | gns | 90ms | 150ms | ✓ |
+| r60p200 ⚓vr | msquic | 81ms | 150ms | ✓ |
 
 *anchor 予算判定は探索済み capacity 点での近似(平面 gate で探索した点のみ使用)。*
 <!-- /generated:anchors-loss-worst -->

@@ -44,12 +44,19 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "rejudge" {
 		fs := flag.NewFlagSet("rejudge", flag.ExitOnError)
 		dir := fs.String("dir", "", "sweep output dir to re-judge from stored run results")
+		schedM := fs.String("sched-measurand", "", "comma-separated transports whose sched latency is the measurand (TCP family)")
 		exitOnErr(fs.Parse(os.Args[2:]))
 		if *dir == "" {
 			fmt.Fprintln(os.Stderr, "rejudge -dir is required")
 			os.Exit(1)
 		}
-		exitOnErr(sweep.Rejudge(*dir))
+		override := map[string]bool{}
+		for _, t := range strings.Split(*schedM, ",") {
+			if t != "" {
+				override[t] = true
+			}
+		}
+		exitOnErr(sweep.Rejudge(*dir, override))
 		return
 	}
 

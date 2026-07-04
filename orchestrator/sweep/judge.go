@@ -180,7 +180,7 @@ func Judge(result *run.Result, w run.Workload, totalConns int, netem *run.NetemR
 		// end-to-end が予算内なら client の sched 揺れは結果が吸収済み。
 		// gate が落ち、かつ client 自身の送信遅延が staleness 予算を超えている
 		// 場合のみ「劣化を server に帰属できない」→ censored。
-		if len(causes) > 0 && j.SchedP99 > budget {
+		if len(causes) > 0 && j.SchedP99 > budget && !result.Config.SchedIsMeasurand {
 			j.Censored = true
 			j.Cause = fmt.Sprintf("farm_limited: client sched p99=%dms exceeds staleness budget %dms (pacing stall); %s",
 				j.SchedP99/1_000_000, budget/1_000_000, strings.Join(causes, "; "))

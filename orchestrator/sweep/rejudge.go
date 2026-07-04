@@ -15,7 +15,7 @@ import (
 // 再計算する。再測定はしない — gate/floor の意味論を更新したときに、
 // 測定済みデータへ新しい判定を適用するために使う。
 // capacity.json は探索済みの点集合から再導出する(単調性を仮定)。
-func Rejudge(dir string) error {
+func Rejudge(dir string, schedMeasurand map[string]bool) error {
 	resultsPath := filepath.Join(dir, "results.jsonl")
 	f, err := os.Open(resultsPath)
 	if err != nil {
@@ -50,6 +50,10 @@ func Rejudge(dir string) error {
 		w, ok := run.LookupWorkload(res.Config.Workload)
 		if !ok {
 			return fmt.Errorf("%s: unknown workload %q", rec.RunDir, res.Config.Workload)
+		}
+		// 過去 run の result.json にはフラグが無いため、transport 単位で上書きする
+		if schedMeasurand[rec.Transport] {
+			res.Config.SchedIsMeasurand = true
 		}
 		old := rec.Judgment
 		rec.Judgment = Judge(&res, w, res.Config.TotalConns, res.Config.Netem, res.Config.StalenessPeriodNS)
