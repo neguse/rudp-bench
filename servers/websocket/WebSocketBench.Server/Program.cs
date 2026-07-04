@@ -102,7 +102,14 @@ if (control is not null)
     await control.DoneAsync(statsJson, CancellationToken.None).ConfigureAwait(false);
 }
 
-await app.StopAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+// 計測は done で報告済み。loss 下では hung socket の graceful shutdown が
+// orchestrator の ProcessExitTimeout(5s)を食い潰すため、停止は短く見切り、
+// それでも返らなければ即時終了する(ledger #10 の server 側)
+var stop = app.StopAsync(TimeSpan.FromSeconds(1));
+if (await Task.WhenAny(stop, Task.Delay(2000)).ConfigureAwait(false) != stop)
+{
+    Environment.Exit(0);
+}
 return 0;
 
 static async Task DelayUntilNsAsync(ulong targetNs, CancellationToken cancellationToken)
