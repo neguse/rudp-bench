@@ -35,17 +35,17 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 <!-- generated:capacity-wired -->
 | workload | enet | gns | litenetlib | msquic | websocket | magiconion |
 |---|---|---|---|---|---|---|
-| r10p128 | 108 (dl) | 112 (st) | ≥128 (farm) | ≥223 (farm) | ≥68 (farm) | ≥65 (farm) |
-| r10p200 | 95 (dl) | 111 (st) | ≥128 (farm) | ≥214 (farm) | ≥63 (farm) | ≥66 (farm) |
-| r10p1000 | 47 (dl) | ≥25 (farm) | ≥64 (farm) | ≥95 (farm) | ≥68 (farm) | 67 (dl) |
-| r20p128 ⚓br | 98 (st) | ≥81 (farm) | ≥128 (farm) | ≥164 (farm) | ≥68 (farm) | 67 (dl) |
-| r20p200 | 87 (st) | 60 (st) | ≥128 (farm) | ≥162 (farm) | ≥68 (farm) | 67 (dl) |
-| r20p1000 ⚓video | 49 (st) | ≥12 (farm) | ≥64 (farm) | ≥63 (farm) | ≥72 (farm) | 67 (dl) |
-| r60p128 | ≥98 (farm) | ≥32 (farm) | ≥1 | ≥96 (farm) | ≥65 (farm) | ≥65 (farm) |
-| r60p200 ⚓vr | 90 (st) | ≥20 (farm) | ≥1 | ≥96 (farm) | ≥64 (farm) | ≥64 (farm) |
-| r60p1000 | ≥42 (farm) | ≥4 (farm) | ≥1 | ≥33 (farm) | ≥60 (farm) | ≥64 (farm) |
-| echo (synthetic) | 801 (inv) | 836 (st) | ≥1 | 799 (st) | ≥60 (farm) | 60 (st) |
-| reliable_echo (synthetic) | ≥1024 | ≥1024 | ≥1024 | ≥1024 | 114 (md) | 336 (md) |
+| r10p128 | 112 (dl) | ≥64 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) |
+| r10p200 | 87 (dl) | ≥64 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) |
+| r10p1000 | 49 (dl) | ≥16 (farm) | ≥64 (farm) | ≥64 (farm) | ≥128 (farm) | ≥64 (farm) |
+| r20p128 ⚓br | 115 (dl) | ≥64 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) | ≥64 (farm) |
+| r20p200 | ≥128 (farm) | ≥32 (farm) | ≥128 (farm) | ≥128 (farm) | ≥128 (farm) | ≥64 (farm) |
+| r20p1000 ⚓video | 51 (dl) | ≥8 (farm) | ≥64 (farm) | ≥64 (farm) | 15 (dl) | ≥64 (farm) |
+| r60p128 | ≥64 (farm) | ≥32 (farm) | 7 (st) | ≥64 (farm) | ≥64 (farm) | ≥32 (farm) |
+| r60p200 ⚓vr | ≥64 (farm) | ≥16 (farm) | 8 (st) | ≥64 (farm) | ≥64 (farm) | ≥32 (farm) |
+| r60p1000 | ≥32 (farm) | ≥4 (farm) | 8 (st) | ≥16 (farm) | ≥32 (farm) | ≥32 (farm) |
+| echo (synthetic) | 703 (md) | 784 (dl) | 6 (st) | ≥512 (farm) | ≥128 (farm) | 249 (st) |
+| reliable_echo (synthetic) | 765 (md) | ≥1024 | ≥1024 | ≥1024 | 335 (md) | 761 (md) |
 
 *凡例: `N (code)` = capacity N・break 原因(st=staleness / dl=delivery_lt / md=delivery_md / inv=validity)、`≥N` = 探索上限まで OK、`≥N (farm)` = farm 律速で打ち切り(server の break ではない)。詳細は sweep 出力の capacity.json / results.jsonl。*
 <!-- /generated:capacity-wired -->
@@ -56,23 +56,23 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 | anchor | transport | capacity 点の staleness p99 | 予算 | 判定 |
 |---|---|---|---|---|
 | r20p128 ⚓br | enet | 73ms | 100ms | ✓ |
-| r20p128 ⚓br | gns | 122ms | 100ms | ✗ 予算超過 |
+| r20p128 ⚓br | gns | 94ms | 100ms | ✓ |
 | r20p128 ⚓br | litenetlib | 106ms | 100ms | ✗ 予算超過 |
-| r20p128 ⚓br | msquic | 81ms | 100ms | ✓ |
-| r20p128 ⚓br | websocket | 65ms | 100ms | ✓ |
-| r20p128 ⚓br | magiconion | 73ms | 100ms | ✓ |
-| r20p1000 ⚓video | enet | 90ms | 150ms | ✓ |
-| r20p1000 ⚓video | gns | 102ms | 150ms | ✓ |
-| r20p1000 ⚓video | litenetlib | 106ms | 150ms | ✓ |
-| r20p1000 ⚓video | msquic | 102ms | 150ms | ✓ |
-| r20p1000 ⚓video | websocket | 69ms | 150ms | ✓ |
-| r20p1000 ⚓video | magiconion | 73ms | 150ms | ✓ |
-| r60p200 ⚓vr | enet | 53ms | 150ms | ✓ |
-| r60p200 ⚓vr | gns | 47ms | 150ms | ✓ |
-| r60p200 ⚓vr | litenetlib | 63ms | 150ms | ✓ |
-| r60p200 ⚓vr | msquic | 51ms | 150ms | ✓ |
-| r60p200 ⚓vr | websocket | 32ms | 150ms | ✓ |
-| r60p200 ⚓vr | magiconion | 34ms | 150ms | ✓ |
+| r20p128 ⚓br | msquic | 73ms | 100ms | ✓ |
+| r20p128 ⚓br | websocket | 69ms | 100ms | ✓ |
+| r20p128 ⚓br | magiconion | 81ms | 100ms | ✓ |
+| r20p1000 ⚓video | enet | 81ms | 150ms | ✓ |
+| r20p1000 ⚓video | gns | 90ms | 150ms | ✓ |
+| r20p1000 ⚓video | litenetlib | 110ms | 150ms | ✓ |
+| r20p1000 ⚓video | msquic | 81ms | 150ms | ✓ |
+| r20p1000 ⚓video | websocket | 61ms | 150ms | ✓ |
+| r20p1000 ⚓video | magiconion | 114ms | 150ms | ✓ |
+| r60p200 ⚓vr | enet | 40ms | 150ms | ✓ |
+| r60p200 ⚓vr | gns | 40ms | 150ms | ✓ |
+| r60p200 ⚓vr | litenetlib | 65ms | 150ms | ✓ |
+| r60p200 ⚓vr | msquic | 34ms | 150ms | ✓ |
+| r60p200 ⚓vr | websocket | 40ms | 150ms | ✓ |
+| r60p200 ⚓vr | magiconion | 36ms | 150ms | ✓ |
 
 *anchor 予算判定は探索済み capacity 点での近似(平面 gate で探索した点のみ使用)。*
 <!-- /generated:anchors-wired -->
