@@ -84,7 +84,7 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 | workload | enet | gns | litenetlib | msquic | websocket | magiconion |
 |---|---|---|---|---|---|---|
 | r20p128 ⚓br | 0 (st) | ≥64 (farm) | 0 (st) | ≥128 (farm) | 0 (st) | 0 (st) |
-| r20p1000 ⚓video | 0 (st) | ≥8 (farm) | ≥64 (farm) | 0 (st) | 0 (inv) | 0 (st) |
+| r20p1000 ⚓video | 0 (st) | ≥8 (farm) | ≥64 (farm) | 0 (st) | 0 (st) | 0 (st) |
 | r60p200 ⚓vr | 0 (st) | ≥16 (farm) | 0 (st) | ≥64 (farm) | 0 (st) | 0 (st) |
 
 *凡例: `N (code)` = capacity N・break 原因(st=staleness / dl=delivery_lt / md=delivery_md / inv=validity)、`≥N` = 探索上限まで OK、`≥N (farm)` = farm 律速で打ち切り(server の break ではない)。詳細は sweep 出力の capacity.json / results.jsonl。*
