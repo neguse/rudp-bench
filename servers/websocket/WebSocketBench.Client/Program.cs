@@ -152,7 +152,21 @@ try
     {
         if (connection.SendPipe is not null)
         {
-            await connection.SendPipe.Completion.ConfigureAwait(false);
+            // loss 下では in-flight の SendAsync が HoL で無期限に塞がりうる。
+            // 計測窓は閉じているので一定時間で見切り、Abort で送信を解放する
+            // (in-flight slot は SendSlotAsync の例外経路で unsent として記録される)
+            var completed = await Task.WhenAny(connection.SendPipe.Completion, Task.Delay(2000)).ConfigureAwait(false);
+            if (completed != connection.SendPipe.Completion)
+            {
+                connection.Ws.Abort();
+                try
+                {
+                    await connection.SendPipe.Completion.ConfigureAwait(false);
+                }
+                catch
+                {
+                }
+            }
         }
     }
 
@@ -368,25 +382,32 @@ internal sealed class ClientConnection(uint originId, ClientWebSocket ws) : IAsy
         if (SendPipe is not null)
         {
             SendPipe.CompleteDroppingPending();
-            await SendPipe.Completion.ConfigureAwait(false);
+            var completed = await Task.WhenAny(SendPipe.Completion, Task.Delay(2000)).ConfigureAwait(false);
+            if (completed != SendPipe.Completion)
+            {
+                Ws.Abort();
+            }
         }
 
         try
         {
             if (Ws.State == WebSocketState.Open)
             {
-                await Ws.CloseAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None).ConfigureAwait(false);
+                // graceful close も loss 下では返らないことがある — 有界にする
+                using var closeCts = new CancellationTokenSource(1000);
+                await Ws.CloseAsync(WebSocketCloseStatus.NormalClosure, null, closeCts.Token).ConfigureAwait(false);
             }
         }
         catch
         {
+            Ws.Abort();
         }
 
         if (ReceiveTask is not null)
         {
             try
             {
-                await ReceiveTask.ConfigureAwait(false);
+                await Task.WhenAny(ReceiveTask, Task.Delay(1000)).ConfigureAwait(false);
             }
             catch
             {
