@@ -520,8 +520,8 @@ transport 選択の境界条件)。進捗 = 埋まったセル数。
 
 | epoch | 内容 | 完了条件 |
 |---|---|---|
-| E1 量産 | gns / litenetlib / websocket 移植(Codex 並列、テンプレプロンプト) | 6/6 が入場チェックリスト green |
-| E2 スクリーニング | 残り profile + capacity/boundary スライス(home rig, N=1) | レポート骨格の全セルに draft 値(unknown 許容) |
+| E1 量産 | gns / litenetlib / websocket 移植 | **完了(2026-07-03)** — 6/6 が build/smoke/orchestrated green(wired 実走は E2 で実施) |
+| E2 スクリーニング | 負荷平面 + capacity/boundary スライス(home rig, N=1) | **実質完了(2026-07-05)** — 全セルに draft 値 or 根拠ある farm 下限。副産物: CPU 隔離移植・farm 構成凍結(procs 8 + .NET gcServer/MinThreads、gns 4)・帰属3分類(recv drop / pacing stall / TCP HoL)・フロア burst 項 |
 | E3 確認実験 | AWS metal rig + ブロック 3-5 反復 + cross-rig 校正 | CI 付き曲線、unknown = 0 |
 | E4 publish | レポート確定、current.md 更新、v1 削除 | 収束条件3点成立 |
 
