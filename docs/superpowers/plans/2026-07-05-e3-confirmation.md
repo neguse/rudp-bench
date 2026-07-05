@@ -3,6 +3,18 @@
 - 状態: 計画(実行には AWS アカウント・予算の承認が必要 — 「要ユーザー判断」参照)
 - 前提: E2 完了(全セルに draft 値 or farm 下限、帰属3分類・隔離・farm 凍結済み)
 
+## 運用ティア(2026-07-06 追加)
+
+| tier | 用途 | 時間 | 実行 |
+|---|---|---|---|
+| sentinel | 日常の回帰検知(探索なし・番兵点プローブ・duration 30s 固定) | ~1h | `orchestrator sentinel -config orchestrator/examples/sentinel-home.json` |
+| block | 確定測定の replicate 単位 | ~8h | `orchestrator block -config ...` |
+| publish | N≥3 集約 + CI | block×3〜 | `orchestrator aggregate ...` |
+
+sentinel は基準ブロックの capacity から「c* で OK / c† で fail のまま」の2点
+プローブを生成し、PASS/DRIFT 表と exit code で返す(drift 検知であって統計では
+ない、と出力に明記)。基準は最新の確定 block を指す。
+
 ## 目的
 
 design spec の E3 完了条件「CI 付き曲線、unknown = 0」を満たす:

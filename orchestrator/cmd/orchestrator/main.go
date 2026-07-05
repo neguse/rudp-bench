@@ -18,6 +18,7 @@ import (
 	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/netops"
 	"github.com/neguse/rudp-bench/orchestrator/report"
+	"github.com/neguse/rudp-bench/orchestrator/sentinel"
 	orun "github.com/neguse/rudp-bench/orchestrator/run"
 	"github.com/neguse/rudp-bench/orchestrator/sweep"
 )
@@ -37,6 +38,26 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "boundary" {
 		boundaryMain(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "sentinel" {
+		fs := flag.NewFlagSet("sentinel", flag.ExitOnError)
+		configPath := fs.String("config", "", "sentinel config JSON path")
+		exitOnErr(fs.Parse(os.Args[2:]))
+		if *configPath == "" {
+			fmt.Fprintln(os.Stderr, "sentinel -config is required")
+			os.Exit(1)
+		}
+		cfg, err := sentinel.LoadConfig(*configPath)
+		exitOnErr(err)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		drift, err := sentinel.Run(ctx, cfg)
+		exitOnErr(err)
+		if drift > 0 {
+			fmt.Fprintf(os.Stderr, "sentinel: %d probe(s) drifted\n", drift)
+			os.Exit(3)
+		}
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "aggregate" {
