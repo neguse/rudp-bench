@@ -1,8 +1,11 @@
 # rudp-bench v2 レポート(draft)
 
 - benchspec version: 1(凍結済み)
-- 状態: **draft** — 空セル = 未測定(これがそのまま残作業)。draft 値は home rig・N=1
-- rig: home(Ryzen 7 PRO 5750GE、netns/veth、ARK/Minecraft 同居)
+- 状態: **draft(E3 home 分反映済み)** — 主張1/2 の確定値は「E3 確認実験」節の
+  N=3 集約(median [IQR])を正とし、単発表は探索の全景と break 原因ラベルの出典。
+  残: cross-rig(aws-metal)、farm 下限セルの解消、library-default 併記
+- rig: home(Ryzen 7 PRO 5750GE、netns/veth、CPU 役割隔離 + 凍結 farm 構成、
+  ARK/Minecraft 同居)
 
 **測定対象は1枚の応答曲面 R(transport, workload, conns, regime)** であり、
 以下の主張1・2はその直交する断面。workload は [`profiles.md`](../../profiles.md) の
@@ -239,29 +242,28 @@ floor 行のみに現れる)
 
 未測定: congested regime、等高線の局所細分。
 
-## 主張3: transport 選択の境界条件(暫定)
+## 主張3: transport 選択の境界条件(N=3 集約に基づく)
 
-境界条件は **(regime, 負荷) の2軸**で条件付ける。E2 draft(N=1・home rig)、
-vr(r60p200)/ video(r20p1000)anchor・片道 25ms の loss 平面から:
+境界条件は **(regime, 負荷) の2軸**で条件付ける。home rig・独立3ブロックから:
 
-- **loss ~0.1% では 6 transport の鮮度は同等**(フロア相対 +0〜20ms)。TCP 系も
-  成立し、選択は運用・インフラ等の別基準で決めてよい
-- **境界線は loss 1% 付近を走り、burst 長で急峻になる**: 無負荷極限の TCP 系
-  p99 は 1%×b1 で UDP 系の ~1.7倍(131ms vs 77ms)にとどまるが、1%×b16 で
-  3〜6倍(360-475ms)、3% では1〜2桁(0.5〜16.8s)悪化する。UDP 系
-  (enet/gns/litenetlib/msquic)は 3%×b16 でもフロア相対 ±30ms に張り付く
-  (バースト黒塗りは transport ではなく regime の性質としてフロア側に載る)
+- **クリーンな回線(loss ~0.1%)では TCP 系は成立し、capacity ではむしろ上位**
+  (wired anchor で websocket が br 148 / video 128 と最上位帯)。「リアルタイム
+  だから RUDP」は wired では根拠がない
+- **境界線は loss 1% 付近を走り、burst 長で急峻になる**: TCP 系の staleness p99 は
+  1%×b1 で UDP 系の ~1.7倍にとどまるが、1%×b16 で数百 ms〜秒、3% では
+  秒〜数十秒に崩壊する。UDP 系(enet/gns/litenetlib/msquic)は 3%×b16 でも
+  物理フロア(バースト黒塗り込み)±30ms に張り付く
 - **負荷が乗ると境界は低 loss 側へ動く**: capacity@wired の 75% 負荷では TCP 系は
-  loss 1% から秒級に崩壊(magiconion 1.4〜7.9s、websocket は停止不全で inv —
-  ledger #10)。UDP 系は同条件でもフロア相対を維持する。**「鮮度予算 150ms・
-  loss ≥1% が想定される経路では TCP 系 relay は成立しない」**が現時点の境界条件
-- 注意: enet は packet throttle の時定数が run duration 級のため、loss 下の値は
-  duration に依存する(ledger #12 — capacity スライスの崩壊値と boundary の
-  健全値は duration 差で両立している)。msquic の 75% 負荷には N=1 の不安定点
-  (秒級スパイク)があり反復が必要
+  loss 1% から秒級に崩壊する
+- **結論**: 鮮度予算 150ms・loss ≥1% がありうる経路では TCP 系 relay は不成立
+  (RUDP/QUIC 必須。頑健性は msquic > gns ≫ enet — enet は throttle 既定が
+  burst loss で unreliable を自主破棄する)。それ以外の経路では websocket 等の
+  TCP 系で足りる
+- 注意: enet は throttle の時定数により loss 下の値が duration 依存(ledger #12)、
+  wired でも capacity 際に cold-start 二峰性(ledger #14)。msquic の 75% 負荷には
+  N=1 スパイクがあり要反復
 
-*確定には: N≥3 ブロック反復、congested regime、msquic q75 の不安定点の反復、
-等高線(1% 近傍)の局所細分が必要。*
+*残: congested regime、cross-rig 一致、等高線(1% 近傍)の局所細分。*
 
 ## E3 確認実験(home rig・独立ブロック N=3)
 
