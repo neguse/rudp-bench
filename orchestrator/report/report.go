@@ -246,3 +246,22 @@ func UpdateDoc(docPath string, sweepDirs, boundaryDirs []string) error {
 	}
 	return os.WriteFile(docPath, []byte(md), 0o644)
 }
+
+// UpdateSections は任意の生成済み表群をマーカー区間へ書き込む
+// (aggregate 等、この package の外で生成された表の受け口)。
+func UpdateSections(docPath string, sections map[string]string) error {
+	raw, err := os.ReadFile(docPath)
+	if err != nil {
+		return err
+	}
+	md := string(raw)
+	for name, content := range sections {
+		updated, err := ReplaceSection(md, name, content)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[report] skip %s: %v\n", name, err)
+			continue
+		}
+		md = updated
+	}
+	return os.WriteFile(docPath, []byte(md), 0o644)
+}

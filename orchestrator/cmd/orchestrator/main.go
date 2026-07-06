@@ -66,24 +66,41 @@ func main() {
 		fs.Var(&sweeps, "sweep", "same-regime sweep dir from each block (repeatable)")
 		fs.Var(&boundaries, "boundary", "boundary dir from each block (repeatable)")
 		anchorsOnly := fs.Bool("anchors-only", false, "capacity table restricted to anchor cells")
+		fs.String("doc", "", "write tables into <!-- generated:… --> markers of this markdown instead of stdout")
 		exitOnErr(fs.Parse(os.Args[2:]))
 		if len(sweeps) == 0 && len(boundaries) == 0 {
 			fmt.Fprintln(os.Stderr, "aggregate needs -sweep and/or -boundary (one per block)")
 			os.Exit(1)
 		}
+		doc := fs.Lookup("doc").Value.String()
+		sections := map[string]string{}
 		if len(sweeps) > 0 {
 			aggs, regime, err := aggregate.AggregateCapacityWithRegime(sweeps)
 			exitOnErr(err)
-			fmt.Println(aggregate.CapacityCITable(aggs, regime, *anchorsOnly))
+			table := aggregate.CapacityCITable(aggs, regime, *anchorsOnly)
+			if doc == "" {
+				fmt.Println(table)
+			} else {
+				sections["capacity-ci-"+regime] = table
+			}
 		}
 		if len(boundaries) > 0 {
 			aggs, err := aggregate.AggregateBoundary(boundaries)
 			exitOnErr(err)
 			for _, anchor := range aggregate.BoundaryAnchors(aggs) {
 				for _, label := range aggregate.BoundaryLoadLabels(aggs, anchor) {
-					fmt.Printf("### %s / %s\n\n%s\n", anchor, label, aggregate.BoundaryCITable(aggs, anchor, label))
+					table := aggregate.BoundaryCITable(aggs, anchor, label)
+					if doc == "" {
+						fmt.Printf("### %s / %s\n\n%s\n", anchor, label, table)
+					} else {
+						sections["boundary-ci-"+anchor+"-"+label] = table
+					}
 				}
 			}
+		}
+		if doc != "" {
+			exitOnErr(report.UpdateSections(doc, sections))
+			fmt.Fprintf(os.Stderr, "updated: %s\n", doc)
 		}
 		return
 	}
