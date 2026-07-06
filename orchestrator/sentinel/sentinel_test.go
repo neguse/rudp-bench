@@ -50,10 +50,10 @@ func TestPlanProbes(t *testing.T) {
 	if len(probes) != 4 {
 		t.Fatalf("want 4 probes, got %d: %+v", len(probes), probes)
 	}
-	if p := got["enetok"]; p.Conns != 115 {
+	if p := got["enetok"]; p.Conns != 104 { // 0.9×115
 		t.Fatalf("enet ok probe: %+v", p)
 	}
-	if p := got["enetfail"]; p.Conns != 116 {
+	if p := got["enetfail"]; p.Conns != 133 { // 1.15×116
 		t.Fatalf("enet fail probe: %+v", p)
 	}
 	if p := got["gnsbound"]; p.Conns != 64 {

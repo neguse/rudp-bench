@@ -76,7 +76,10 @@ type Probe struct {
 }
 
 // PlanProbes は基準 capacity.json から番兵点を導く:
-// - 正直な break セル → capacity 点(expect ok)と break 点(expect fail)の2点
+// - 正直な break セル → capacity の 0.9 倍(expect ok)と break の 1.15 倍
+//   (expect fail)の2点。**際そのものは突かない** — 境界上の点は run 間の
+//   自然なゆらぎ(IQR)で毎回パタつくため、日常スモークの感度は
+//   「±10-15% を超える漂移の検知」に置く
 // - censored / range-limited セル → 下限点1点(expect bound)
 // - capacity 0 のセル → break 点(= min probe)1点(expect fail)
 func PlanProbes(cfg Config) ([]Probe, error) {
@@ -106,11 +109,19 @@ func PlanProbes(cfg Config) ([]Probe, error) {
 					probes = append(probes, Probe{Transport: transport, Workload: w,
 						Regime: reg.Name, Conns: conns, Expect: "fail"})
 				default:
+					okConns := int(float64(cell.Capacity)*0.9 + 0.5)
+					if okConns < 1 {
+						okConns = 1
+					}
 					probes = append(probes, Probe{Transport: transport, Workload: w,
-						Regime: reg.Name, Conns: cell.Capacity, Expect: "ok"})
+						Regime: reg.Name, Conns: okConns, Expect: "ok"})
 					if cell.BreakConns > 0 {
+						failConns := int(float64(cell.BreakConns)*1.15 + 0.5)
+						if failConns <= okConns {
+							failConns = okConns + 1
+						}
 						probes = append(probes, Probe{Transport: transport, Workload: w,
-							Regime: reg.Name, Conns: cell.BreakConns, Expect: "fail"})
+							Regime: reg.Name, Conns: failConns, Expect: "fail"})
 					}
 				}
 			}

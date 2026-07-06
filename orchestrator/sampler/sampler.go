@@ -3,11 +3,13 @@ package sampler
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/neguse/rudp-bench/orchestrator/monotonic"
@@ -177,6 +179,11 @@ func sampleAll(series map[int]Series, pids []int, ticksPerSecond int64) error {
 	for _, pid := range pids {
 		sample, err := ReadWithClockTicks(pid, ticksPerSecond)
 		if err != nil {
+			// プロセスは drain 後に自発 exit する — サンプリング周期との競合で
+			// /proc が消えるのは正常系。落ちた pid はスキップし、run を汚さない
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+				continue
+			}
 			return err
 		}
 		current := series[pid]
