@@ -23,6 +23,16 @@ type RegimeSpec struct {
 	Netem *run.NetemRegime `json:"netem,omitempty"`
 	// ReferenceDir: 基準ブロック内の該当 sweep ディレクトリ
 	ReferenceDir string `json:"reference_dir"`
+	// Duration: この regime のプローブ計測時間。基準ブロックと同じ値に
+	// しないと duration 感受性のある transport(enet throttle 等)で
+	// 偽 drift が出る。未指定は Config.Duration
+	Duration run.Duration `json:"duration,omitempty"`
+}
+
+// lossy は loss が設定された regime か(fail プローブの成立性判定に使う)。
+func (r RegimeSpec) lossy() bool {
+	return r.Netem != nil &&
+		(r.Netem.ClientEgress.LossPercent > 0 || r.Netem.ServerEgress.LossPercent > 0)
 }
 
 type Config struct {
@@ -89,6 +99,10 @@ func PlanProbes(cfg Config) ([]Probe, error) {
 		if err != nil {
 			return nil, fmt.Errorf("regime %s: %w", reg.Name, err)
 		}
+		// lossy regime の fail プローブは張らない: 短時間プローブでは loss
+		// イベント数が足りず p99 が不安定で、「break したまま」の確認が
+		// 統計的に成立しない(悪化検知 = ok/bound プローブのみ担う)
+		skipFail := reg.lossy()
 		for _, w := range cfg.Workloads {
 			for transport := range cfg.Transports {
 				cell, ok := cells[transport+"|"+w]
@@ -102,6 +116,9 @@ func PlanProbes(cfg Config) ([]Probe, error) {
 							Regime: reg.Name, Conns: cell.Capacity, Expect: "bound"})
 					}
 				case cell.Capacity == 0:
+					if skipFail {
+						continue
+					}
 					conns := cell.BreakConns
 					if conns == 0 {
 						conns = 1
@@ -115,7 +132,7 @@ func PlanProbes(cfg Config) ([]Probe, error) {
 					}
 					probes = append(probes, Probe{Transport: transport, Workload: w,
 						Regime: reg.Name, Conns: okConns, Expect: "ok"})
-					if cell.BreakConns > 0 {
+					if cell.BreakConns > 0 && !skipFail {
 						failConns := int(float64(cell.BreakConns)*1.15 + 0.5)
 						if failConns <= okConns {
 							failConns = okConns + 1
@@ -225,7 +242,7 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 			SchedIsMeasurand:  spec.SchedIsMeasurand,
 			TotalConns:        p.Conns,
 			Warmup:            cfg.Warmup,
-			Duration:          cfg.Duration,
+			Duration:          probeDuration(cfg, reg),
 			Drain:             cfg.Drain,
 			DeadlineNS:        cfg.DeadlineNS,
 			StalenessPeriodNS: cfg.StalenessPeriodNS,
@@ -285,4 +302,11 @@ func RenderTable(probes []Probe) string {
 			p.Regime, p.Transport, p.Workload, p.Conns, p.Expect, p.Outcome, p.Note)
 	}
 	return out
+}
+
+func probeDuration(cfg Config, reg RegimeSpec) run.Duration {
+	if reg.Duration.Duration > 0 {
+		return reg.Duration
+	}
+	return cfg.Duration
 }

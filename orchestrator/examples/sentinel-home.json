@@ -187,7 +187,8 @@
      "loss_pct": 0.1
     }
    },
-   "reference_dir": "results-v2/block-home-101/sweep-wired"
+   "reference_dir": "results-v2/block-home-101/sweep-wired",
+   "duration": "10s"
   },
   {
    "name": "loss-worst",
@@ -203,7 +204,8 @@
      "loss_burst_len": 16
     }
    },
-   "reference_dir": "results-v2/block-home-101/sweep-loss-worst"
+   "reference_dir": "results-v2/block-home-101/sweep-loss-worst",
+   "duration": "60s"
   }
  ],
  "duration": "30s",
