@@ -124,6 +124,25 @@ sentinel(定点再測チェック、26 条件、1 回 13 分)を同一環境で 
 - **完了条件**: 必要反復数の表が本ドキュメントに追記され、sentinel が新基準で
   連続 5 回、偽報知ゼロで通ること
 
+**Phase 2 の実測結果(2026-07-07、修正後の測定器で 2 regime × 3 transport ×
+3 anchor × 10 反復 = 180 run)**:
+
+18 セル中 16 セルで staleness p99 の CoV ≤ 6.7%(大半 ≤4% = ヒストグラム
+bin 量子化幅)。delivery の CoV は全セル ≤3%(外れセル除く)。
+
+| セル型 | run 間ばらつき | 必要反復数 |
+|---|---|---|
+| 容量点から離れた点(wired / loss とも、UDP 系・TCP 系とも) | CoV ≤ ~5%(bin 量子化水準) | **N=1** |
+| gate 際(容量の ~0.9 倍より上) | 通常は緊密だが、稀な崩壊モードが乗る(msquic wired br c128: 9/10 が 74–82ms、1/10 が 4.7s/delivery 0.53) | **N=3 の median**(capacity 確定・sentinel 基準はここに該当) |
+| TCP 系 × loss | drop 位置を固定しても回復動態自体が確率的(websocket vr 1%: 344ms–5.2s)— 測定器でなく transport 固有の分散 | **N≥3 で median [IQR] 表記**。事象アライン指標(update_gap)の併記を検討 |
+| enet(最小 warmup 15s 宣言下) | 全セル CoV ≤6.7% — 二峰性は解消済み | N=1(gate 際は上記どおり) |
+
+補足: TCP 系 × loss で定常未達(cap fallback)になるのは「nominal rate に
+届かない」という開示であり正しい挙動(websocket video 1% で 0/10 が steady)。
+update_gap は当初 class 混合で実装され must-deliver の送信間隔(1Hz=1s)が
+p99 を支配していた(全セルで p99≈1016ms に張り付く)ため class 別に分離した。
+分離後の loss_tolerant gap のばらつきは Phase 3 のデータで確立する。
+
 ### Phase 3: 主張の再測(マシン時間 ~1–2 日)
 
 - capacity @ wired(anchor 3 セル)— 再測、探索は旧 break 点からの warm-start

@@ -49,6 +49,9 @@ type Histogram struct {
 }
 
 type ClassAggregate struct {
+	// update gap: latest-value が前進した受信同士の間隔(事象アライン指標、class 別)
+	UpdateGapNS Histogram `json:"update_gap_ns"`
+
 	ClassCounts
 	ExpectedReceives uint64    `json:"expected_receives"`
 	DeliveryRatio    float64   `json:"delivery_ratio"`
@@ -82,6 +85,7 @@ type classMetric struct {
 	ClassCounts
 	LatencySchedNS Histogram `json:"latency_sched_ns"`
 	LatencySendNS  Histogram `json:"latency_send_ns"`
+	UpdateGapNS    Histogram `json:"update_gap_ns"`
 }
 
 func MergeMetricsFiles(paths []string, totalConns int) (*MergedMetrics, error) {
@@ -158,6 +162,12 @@ func (m *MergedMetrics) add(file metricsFile) error {
 		if err := addHistogram(&dst.LatencySendNS, src.LatencySendNS, m.Histogram); err != nil {
 			return fmt.Errorf("%s latency_send_ns: %w", name, err)
 		}
+		// update_gap_ns を出さない実装(移行中の client)は欠落を許容する
+		if len(src.UpdateGapNS.Bins) > 0 {
+			if err := addHistogram(&dst.UpdateGapNS, src.UpdateGapNS, m.Histogram); err != nil {
+				return fmt.Errorf("%s update_gap_ns: %w", name, err)
+			}
+		}
 		m.Classes[name] = dst
 	}
 	if err := addHistogram(&m.StalenessNS, file.StalenessNS, m.Histogram); err != nil {
@@ -188,6 +198,7 @@ func (m *MergedMetrics) finalize() error {
 		c.DeadlineHitRatio = ratioOrOne(c.DeadlineHit, c.ExpectedReceives)
 		finalizeHistogram(&c.LatencySchedNS, m.Histogram)
 		finalizeHistogram(&c.LatencySendNS, m.Histogram)
+		finalizeHistogram(&c.UpdateGapNS, m.Histogram)
 		m.Classes[name] = c
 	}
 	finalizeHistogram(&m.StalenessNS, m.Histogram)

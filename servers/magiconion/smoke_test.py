@@ -37,16 +37,18 @@ def assert_class_shape(metrics, name):
         "deadline_hit",
         "latency_sched_ns",
         "latency_send_ns",
+        "update_gap_ns",
     }
     if set(cls.keys()) != expected:
         raise AssertionError(f"{name}: keys {sorted(cls.keys())}, want {sorted(expected)}")
     assert_hist_shape(cls["latency_sched_ns"], f"{name}.latency_sched_ns")
     assert_hist_shape(cls["latency_send_ns"], f"{name}.latency_send_ns")
+    assert_hist_shape(cls["update_gap_ns"], f"{name}.update_gap_ns")
     return cls
 
 
 def assert_metrics_shape(metrics):
-    expected_top = {"version", "histogram", "classes", "staleness_ns", "update_gap_ns", "raw"}
+    expected_top = {"version", "histogram", "classes", "staleness_ns", "raw"}
     if set(metrics.keys()) != expected_top:
         raise AssertionError(f"top-level keys {sorted(metrics.keys())}, want {sorted(expected_top)}")
     if int(metrics["version"]) != 1:
@@ -59,7 +61,6 @@ def assert_metrics_shape(metrics):
     assert_class_shape(metrics, "loss_tolerant")
     assert_class_shape(metrics, "must_deliver")
     assert_hist_shape(metrics["staleness_ns"], "staleness_ns")
-    assert_hist_shape(metrics["update_gap_ns"], "update_gap_ns")
     if set(metrics["raw"].keys()) != {"slots", "submitted", "recv_measured", "recv_unmeasured"}:
         raise AssertionError(f"raw keys mismatch: {metrics['raw'].keys()}")
 

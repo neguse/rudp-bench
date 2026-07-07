@@ -187,8 +187,10 @@ void bk_metrics_counts(const bk_metrics *m, bool must_deliver,
 uint64_t bk_metrics_staleness_pctl(const bk_metrics *m, double p);
 // update gap((origin, class) の latest-value が前進した受信同士の間隔)の
 // percentile(ns)。「ロス/HoL 事象1回あたりの空白時間」に対応する
-// 事象アライン指標。窓全体の staleness p99 より事象数に対して安定
-uint64_t bk_metrics_update_gap_pctl(const bk_metrics *m, double p);
+// 事象アライン指標。窓全体の staleness p99 より事象数に対して安定。
+// class 別(混合にすると must-deliver の送信間隔が p99 を支配する)
+uint64_t bk_metrics_update_gap_pctl(const bk_metrics *m, bool must_deliver,
+                                    double p);
 // sched 起点 latency percentile(ns)。class 別。
 uint64_t bk_metrics_latency_pctl(const bk_metrics *m, bool must_deliver,
                                  double p);

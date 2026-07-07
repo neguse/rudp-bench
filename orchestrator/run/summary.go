@@ -65,12 +65,12 @@ func writeSummary(path string, result *Result) error {
 			result.Metrics.StalenessNS.P50NS,
 			result.Metrics.StalenessNS.P90NS,
 			result.Metrics.StalenessNS.P99NS)
-		if result.Metrics.UpdateGapNS.Count > 0 {
-			fmt.Fprintf(f, "update_gap_ns: count=%d p50=%d p90=%d p99=%d\n",
-				result.Metrics.UpdateGapNS.Count,
-				result.Metrics.UpdateGapNS.P50NS,
-				result.Metrics.UpdateGapNS.P90NS,
-				result.Metrics.UpdateGapNS.P99NS)
+		for _, name := range metricClassNames {
+			g := result.Metrics.Classes[name].UpdateGapNS
+			if g.Count > 0 {
+				fmt.Fprintf(f, "update_gap_ns[%s]: count=%d p50=%d p90=%d p99=%d\n",
+					name, g.Count, g.P50NS, g.P90NS, g.P99NS)
+			}
 		}
 	}
 	if result.Netem != nil && result.Netem.Enabled {

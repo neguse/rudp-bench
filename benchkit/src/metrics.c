@@ -38,16 +38,16 @@ typedef struct {
   bk_class_counts counts;
   bk_hist latency_sched;
   bk_hist latency_send;
+  // update gap: latest-value が前進した受信同士の間隔(事象アライン指標)。
+  // class 混合にすると must-deliver の送信間隔(1Hz なら 1s)が p99 を
+  // 支配して loss 回復の信号が消えるため、class 別に持つ
+  bk_hist update_gap;
 } bk_class_metrics;
 
 struct bk_metrics {
   bk_metrics_config cfg;
   bk_class_metrics classes[BK_N_CLASSES];
   bk_hist staleness;
-  // update gap: (origin, class) の latest-value が前進した受信の間隔。
-  // p99 が「ロス/HoL 事象1回あたりの空白時間」に対応する事象アライン指標
-  // (窓全体の staleness p99 より事象数に対して安定 — 再生計画 Phase 1-3)
-  bk_hist update_gap;
   bk_latest *latest;
   uint64_t next_staleness_sample_ns;
   bk_seen_key *seen;
@@ -325,7 +325,7 @@ void bk_metrics_on_recv(bk_metrics *m, uint32_t local_index,
       // update gap: latest-value を前進させた受信同士の間隔(事象アライン)。
       // 古い並べ替え到着は latest を進めないので gap にも数えない
       if (latest->has) {
-        hist_add(&m->update_gap,
+        hist_add(&m->classes[class_index].update_gap,
                  bk_saturating_sub_u64(recv_ts_ns, latest->recv_ts_ns));
       }
       latest->has = true;
@@ -384,11 +384,14 @@ uint64_t bk_metrics_staleness_pctl(const bk_metrics *m, double p) {
   return hist_percentile(&m->staleness, p);
 }
 
-uint64_t bk_metrics_update_gap_pctl(const bk_metrics *m, double p) {
+uint64_t bk_metrics_update_gap_pctl(const bk_metrics *m, bool must_deliver,
+                                    double p) {
   if (m == NULL) {
     return 0;
   }
-  return hist_percentile(&m->update_gap, p);
+  const int class_index = must_deliver ? BK_CLASS_MUST_DELIVER
+                                       : BK_CLASS_LOSS_TOLERANT;
+  return hist_percentile(&m->classes[class_index].update_gap, p);
 }
 
 void bk_metrics_raw_counts(const bk_metrics *m, uint64_t *slots,
@@ -463,6 +466,12 @@ static int json_class(FILE *f, const bk_class_metrics *cm) {
   if (json_hist(f, &cm->latency_send) != 0) {
     return -1;
   }
+  if (fputs(",\"update_gap_ns\":", f) == EOF) {
+    return -1;
+  }
+  if (json_hist(f, &cm->update_gap) != 0) {
+    return -1;
+  }
   if (fputc('}', f) == EOF) {
     return -1;
   }
@@ -500,12 +509,6 @@ int bk_metrics_dump_json(const bk_metrics *m, const char *path) {
     rc = -1;
   }
   if (rc == 0 && json_hist(f, &m->staleness) != 0) {
-    rc = -1;
-  }
-  if (rc == 0 && fputs(",\"update_gap_ns\":", f) == EOF) {
-    rc = -1;
-  }
-  if (rc == 0 && json_hist(f, &m->update_gap) != 0) {
     rc = -1;
   }
   if (rc == 0 &&

@@ -82,15 +82,15 @@ public sealed class BenchMetrics
         public BenchClassCounts Counts;
         public readonly Hist LatencySched = new();
         public readonly Hist LatencySend = new();
+        // update gap: latest-value が前進した受信同士の間隔(事象アライン指標)。
+        // class 混合にすると must-deliver の送信間隔(1Hz なら 1s)が p99 を
+        // 支配して loss 回復の信号が消えるため、class 別に持つ
+        public readonly Hist UpdateGap = new();
     }
 
     private readonly BenchMetricsConfig config;
     private readonly ClassMetrics[] classes = [new ClassMetrics(), new ClassMetrics()];
     private readonly Hist staleness = new();
-    // update gap: (origin, class) の latest-value が前進した受信の間隔。
-    // p99 が「ロス/HoL 事象1回あたりの空白時間」に対応する事象アライン指標
-    //(窓全体の staleness p99 より事象数に対して安定)
-    private readonly Hist updateGap = new();
     private readonly Latest[] latest;
     private readonly HashSet<SeenKey> seen = [];
     private ulong nextStalenessSampleNs;
@@ -178,7 +178,7 @@ public sealed class BenchMetrics
                 // 古い並べ替え到着は latest を進めないので gap にも数えない
                 if (latest[index].Has)
                 {
-                    updateGap.Add(BenchClock.SaturatingSub(recvTsNs, latest[index].RecvTsNs));
+                    cm.UpdateGap.Add(BenchClock.SaturatingSub(recvTsNs, latest[index].RecvTsNs));
                 }
                 latest[index].Has = true;
                 latest[index].SchedTsNs = header.SchedTsNs;
@@ -237,8 +237,6 @@ public sealed class BenchMetrics
         AppendClassJson(sb, classes[BenchConstants.ClassMustDeliver]);
         sb.Append("},\"staleness_ns\":");
         AppendHistJson(sb, staleness);
-        sb.Append(",\"update_gap_ns\":");
-        AppendHistJson(sb, updateGap);
         sb.Append(",\"raw\":{\"slots\":").Append(rawSlots.ToString(CultureInfo.InvariantCulture))
             .Append(",\"submitted\":").Append(rawSubmitted.ToString(CultureInfo.InvariantCulture))
             .Append(",\"recv_measured\":").Append(rawRecvMeasured.ToString(CultureInfo.InvariantCulture))
@@ -262,6 +260,8 @@ public sealed class BenchMetrics
         AppendHistJson(sb, cm.LatencySched);
         sb.Append(",\"latency_send_ns\":");
         AppendHistJson(sb, cm.LatencySend);
+        sb.Append(",\"update_gap_ns\":");
+        AppendHistJson(sb, cm.UpdateGap);
         sb.Append('}');
     }
 
