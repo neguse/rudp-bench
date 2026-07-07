@@ -112,7 +112,14 @@ func formatCell(c sweep.CellRecord, found bool) string {
 	}
 	switch {
 	case c.Censored:
-		return fmt.Sprintf("≥%d (farm)", c.Capacity)
+		// censored の内訳を区別する: farm(計測器の限界)と
+		// crash(その conns で transport の client 接続が死ぬ — server の
+		// quality break とは別種の transport 限界)は意味が違う
+		label := "farm"
+		if strings.Contains(c.BreakCause, "measurement_invalid") {
+			label = "crash"
+		}
+		return fmt.Sprintf("≥%d (%s)", c.Capacity, label)
 	case c.RangeLimited:
 		return fmt.Sprintf("≥%d", c.Capacity)
 	case c.Capacity == 0:
@@ -152,7 +159,7 @@ func (sd *SweepData) CapacityTable(onlyAnchors bool) string {
 		}
 		b.WriteString("\n")
 	}
-	b.WriteString("\n*凡例: `N (code)` = capacity N・break 原因(st=staleness / dl=delivery_lt / md=delivery_md / inv=validity)、`≥N` = 探索上限まで OK、`≥N (farm)` = farm 律速で打ち切り(server の break ではない)。詳細は sweep 出力の capacity.json / results.jsonl。*\n")
+	b.WriteString("\n*凡例: `N (code)` = capacity N・break 原因(st=staleness / dl=delivery_lt / md=delivery_md / inv=validity)、`≥N` = 探索上限まで OK、`≥N (farm)` = farm 律速で打ち切り(server の break ではない)、`≥N (crash)` = それより上の conns で transport の client 接続が死んで測定不成立(再測でも再発 — server の quality break とは別種の transport 限界)。詳細は sweep 出力の capacity.json / results.jsonl。*\n")
 	return b.String()
 }
 

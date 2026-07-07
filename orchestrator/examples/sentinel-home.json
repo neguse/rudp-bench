@@ -24,7 +24,8 @@
     "--staleness-period-ns",
     "10000000"
    ],
-   "client_procs": 8
+   "client_procs": 8,
+   "steady_min_warmup": "15s"
   },
   "msquic": {
    "server_command": [
@@ -176,7 +177,7 @@
  ],
  "regimes": [
   {
-   "name": "wired",
+   "name": "wired-v3",
    "netem": {
     "server_egress": {
      "delay_ms": 10,
@@ -187,29 +188,31 @@
      "loss_pct": 0.1
     }
    },
-   "reference_dir": "results-v2/block-home-101/sweep-wired",
+   "reference_dir": "results-v2/sweep-wired-v3",
    "duration": "10s"
   },
   {
-   "name": "loss-worst",
+   "name": "loss1-b4",
    "netem": {
     "server_egress": {
      "delay_ms": 25,
-     "loss_pct": 3,
-     "loss_burst_len": 16
+     "loss_pct": 1,
+     "loss_burst_len": 4,
+     "loss_seed": 4242
     },
     "client_egress": {
      "delay_ms": 25,
-     "loss_pct": 3,
-     "loss_burst_len": 16
+     "loss_pct": 1,
+     "loss_burst_len": 4,
+     "loss_seed": 4243
     }
    },
-   "reference_dir": "results-v2/block-home-101/sweep-loss-worst",
-   "duration": "60s"
+   "reference_dir": "results-v2/sweep-loss1-v3",
+   "duration": "30s"
   }
  ],
- "duration": "30s",
- "warmup": "1s",
+ "steady_warmup": true,
+ "warmup": "25s",
  "drain": "1s",
  "deadline_ns": 150000000,
  "staleness_period_ns": 10000000,

@@ -1,14 +1,19 @@
 # rudp-bench v2 レポート(draft)
 
-- benchspec version: 1(凍結済み)
-- 状態: **draft(E3 home 分反映済み)** — 主張1/2 の確定値は「E3 確認実験」節の
-  N=3 集約(median [IQR])を正とし、単発表は探索の全景と break 原因ラベルの出典。
-  残: cross-rig(aws-metal)、farm 下限セルの解消、library-default 併記
+- benchspec version: **2**(2026-07-07 — 定常判定つき warmup。v3 と付く表は
+  version 2 測定器 + 決定的 loss 注入で測定。version 1 時代の表は履歴として残置)
+- 状態: **draft(測定系再生後の再基準化済み)** — anchor の確定値は
+  **capacity-wired-v3 / capacity-loss1-b4** の表を正とする(非崖セルは N=1 で
+  bin 量子化幅の再現性 — [再生計画](../../superpowers/specs/2026-07-07-v2-measurement-recovery.md)
+  Phase 2 の測定系分析参照)。旧 N=3 集約(E3 確認実験の節)と旧単発表は
+  version 1 測定器の履歴。残: cross-rig(aws-metal)、farm 下限セル(litenetlib
+  受信 drop)、crash 上限セル(enet/msquic の client 接続死、ledger #8/#17)、
+  library-default 併記
 - **2026-07-07: 測定系の欠陥(warmup 固定・ロス乱数注入・故障混入)が確認され、
-  loss-worst capacity は無効化。是正は
+  loss-worst capacity は無効化(1%×b4 の決定的 trace に置換)。是正は
   [再生計画](../../superpowers/specs/2026-07-07-v2-measurement-recovery.md)に従う**
 - rig: home(Ryzen 7 PRO 5750GE、netns/veth、CPU 役割隔離 + 凍結 farm 構成、
-  ARK/Minecraft 同居)
+  ARK/Minecraft/Palworld 同居)
 
 **測定対象は1枚の応答曲面 R(transport, workload, conns, regime)** であり、
 以下の主張1・2はその直交する断面。workload は [`profiles.md`](../../profiles.md) の
@@ -45,11 +50,37 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 > [再生計画](../../superpowers/specs/2026-07-07-v2-measurement-recovery.md)。
 
 <!-- generated:capacity-wired-v3 -->
-(Phase 3 の再測で生成 — benchspec v2 測定器・anchor 3 セル)
+| workload | enet | gns | litenetlib | msquic | websocket | magiconion |
+|---|---|---|---|---|---|---|
+| r20p128 ⚓br | ≥128 (crash) | 81 (st) | ≥128 (farm) | ≥128 (crash) | 256 (st) | ≥128 (crash) |
+| r20p1000 ⚓video | ≥64 (crash) | 12 (st) | ≥64 (farm) | ≥64 (crash) | 160 (st) | 79 (st) |
+| r60p200 ⚓vr | ≥64 (crash) | 20 (st) | 0 (st) | ≥64 (crash) | 134 (st) | 74 (st) |
+
+*凡例: `N (code)` = capacity N・break 原因(st=staleness / dl=delivery_lt / md=delivery_md / inv=validity)、`≥N` = 探索上限まで OK、`≥N (farm)` = farm 律速で打ち切り(server の break ではない)、`≥N (crash)` = それより上の conns で transport の client 接続が死んで測定不成立(再測でも再発 — server の quality break とは別種の transport 限界)。詳細は sweep 出力の capacity.json / results.jsonl。*
 <!-- /generated:capacity-wired-v3 -->
 
 <!-- generated:anchors-wired-v3 -->
-(Phase 3 の再測で生成)
+| anchor | transport | capacity 点の staleness p99 | 予算 | 判定 |
+|---|---|---|---|---|
+| r20p128 ⚓br | enet | 81ms | 100ms | ✓ |
+| r20p128 ⚓br | gns | 122ms | 100ms | ✗ 予算超過 |
+| r20p128 ⚓br | litenetlib | 106ms | 100ms | ✗ 予算超過 |
+| r20p128 ⚓br | msquic | 73ms | 100ms | ✓ |
+| r20p128 ⚓br | websocket | 122ms | 100ms | ✗ 予算超過 |
+| r20p128 ⚓br | magiconion | 81ms | 100ms | ✓ |
+| r20p1000 ⚓video | enet | 94ms | 150ms | ✓ |
+| r20p1000 ⚓video | gns | 102ms | 150ms | ✓ |
+| r20p1000 ⚓video | litenetlib | 114ms | 150ms | ✓ |
+| r20p1000 ⚓video | msquic | 81ms | 150ms | ✓ |
+| r20p1000 ⚓video | websocket | 90ms | 150ms | ✓ |
+| r20p1000 ⚓video | magiconion | 81ms | 150ms | ✓ |
+| r60p200 ⚓vr | enet | 40ms | 150ms | ✓ |
+| r60p200 ⚓vr | gns | 49ms | 150ms | ✓ |
+| r60p200 ⚓vr | msquic | 34ms | 150ms | ✓ |
+| r60p200 ⚓vr | websocket | 49ms | 150ms | ✓ |
+| r60p200 ⚓vr | magiconion | 40ms | 150ms | ✓ |
+
+*anchor 予算判定は探索済み capacity 点での近似(平面 gate で探索した点のみ使用)。*
 <!-- /generated:anchors-wired-v3 -->
 
 <!-- generated:capacity-wired -->
@@ -103,11 +134,38 @@ capacity の後継。実在する運用点(国際回線・モバイル級の 1% 
 (再生計画 Phase 1-2 / Phase 3)。測定器は benchspec v2(定常判定つき warmup):
 
 <!-- generated:capacity-loss1-b4 -->
-(Phase 3 の再測で生成)
+| workload | enet | gns | litenetlib | msquic | websocket | magiconion |
+|---|---|---|---|---|---|---|
+| r20p128 ⚓br | ≥128 (crash) | 83 (st) | ≥128 (farm) | ≥128 (crash) | 137 (st) | 143 (st) |
+| r20p1000 ⚓video | ≥64 (crash) | 12 (st) | ≥64 (farm) | 53 (st) | 9 (st) | 9 (st) |
+| r60p200 ⚓vr | ≥64 (crash) | 20 (st) | 14 (st) | ≥64 (crash) | 20 (st) | 17 (st) |
+
+*凡例: `N (code)` = capacity N・break 原因(st=staleness / dl=delivery_lt / md=delivery_md / inv=validity)、`≥N` = 探索上限まで OK、`≥N (farm)` = farm 律速で打ち切り(server の break ではない)、`≥N (crash)` = それより上の conns で transport の client 接続が死んで測定不成立(再測でも再発 — server の quality break とは別種の transport 限界)。詳細は sweep 出力の capacity.json / results.jsonl。*
 <!-- /generated:capacity-loss1-b4 -->
 
 <!-- generated:anchors-loss1-b4 -->
-(Phase 3 の再測で生成)
+| anchor | transport | capacity 点の staleness p99 | 予算 | 判定 |
+|---|---|---|---|---|
+| r20p128 ⚓br | enet | 106ms | 100ms | infeasible(フロア 111ms > 予算) |
+| r20p128 ⚓br | gns | 155ms | 100ms | infeasible(フロア 112ms > 予算) |
+| r20p128 ⚓br | litenetlib | 147ms | 100ms | infeasible(フロア 111ms > 予算) |
+| r20p128 ⚓br | msquic | 122ms | 100ms | infeasible(フロア 111ms > 予算) |
+| r20p128 ⚓br | websocket | 106ms | 100ms | infeasible(フロア 111ms > 予算) |
+| r20p128 ⚓br | magiconion | 147ms | 100ms | infeasible(フロア 111ms > 予算) |
+| r20p1000 ⚓video | enet | 114ms | 150ms | ✓ |
+| r20p1000 ⚓video | gns | 147ms | 150ms | ✓ |
+| r20p1000 ⚓video | litenetlib | 147ms | 150ms | ✓ |
+| r20p1000 ⚓video | msquic | 110ms | 150ms | ✓ |
+| r20p1000 ⚓video | websocket | 139ms | 150ms | ✓ |
+| r20p1000 ⚓video | magiconion | 155ms | 150ms | ✗ 予算超過 |
+| r60p200 ⚓vr | enet | 73ms | 150ms | ✓ |
+| r60p200 ⚓vr | gns | 81ms | 150ms | ✓ |
+| r60p200 ⚓vr | litenetlib | 98ms | 150ms | ✓ |
+| r60p200 ⚓vr | msquic | 73ms | 150ms | ✓ |
+| r60p200 ⚓vr | websocket | 94ms | 150ms | ✓ |
+| r60p200 ⚓vr | magiconion | 86ms | 150ms | ✓ |
+
+*anchor 予算判定は探索済み capacity 点での近似(平面 gate で探索した点のみ使用)。*
 <!-- /generated:anchors-loss1-b4 -->
 
 **capacity @ loss 最悪点(3%×burst16、anchor のみ)** — wired とのペアで
@@ -149,18 +207,20 @@ capacity の後継。実在する運用点(国際回線・モバイル級の 1% 
 
 ## 主張2: boundary(ネットワーク条件で各 transport の鮮度特性はどう分かれるか)
 
-loss 平面(平均 loss% × 平均 burst 長、片道 25ms 固定)での **staleness p99 (ms)**。
+loss 平面(平均 loss% × burst 長 {1,16}、片道 25ms 固定)での **staleness p99 (ms)**。
 確定版は **vr(r60p200)/ video(r20p1000)の 2 anchor** で測る(relay 意味論に
-native な 2 点)。鮮度は負荷の関数でもあるため、本主張は**負荷アンカー付き**で
-測る: 無負荷極限(下表、c4)に加え、capacity@wired の ~25% / ~75% 負荷での
-再測定を行う(主張1のセルが先に埋まる必要がある — E2 の実行順はこれで決まる)。
-下表は draft・N=1・5s run・**50Hz latest-value echo(synthetic、anchor 移行前の
-暫定 workload)**(burst 16 列はサンプル不足 — ledger #3)。
+native な 2 点)。鮮度は負荷の関数でもあるため、無負荷極限(c4)と
+capacity@wired-v3 の ~75% 負荷の 2 段で測る(q25 段は floor と q75 で挟めるため
+2026-07-08 に廃止。burst 4 列も同様に縮約)。
 
 以下は `orchestrator boundary` の出力から自動生成(セル = p99 ms / フロア ms。
-フロアにはバースト黒塗り項を含む)。CPU 隔離+凍結 farm 構成での測定
-(N=1 draft — TCP 系の loss 下絶対値は run 間ばらつきが大きく、確定は
-E3 の N=3 集約で行う)。
+フロアにはバースト黒塗り項を含む)。**2026-07-08 から benchspec v2 測定器
+(定常判定つき warmup)+ 決定的 loss 注入(seed 固定 trace、セルごとに固定)+
+30s run で測定**。固定 trace 下では非崖セルの run 間ばらつきが bin 量子化幅
+(CoV ~4%)なので N=1 を正とする(Phase 2 の測定系分析)。ただし TCP 系 × loss
+は回復動態自体が確率的で N=1 の絶対値は参考値(必要なら N≥3 median を併記)。
+enet の loss セルは throttle の時定数により duration 感受性が残る(ledger #12
+— 本表は 30s 時点の値)。
 
 **vr anchor(r60p200)**:
 
@@ -169,20 +229,18 @@ E3 の N=3 集約で行う)。
 <!-- generated:boundary-r60p200-floor -->
 | loss% × burst | enet | gns | litenetlib | msquic | websocket | magiconion |
 |---|---|---|---|---|---|---|
-| 0.1 × 1 | 69/81 | 69/81 | 98/81 | 69/81 | 90/81 | 81/81 |
-| 0.1 × 4 | 69/97 | inv | 98/97 | 69/97 | 73/97 | 77/97 |
-| 0.1 × 16 | 69/158 | 69/158 | 98/158 | 69/158 | 65/158 | 69/158 |
-| 1 × 1 | 77/81 | 73/81 | 98/81 | 77/81 | 126/81 | 131/81 |
-| 1 × 4 | 86/97 | 81/97 | 102/97 | 73/97 | 126/97 | 126/97 |
-| 1 × 16 | 147/158 | 90/158 | 102/158 | 98/158 | 139/158 | 8912/158 |
-| 3 × 1 | 86/81 | 81/81 | 106/81 | 81/81 | 180/81 | 196/81 |
-| 3 × 4 | 102/97 | 86/97 | 110/97 | 90/97 | 180/97 | 278/97 |
-| 3 × 16 | 221/158 | 155/158 | 204/158 | 147/158 | inv | 5242/158 |
+| 0.1 × 1 | 65/81 | 69/81 | 98/81 | 65/81 | 69/81 | 69/81 |
+| 0.1 × 16 | 65/158 | 65/158 | 98/158 | 69/158 | 69/158 | 69/158 |
+| 1 × 1 | 73/81 | 77/81 | 102/81 | 73/81 | 86/81 | 86/81 |
+| 1 × 16 | 126/158 | 94/158 | 147/158 | 98/158 | 73/158 | 69/158 |
+| 3 × 1 | 81/81 | 81/81 | 106/81 | 81/81 | 110/81 | 114/81 |
+| 3 × 16 | inv | inv | inv | inv | inv | inv |
 
 *セル = staleness p99 ms / 物理フロア ms(フロア = 遅延+バースト黒塗り+間隔+サンプル周期)。`inv` = validity gate 不成立。負荷 = floor(conns は transport ごとに capacity@wired 比で決まる)。*
 <!-- /generated:boundary-r60p200-floor -->
 
-capacity@wired の 25% 負荷:
+capacity@wired の 25% 負荷(**旧測定器の記録 — 2026-07-08 に廃止した負荷段**。
+floor と q75 で挟めるため以後更新されない):
 
 <!-- generated:boundary-r60p200-q25 -->
 | loss% × burst | enet | msquic | websocket | magiconion |
@@ -203,17 +261,14 @@ capacity@wired の 25% 負荷:
 capacity@wired の 75% 負荷:
 
 <!-- generated:boundary-r60p200-q75 -->
-| loss% × burst | enet | gns | litenetlib | msquic | websocket | magiconion |
-|---|---|---|---|---|---|---|
-| 0.1 × 1 | 69/77 | 69/78 | 98/79 | 69/77 | 65/77 | 69/77 |
-| 0.1 × 4 | 69/78 | 69/82 | 94/89 | 69/78 | 69/78 | 69/79 |
-| 0.1 × 16 | 69/82 | 69/100 | 94/127 | 69/82 | 69/82 | 69/88 |
-| 1 × 1 | 69/77 | 73/78 | 98/79 | 69/77 | 5242/77 | 126/77 |
-| 1 × 4 | 69/78 | 69/82 | 98/89 | 69/78 | 1507/78 | 126/79 |
-| 1 × 16 | 77/82 | 73/100 | 106/127 | 73/82 | 393/82 | 139/88 |
-| 3 × 1 | 81/77 | 81/78 | 106/79 | 81/77 | 7602/77 | 2752/77 |
-| 3 × 4 | 81/78 | 81/82 | 98/89 | 77/78 | 7602/78 | 589/79 |
-| 3 × 16 | 81/82 | 86/100 | 155/127 | 77/82 | inv | 360/88 |
+| loss% × burst | enet | gns | msquic | websocket | magiconion |
+|---|---|---|---|---|---|
+| 0.1 × 1 | 69/77 | 69/77 | 65/77 | 17825/76 | 69/76 |
+| 0.1 × 16 | 69/82 | 69/95 | 65/82 | 1966/79 | 69/81 |
+| 1 × 1 | 69/77 | 73/77 | 69/77 | 29360/76 | 22020/76 |
+| 1 × 16 | 77/82 | 77/95 | 69/82 | 27262/79 | 1572/81 |
+| 3 × 1 | 81/77 | 81/77 | 77/77 | 28311/76 | 0/76 |
+| 3 × 16 | inv | inv | inv | inv | inv |
 
 *セル = staleness p99 ms / 物理フロア ms(フロア = 遅延+バースト黒塗り+間隔+サンプル周期)。`inv` = validity gate 不成立。負荷 = q75(conns は transport ごとに capacity@wired 比で決まる)。*
 <!-- /generated:boundary-r60p200-q75 -->
@@ -225,20 +280,18 @@ capacity@wired の 75% 負荷:
 <!-- generated:boundary-r20p1000-floor -->
 | loss% × burst | enet | gns | litenetlib | msquic | websocket | magiconion |
 |---|---|---|---|---|---|---|
-| 0.1 × 1 | 102/124 | 102/124 | 122/124 | 102/124 | 94/124 | 94/124 |
-| 0.1 × 4 | 102/169 | 102/169 | 122/169 | 102/169 | 94/169 | 102/169 |
-| 0.1 × 16 | 102/348 | 102/348 | 131/348 | 102/348 | 94/348 | 102/348 |
-| 1 × 1 | 131/124 | 131/124 | 155/124 | 131/124 | 188/124 | 188/124 |
-| 1 × 4 | 131/169 | 131/169 | 147/169 | 122/169 | 188/169 | 188/169 |
-| 1 × 16 | 147/348 | 155/348 | 139/348 | 278/348 | 7602/348 | 1900/348 |
-| 3 × 1 | 155/124 | 155/124 | 163/124 | 147/124 | 253/124 | 262/124 |
-| 3 × 4 | 163/169 | 172/169 | 172/169 | 155/169 | 262/169 | 425/169 |
-| 3 × 16 | 262/348 | 237/348 | 278/348 | 8912/348 | 16777/348 | 19922/348 |
+| 0.1 × 1 | 102/124 | 102/124 | 131/124 | 102/124 | 102/124 | 102/124 |
+| 0.1 × 16 | 94/348 | 102/348 | 131/348 | 102/348 | 94/348 | 94/348 |
+| 1 × 1 | 122/124 | 139/124 | 155/124 | 122/124 | 94/124 | 126/124 |
+| 1 × 16 | 155/348 | 139/348 | 196/348 | 180/348 | 188/348 | 147/348 |
+| 3 × 1 | 147/124 | 147/124 | 172/124 | 147/124 | 172/124 | 147/124 |
+| 3 × 16 | inv | inv | inv | inv | inv | inv |
 
 *セル = staleness p99 ms / 物理フロア ms(フロア = 遅延+バースト黒塗り+間隔+サンプル周期)。`inv` = validity gate 不成立。負荷 = floor(conns は transport ごとに capacity@wired 比で決まる)。*
 <!-- /generated:boundary-r20p1000-floor -->
 
-capacity@wired の 25% 負荷:
+capacity@wired の 25% 負荷(**旧測定器の記録 — 2026-07-08 に廃止した負荷段**。
+floor と q75 で挟めるため以後更新されない):
 
 <!-- generated:boundary-r20p1000-q25 -->
 | loss% × burst | enet | litenetlib | msquic | magiconion |
@@ -261,15 +314,12 @@ capacity@wired の 75% 負荷:
 <!-- generated:boundary-r20p1000-q75 -->
 | loss% × burst | enet | gns | litenetlib | msquic | websocket | magiconion |
 |---|---|---|---|---|---|---|
-| 0.1 × 1 | 102/111 | 110/119 | 126/111 | 110/111 | 94/114 | 98/111 |
-| 0.1 × 4 | 102/115 | 110/147 | 126/114 | 102/114 | 94/128 | 102/114 |
-| 0.1 × 16 | 102/130 | 110/258 | 126/126 | 102/126 | 102/185 | 102/126 |
-| 1 × 1 | 110/111 | 131/119 | 131/111 | 110/111 | 172/114 | 3932/111 |
-| 1 × 4 | 720/115 | 131/147 | 126/114 | 110/114 | 172/128 | 1835/114 |
-| 1 × 16 | 131/130 | 180/258 | 126/126 | 110/126 | 327/185 | 1376/126 |
-| 3 × 1 | 147/111 | 155/119 | 163/111 | 147/111 | 1966/114 | 7602/111 |
-| 3 × 4 | 147/115 | 155/147 | 155/114 | 147/114 | 245/128 | 5767/114 |
-| 3 × 16 | 155/130 | 204/258 | 155/126 | 147/126 | 1015/185 | 5767/126 |
+| 0.1 × 1 | 102/111 | 122/115 | 131/111 | 110/111 | 29360/110 | 102/110 |
+| 0.1 × 16 | 102/126 | 122/204 | 131/126 | 102/126 | 11010/116 | 102/123 |
+| 1 × 1 | 114/111 | 122/115 | 139/111 | 110/111 | 0/110 | 0/110 |
+| 1 × 16 | 147/126 | 155/204 | 147/126 | 114/126 | 0/116 | 16777/123 |
+| 3 × 1 | 147/111 | 155/115 | 155/111 | 131/111 | 0/110 | 0/110 |
+| 3 × 16 | inv | inv | inv | inv | inv | inv |
 
 *セル = staleness p99 ms / 物理フロア ms(フロア = 遅延+バースト黒塗り+間隔+サンプル周期)。`inv` = validity gate 不成立。負荷 = q75(conns は transport ごとに capacity@wired 比で決まる)。*
 <!-- /generated:boundary-r20p1000-q75 -->

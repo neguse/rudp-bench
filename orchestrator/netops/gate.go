@@ -161,8 +161,16 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 		return report, err
 	}
 	report.LossC2SPct = loss
-	if err := checkLoss(loss, report.ExpectedC2SPct, spec.ClientEgress.LossBurstLen, "c2s"); err != nil {
-		report.Failures = append(report.Failures, err.Error())
+	// 決定的 loss 注入(loss_seed)では iperf3 のサンプル窓が固定 trace の
+	// どこに当たるかで実測率が大きくぶれる(3%×burst16 はバースト間隔
+	// ~533 パケットで、3s サンプルが 0% を観測するのは正常)ため、率の
+	// サンプル検証は統計的に無効 — skip する。trace の正しさは losstrace の
+	// 単体テスト(実現率・バースト長)と ping のビット単位一致で担保済み。
+	// RTT 検証(netem delay)は従来どおり行う
+	if spec.ClientEgress.LossSeed == 0 {
+		if err := checkLoss(loss, report.ExpectedC2SPct, spec.ClientEgress.LossBurstLen, "c2s"); err != nil {
+			report.Failures = append(report.Failures, err.Error())
+		}
 	}
 
 	// s→c は別セッション(iperf3 -s -1 は1接続で終わるため再起動)
@@ -181,8 +189,10 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 		return report, err
 	}
 	report.LossS2CPct = loss
-	if err := checkLoss(loss, report.ExpectedS2CPct, spec.ServerEgress.LossBurstLen, "s2c"); err != nil {
-		report.Failures = append(report.Failures, err.Error())
+	if spec.ServerEgress.LossSeed == 0 {
+		if err := checkLoss(loss, report.ExpectedS2CPct, spec.ServerEgress.LossBurstLen, "s2c"); err != nil {
+			report.Failures = append(report.Failures, err.Error())
+		}
 	}
 
 	return report, nil
