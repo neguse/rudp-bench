@@ -38,8 +38,13 @@ type Config struct {
 	Seed         int64                          `json:"seed"`
 	Warmup       run.Duration                   `json:"warmup"`
 	// SteadyWarmup: 定常判定つき warmup(benchspec v2)。Warmup は上限になる
-	SteadyWarmup      bool         `json:"steady_warmup,omitempty"`
-	Drain             run.Duration `json:"drain"`
+	SteadyWarmup bool         `json:"steady_warmup,omitempty"`
+	Drain        run.Duration `json:"drain"`
+	// Duration: 1 run の計測時間。0 = loss イベント数規則から自動導出。
+	// 決定的 trace 注入(LossSeedBase)では乱数からイベント数を稼ぐ必要が
+	// ないため、明示指定(例 30s)を推奨 — 自動規則は低ロス率セルで
+	// 120s 級になり boundary 一式の所要時間を数倍にする
+	Duration          run.Duration `json:"duration,omitempty"`
 	DeadlineNS        uint64       `json:"deadline_ns"`
 	StalenessPeriodNS uint64       `json:"staleness_period_ns"`
 	ServerCPUs        string       `json:"server_cpus,omitempty"`
@@ -253,6 +258,7 @@ func (b *Boundary) runPoint(ctx context.Context, c cell, loss, burst float64, lo
 		Warmup:            b.cfg.Warmup,
 		SteadyWarmup:      b.cfg.SteadyWarmup,
 		SteadyMinWarmup:   spec.SteadyMinWarmup,
+		Duration:          b.cfg.Duration,
 		Drain:             b.cfg.Drain,
 		DeadlineNS:        b.cfg.DeadlineNS,
 		StalenessPeriodNS: b.cfg.StalenessPeriodNS,
