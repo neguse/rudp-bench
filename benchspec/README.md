@@ -3,9 +3,11 @@
 言語非依存の契約仕様。server / client / orchestrator の実装はすべてこの文書に従う。
 設計の背景と根拠は [v2 design spec](../docs/superpowers/specs/2026-07-02-rudp-bench-v2-design.md) 参照。
 
-- version: 1(**凍結済み**。v2.0 完了条件 — 校正5本 green・v1 突き合わせ・
-  縮小 broadcast 検証 — を満たして確定。以後の変更は version を上げ、
-  全実装・orchestrator を同時に移行する)
+- version: 2(定常判定つき warmup を追加。version 1 との差分は
+  「lifecycle と control channel」の rate / window / window_ack のみで、
+  payload・計測の定義は不変。移行方針どおり全実装・orchestrator を同時移行。
+  version 1 は校正5本 green・v1 突き合わせ・縮小 broadcast 検証を満たして
+  凍結された契約で、その校正結果は payload/計測定義の不変性により引き継ぐ)
 
 ## 用語
 
@@ -83,6 +85,10 @@ orchestrator → process: {"type":"schedule","start_at_ns":…,"stop_at_ns":…,
                           "drain_until_ns":…}
 process → orchestrator: {"type":"sched_ack","margin_ns":…}
                           (margin = start_at − 受信時刻。負なら run は INVALID)
+client → orchestrator:  {"type":"rate","sent":…,"received":…}     (v2、周期 250ms)
+orchestrator → process: {"type":"window","start_at_ns":…,"stop_at_ns":…,
+                          "drain_until_ns":…}                      (v2、0 or 1 回)
+process → orchestrator: {"type":"window_ack","margin_ns":…}        (v2)
 process → orchestrator: {"type":"done","stats":{…}}
 ```
 
@@ -93,6 +99,31 @@ process → orchestrator: {"type":"done","stats":{…}}
 - drain_until 後に stats を報告(`done`)して exit
 - 計測に入れるのは measurement bit = 1 の message のみ(受信時刻が stop_at 以降でも、
   drain_until までに届けば staleness / hit rate の集計対象)
+
+### 定常判定つき warmup(version 2)
+
+接続ストーム直後の非定常区間が計測窓に入ると同一条件でも結果が二峰化する
+(輻輳制御・throttle の整定が warmup を越えて残る)。これを排除するため、
+計測窓は「時間経過」ではなく「送受レートの定常」で開く:
+
+- schedule は**暫定窓**として届く(start_at = ready + warmup **上限**)。client は
+  従来どおり受信直後から送信を開始する
+- client は schedule 受信後、250ms 周期で累積の生カウント(送信 submit 数、
+  受信数 — measurement bit の有無を問わない)を `rate` で報告する
+- orchestrator は全 client について「直近 N 個(既定 4)の報告間隔の増分が
+  すべて中央値 ±10% 以内、かつ増分が正」を満たしたら定常と判定し、確定窓を
+  `window` で全参加者(server 含む)に配布する
+- `window` の受信者は即座に `window_ack`(margin = start_at − 受信時刻。負なら
+  run は INVALID)を返し、ローカルの窓(schedule と送信計画の measurement bit
+  判定)を確定窓に差し替える
+- 暫定 start_at までに定常が検出されなければ `window` は送られず、暫定窓が
+  そのまま有効(run の結果に steady 未達として開示される。エラーではない)
+- 窓確定後(window 受信 or 暫定 start_at 到達)、client は rate 報告を止める
+- orchestrator は「定常が見えても宣言された最小 warmup より前に窓を開かない」
+  制約を持てる(ワイヤ契約への影響なし)。レート形状から予測できない遅い
+  過渡を持つ transport 向け — enet の packet throttle は接続ストーム後
+  ~13s、レートが数秒 flat に見えた後で崩れることが 20 反復 × 2 系列で
+  実測されている(定常は必要条件であって十分条件ではない)
 
 ## 計測の定義
 

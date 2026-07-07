@@ -343,10 +343,29 @@ int main(int argc, char **argv) {
     }
   }
 
+  bool window_final = false;
   while (!g_stop) {
     enet_uint32 timeout_ms = ENET_SERVICE_SLICE_MS;
     if (control != NULL) {
       const uint64_t now = bk_now_ns();
+      // 定常判定つき warmup(benchspec v2): 確定窓(window)を受けたら
+      // schedule を差し替える(drain 終端の前倒しに効く)
+      if (!window_final) {
+        if (now >= schedule.start_at_ns) {
+          window_final = true;
+        } else {
+          const int wr = bk_control_poll_window(control, &schedule);
+          if (wr < 0) {
+            fprintf(stderr, "benchkit window poll failed\n");
+            bk_control_close(control);
+            enet_host_destroy(host);
+            return EXIT_FAILURE;
+          }
+          if (wr == 1) {
+            window_final = true;
+          }
+        }
+      }
       if (now >= schedule.drain_until_ns) {
         break;
       }

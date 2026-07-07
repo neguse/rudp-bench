@@ -57,6 +57,9 @@ try
         await control.HelloAsync("server", "magiconion", 0, stopCts.Token).ConfigureAwait(false);
         await control.ReadyAsync(0, stopCts.Token).ConfigureAwait(false);
         var schedule = await control.WaitScheduleAsync(stopCts.Token).ConfigureAwait(false);
+        // 定常判定つき warmup(benchspec v2): 確定窓(window)を受けたら
+        // schedule を差し替える(drain 終端の前倒しに効く)
+        schedule = await PollWindowUntilFinalAsync(control, schedule, stopCts.Token).ConfigureAwait(false);
         await DelayUntilNsAsync(schedule.DrainUntilNs, stopCts.Token).ConfigureAwait(false);
     }
     else
@@ -83,6 +86,26 @@ if (control is not null)
 
 await app.StopAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
 return 0;
+
+// 確定窓(window)が届くか暫定 start_at に達するまで非ブロッキングで poll する
+//(benchspec v2)。どちらでも窓は確定なので以降の poll は不要
+static async Task<BenchSchedule> PollWindowUntilFinalAsync(
+    BenchControl control,
+    BenchSchedule schedule,
+    CancellationToken cancellationToken)
+{
+    while (!cancellationToken.IsCancellationRequested && BenchClock.NowNs() < schedule.StartAtNs)
+    {
+        if (await control.PollWindowAsync(cancellationToken).ConfigureAwait(false) is { } window)
+        {
+            return window;
+        }
+
+        await Task.Delay(10, cancellationToken).ConfigureAwait(false);
+    }
+
+    return schedule;
+}
 
 static async Task DelayUntilNsAsync(ulong targetNs, CancellationToken cancellationToken)
 {

@@ -112,9 +112,33 @@ try
     }
 
     var markedUnsent = false;
+    var steady = new BenchSteady();
     while (!stopCts.IsCancellationRequested && BenchClock.NowNs() < schedule.DrainUntilNs)
     {
         var now = BenchClock.NowNs();
+        // 定常判定つき warmup(benchspec v2): rate 報告と確定窓(window)の受信。
+        // raw counts は metricsGate 下で読む(receiver/pipe スレッドが書く)。
+        // window を受けたら全 conn の plan に計測窓を差し替える
+        if (control is not null)
+        {
+            BenchRawCounts raw;
+            lock (metricsGate)
+            {
+                raw = metrics.RawCounts();
+            }
+            var window = await steady.TickAsync(
+                control, raw.Submitted, raw.RecvMeasured + raw.RecvUnmeasured, schedule, now, stopCts.Token)
+                .ConfigureAwait(false);
+            if (window is { } w)
+            {
+                schedule = w;
+                foreach (var connection in connections)
+                {
+                    connection.Plan!.SetWindow(w.StartAtNs, w.StopAtNs);
+                }
+            }
+        }
+
         if (now >= schedule.StartAtNs && now < schedule.StopAtNs)
         {
             lock (metricsGate)

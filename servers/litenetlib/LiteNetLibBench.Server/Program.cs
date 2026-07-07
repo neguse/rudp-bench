@@ -81,6 +81,21 @@ try
             15,
             stopCts.Token).ConfigureAwait(false);
 
+        // 定常判定つき warmup(benchspec v2): 確定窓(window)を受けたら
+        // schedule を差し替える(drain 終端の前倒しに効く)。窓確定
+        //(window 受信 or 暫定 start_at 到達)まで pump しながら poll する
+        while (!stopCts.IsCancellationRequested && BenchClock.NowNs() < schedule.StartAtNs)
+        {
+            if (await control.PollWindowAsync(stopCts.Token).ConfigureAwait(false) is { } window)
+            {
+                schedule = window;
+                break;
+            }
+
+            manager.PollEvents();
+            await Task.Delay(15, stopCts.Token).ConfigureAwait(false);
+        }
+
         await LnlPump.DrainUntilAsync(
             schedule.DrainUntilNs,
             _ => manager.PollEvents(),

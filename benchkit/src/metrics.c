@@ -22,6 +22,8 @@ typedef struct {
 typedef struct {
   bool has;
   uint64_t sched_ts_ns;
+  // latest-value を前進させた受信の時刻。update gap(事象アライン指標)用
+  uint64_t recv_ts_ns;
 } bk_latest;
 
 typedef struct {
@@ -42,6 +44,10 @@ struct bk_metrics {
   bk_metrics_config cfg;
   bk_class_metrics classes[BK_N_CLASSES];
   bk_hist staleness;
+  // update gap: (origin, class) の latest-value が前進した受信の間隔。
+  // p99 が「ロス/HoL 事象1回あたりの空白時間」に対応する事象アライン指標
+  // (窓全体の staleness p99 より事象数に対して安定 — 再生計画 Phase 1-3)
+  bk_hist update_gap;
   bk_latest *latest;
   uint64_t next_staleness_sample_ns;
   bk_seen_key *seen;
@@ -316,8 +322,15 @@ void bk_metrics_on_recv(bk_metrics *m, uint32_t local_index,
     bk_latest *latest =
         &m->latest[(size_t)h->origin_id * BK_N_CLASSES + class_index];
     if (!latest->has || h->sched_ts_ns > latest->sched_ts_ns) {
+      // update gap: latest-value を前進させた受信同士の間隔(事象アライン)。
+      // 古い並べ替え到着は latest を進めないので gap にも数えない
+      if (latest->has) {
+        hist_add(&m->update_gap,
+                 bk_saturating_sub_u64(recv_ts_ns, latest->recv_ts_ns));
+      }
       latest->has = true;
       latest->sched_ts_ns = h->sched_ts_ns;
+      latest->recv_ts_ns = recv_ts_ns;
     }
   }
 }
@@ -369,6 +382,30 @@ uint64_t bk_metrics_staleness_pctl(const bk_metrics *m, double p) {
     return 0;
   }
   return hist_percentile(&m->staleness, p);
+}
+
+uint64_t bk_metrics_update_gap_pctl(const bk_metrics *m, double p) {
+  if (m == NULL) {
+    return 0;
+  }
+  return hist_percentile(&m->update_gap, p);
+}
+
+void bk_metrics_raw_counts(const bk_metrics *m, uint64_t *slots,
+                           uint64_t *submitted, uint64_t *recv_measured,
+                           uint64_t *recv_unmeasured) {
+  if (slots != NULL) {
+    *slots = (m != NULL) ? m->raw_slots : 0;
+  }
+  if (submitted != NULL) {
+    *submitted = (m != NULL) ? m->raw_submitted : 0;
+  }
+  if (recv_measured != NULL) {
+    *recv_measured = (m != NULL) ? m->raw_recv_measured : 0;
+  }
+  if (recv_unmeasured != NULL) {
+    *recv_unmeasured = (m != NULL) ? m->raw_recv_unmeasured : 0;
+  }
 }
 
 uint64_t bk_metrics_latency_pctl(const bk_metrics *m, bool must_deliver,
@@ -463,6 +500,12 @@ int bk_metrics_dump_json(const bk_metrics *m, const char *path) {
     rc = -1;
   }
   if (rc == 0 && json_hist(f, &m->staleness) != 0) {
+    rc = -1;
+  }
+  if (rc == 0 && fputs(",\"update_gap_ns\":", f) == EOF) {
+    rc = -1;
+  }
+  if (rc == 0 && json_hist(f, &m->update_gap) != 0) {
     rc = -1;
   }
   if (rc == 0 &&

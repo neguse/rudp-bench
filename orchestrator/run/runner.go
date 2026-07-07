@@ -131,6 +131,15 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 			}
 		}
 
+		// 決定的 loss 注入時、gate(ping/iperf3)が消費した trace 位置を
+		// 0 に戻す。計測本体が毎 run 同じ位置から trace を再生するための要件
+		if netops.LossTraceEnabled(pair) {
+			if err := netops.LossTraceReset(pair); err != nil {
+				extraReasons = append(extraReasons, fmt.Sprintf("loss trace reset failed: %v", err))
+				return finishRunResult(result, GateInput{ExtraReasons: extraReasons, NetemEnabled: true}, resultPath, summaryPath)
+			}
+		}
+
 		before, err := readNetnsUDPStats(runCtx, pair.ClientNS)
 		if err != nil {
 			extraReasons = append(extraReasons, fmt.Sprintf("read client netns UDP counters before run: %v", err))
@@ -139,16 +148,22 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 	}
 
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("rudp-bench-%d-%d.sock", os.Getpid(), time.Now().UnixNano()))
+	expSent, expRecv := steadyExpectedRates(cfg)
 	ctrl, err := control.NewServer(control.Config{
-		SocketPath:   sock,
-		Expected:     cfg.ClientProcs + 1,
-		Warmup:       cfg.Warmup.Duration,
-		Duration:     cfg.Duration.Duration,
-		Drain:        cfg.Drain.Duration,
+		SocketPath:                sock,
+		Expected:                  cfg.ClientProcs + 1,
+		Warmup:                    cfg.Warmup.Duration,
+		SteadyWarmup:              cfg.SteadyWarmup,
+		SteadyMinWarmup:           cfg.SteadyMinWarmup.Duration,
+		SteadyExpectedSentPerConn: expSent,
+		SteadyExpectedRecvPerConn: expRecv,
+		Duration:                  cfg.Duration.Duration,
+		Drain:                     cfg.Drain.Duration,
 		HelloTimeout: cfg.ControlTimeout.Duration,
 		ReadyTimeout: cfg.ControlTimeout.Duration,
 		AckTimeout:   cfg.ControlTimeout.Duration,
 		// done は schedule ack 直後から計時され、計測窓全体を跨いで待つ
+		// (steady 時は warmup が上限なのでこの見積りが最悪ケースのまま成立)
 		DoneTimeout: cfg.Warmup.Duration + cfg.Duration.Duration + cfg.Drain.Duration + cfg.ControlTimeout.Duration,
 	})
 	if err != nil {
@@ -517,6 +532,44 @@ func remainingExitedCount(processes []ProcessResult) int {
 		}
 	}
 	return n
+}
+
+// steadyExpectedRates は定常判定の下限チェックに使う per-conn 期待レート
+// (送信 / 受信、loss 調整済み)を返す。workload 名が未指定(明示 CLI 引数の
+// 開発用 config 等)なら 0 を返し、下限チェックは無効(flat 判定のみ)になる。
+func steadyExpectedRates(cfg RunConfig) (sent, recv float64) {
+	if !cfg.SteadyWarmup || cfg.Workload == "" {
+		return 0, 0
+	}
+	w, ok := LookupWorkload(cfg.Workload)
+	if !ok {
+		return 0, 0
+	}
+	// 経路係数: forward(origin の client_egress)+ return(server_egress)。
+	// echo / broadcast どちらも受信までに両 egress を1回ずつ通る
+	pf := 1.0
+	if cfg.Netem != nil {
+		pf = (1 - cfg.Netem.ClientEgress.LossPercent/100) *
+			(1 - cfg.Netem.ServerEgress.LossPercent/100)
+	}
+	sent = w.RateLT + w.RateMD
+	if w.RateLT > 0 {
+		r := w.RateLT
+		if w.BroadcastLT {
+			r *= float64(cfg.TotalConns)
+		}
+		// loss-tolerant は落ちた分がそのまま減る
+		recv += r * pf
+	}
+	if w.RateMD > 0 {
+		r := w.RateMD
+		if w.BroadcastMD {
+			r *= float64(cfg.TotalConns)
+		}
+		// must-deliver は再送で届くので loss 係数を掛けない
+		recv += r
+	}
+	return sent, recv
 }
 
 func awaitControl(controlCh <-chan controlEvent, timeout time.Duration) controlEvent {

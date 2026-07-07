@@ -12,6 +12,8 @@ public sealed class BenchControl : IAsyncDisposable
     private readonly NetworkStream stream;
     private readonly StreamReader reader;
     private readonly StreamWriter writer;
+    // PollWindowAsync 用の読みかけ行。非ブロッキング poll を跨いで保持する
+    private Task<string?>? pendingLine;
 
     private BenchControl(Socket socket)
     {
@@ -91,11 +93,56 @@ public sealed class BenchControl : IAsyncDisposable
         return schedule;
     }
 
+    // rate を送る(benchspec v2)。sent/received は計測 bit 無関係の累積生カウント
+    public Task SendRateAsync(ulong sent, ulong received, CancellationToken cancellationToken)
+    {
+        var line = JsonSerializer.Serialize(new { type = "rate", sent, received });
+        return WriteLineAsync(line, cancellationToken);
+    }
+
+    // window(確定計測窓)の非ブロッキング確認(benchspec v2)。受信したら
+    // window_ack を返信して確定窓を返す。未着なら null。schedule 受信後にのみ呼ぶこと
+    public async ValueTask<BenchSchedule?> PollWindowAsync(CancellationToken cancellationToken)
+    {
+        pendingLine ??= reader.ReadLineAsync();
+        if (!pendingLine.IsCompleted)
+        {
+            return null;
+        }
+
+        var line = await pendingLine.ConfigureAwait(false);
+        pendingLine = null;
+        if (line is null)
+        {
+            throw new IOException("control socket closed before window");
+        }
+
+        var recvNs = BenchClock.NowNs();
+        using var doc = JsonDocument.Parse(line);
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("type", out var type) || type.GetString() != "window")
+        {
+            throw new InvalidDataException("unexpected control message while polling for window");
+        }
+
+        var window = new BenchSchedule(
+            root.GetProperty("start_at_ns").GetUInt64(),
+            root.GetProperty("stop_at_ns").GetUInt64(),
+            root.GetProperty("drain_until_ns").GetUInt64());
+        var marginNs = BenchClock.DiffSaturatingI64(window.StartAtNs, recvNs);
+        await WriteLineAsync(
+            JsonSerializer.Serialize(new { type = "window_ack", margin_ns = marginNs }),
+            cancellationToken).ConfigureAwait(false);
+        return window;
+    }
+
     public Task DoneAsync(string statsJson, CancellationToken cancellationToken) =>
         WriteLineAsync("{\"type\":\"done\",\"stats\":" + (string.IsNullOrWhiteSpace(statsJson) ? "{}" : statsJson) + "}", cancellationToken);
 
     public async ValueTask DisposeAsync()
     {
+        // 読みかけ行が残ったまま閉じると背景で例外が完了しうるので観測して捨てる
+        pendingLine?.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
         await writer.DisposeAsync().ConfigureAwait(false);
         reader.Dispose();
         stream.Dispose();

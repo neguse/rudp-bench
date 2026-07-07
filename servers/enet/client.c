@@ -658,12 +658,34 @@ static int run_client(const client_config *cfg) {
   bool marked_unsent = false;
   int connected_count = cfg->conns;
   int run_rc = 0;
+  bk_steady steady = {0, false};
   while (bk_now_ns() < schedule.drain_until_ns) {
     uint64_t now = bk_now_ns();
     if (drain_events(host, metrics, &connected_count) != 0) {
       fprintf(stderr, "enet event handling failed\n");
       run_rc = -1;
       break;
+    }
+    // 定常判定つき warmup(benchspec v2): rate 報告と確定窓(window)の受信。
+    // window を受けたら全 conn の plan に計測窓を差し替える
+    if (control != NULL) {
+      uint64_t raw_submitted = 0;
+      uint64_t raw_rm = 0;
+      uint64_t raw_ru = 0;
+      bk_metrics_raw_counts(metrics, NULL, &raw_submitted, &raw_rm, &raw_ru);
+      const int sr = bk_steady_tick(&steady, control, raw_submitted,
+                                    raw_rm + raw_ru, &schedule, now);
+      if (sr < 0) {
+        fprintf(stderr, "benchkit steady tick failed\n");
+        run_rc = -1;
+        break;
+      }
+      if (sr == 1) {
+        for (int i = 0; i < cfg->conns; ++i) {
+          bk_plan_set_window(conns[i].plan, schedule.start_at_ns,
+                             schedule.stop_at_ns);
+        }
+      }
     }
     // staleness サンプルは計測窓内のみ。warmup(まだ measured update がない)と
     // drain(送信停止後で age が伸びるだけ)を混ぜると分布が汚染される

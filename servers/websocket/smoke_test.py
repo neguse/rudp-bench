@@ -46,7 +46,7 @@ def assert_class_shape(metrics, name):
 
 
 def assert_metrics_shape(metrics):
-    expected_top = {"version", "histogram", "classes", "staleness_ns", "raw"}
+    expected_top = {"version", "histogram", "classes", "staleness_ns", "update_gap_ns", "raw"}
     if set(metrics.keys()) != expected_top:
         raise AssertionError(f"top-level keys {sorted(metrics.keys())}, want {sorted(expected_top)}")
     if int(metrics["version"]) != 1:
@@ -59,6 +59,7 @@ def assert_metrics_shape(metrics):
     assert_class_shape(metrics, "loss_tolerant")
     assert_class_shape(metrics, "must_deliver")
     assert_hist_shape(metrics["staleness_ns"], "staleness_ns")
+    assert_hist_shape(metrics["update_gap_ns"], "update_gap_ns")
     if set(metrics["raw"].keys()) != {"slots", "submitted", "recv_measured", "recv_unmeasured"}:
         raise AssertionError(f"raw keys mismatch: {metrics['raw'].keys()}")
 

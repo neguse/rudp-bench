@@ -451,7 +451,7 @@ class ClientApp {
       }
     }
 
-    int rc = run_schedule(schedule);
+    int rc = run_schedule(control, schedule);
 
     char default_metrics_path[128];
     const char *metrics_path = metrics_path_or_default(
@@ -564,11 +564,12 @@ class ClientApp {
     return true;
   }
 
-  int run_schedule(const bk_schedule &schedule) {
+  int run_schedule(bk_control *control, bk_schedule schedule) {
     std::vector<uint8_t> payload(
         std::max(cfg_.payload_lt, cfg_.payload_md), 0);
     bool marked_unsent = false;
     int rc = 0;
+    bk_steady steady = {0, false};
 
     while (bk_now_ns() < schedule.drain_until_ns) {
       service();
@@ -577,6 +578,29 @@ class ClientApp {
         std::fprintf(stderr, "gns connection failed during run\n");
         rc = -1;
         break;
+      }
+
+      // 定常判定つき warmup(benchspec v2): rate 報告と確定窓(window)の受信。
+      // window を受けたら全 conn の plan に計測窓を差し替える
+      if (control != nullptr) {
+        uint64_t raw_submitted = 0;
+        uint64_t raw_rm = 0;
+        uint64_t raw_ru = 0;
+        bk_metrics_raw_counts(metrics_, nullptr, &raw_submitted, &raw_rm,
+                              &raw_ru);
+        const int sr = bk_steady_tick(&steady, control, raw_submitted,
+                                      raw_rm + raw_ru, &schedule, now);
+        if (sr < 0) {
+          std::fprintf(stderr, "benchkit steady tick failed\n");
+          rc = -1;
+          break;
+        }
+        if (sr == 1) {
+          for (ClientConn &conn : conns_) {
+            bk_plan_set_window(conn.plan, schedule.start_at_ns,
+                               schedule.stop_at_ns);
+          }
+        }
       }
 
       // staleness サンプルは計測窓内のみ(warmup / drain 混入は分布を汚染する)

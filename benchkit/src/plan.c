@@ -67,6 +67,15 @@ void bk_plan_free(bk_plan *p) {
   free(p);
 }
 
+void bk_plan_set_window(bk_plan *p, uint64_t measure_start_ns,
+                        uint64_t measure_stop_ns) {
+  if (p == NULL) {
+    return;
+  }
+  p->measure_start_ns = measure_start_ns;
+  p->measure_stop_ns = measure_stop_ns;
+}
+
 uint64_t bk_plan_peek_ns(const bk_plan *p) {
   if (p == NULL || p->n_streams == 0) {
     return UINT64_MAX;

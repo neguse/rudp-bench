@@ -9,8 +9,8 @@ public sealed class BenchPlan
     private readonly BenchStream[] streams;
     private readonly ulong[] nextSchedNs;
     private readonly ulong[] nextSeq;
-    private readonly ulong measureStartNs;
-    private readonly ulong measureStopNs;
+    private ulong measureStartNs;
+    private ulong measureStopNs;
 
     public BenchPlan(IReadOnlyList<BenchStream> streams, ulong startNs, ulong measureStartNs, ulong measureStopNs)
     {
@@ -34,6 +34,14 @@ public sealed class BenchPlan
         nextSeq = new ulong[this.streams.Length];
         Array.Fill(nextSchedNs, startNs);
         Array.Fill(nextSeq, 1UL);
+    }
+
+    // 計測窓を差し替える(benchspec v2 の window 受信時)。measure bit は slot 生成時
+    // 評価なので、旧窓にまだ達していなければ遡及の不整合は起きない
+    public void SetWindow(ulong measureStartNs, ulong measureStopNs)
+    {
+        this.measureStartNs = measureStartNs;
+        this.measureStopNs = measureStopNs;
     }
 
     public ulong PeekNs()

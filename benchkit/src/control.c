@@ -306,6 +306,122 @@ int bk_control_wait_schedule(bk_control *c, bk_schedule *out) {
   }
 }
 
+int bk_control_send_rate(bk_control *c, uint64_t sent, uint64_t received) {
+  if (c == NULL) {
+    return -1;
+  }
+  char line[160];
+  const int n = snprintf(line, sizeof(line),
+                         "{\"type\":\"rate\",\"sent\":%" PRIu64
+                         ",\"received\":%" PRIu64 "}\n",
+                         sent, received);
+  if (n < 0 || (size_t)n >= sizeof(line)) {
+    return -1;
+  }
+  return write_all(c->fd, line, (size_t)n);
+}
+
+static int parse_window_and_ack(bk_control *c, const char *line,
+                                uint64_t recv_ns, bk_schedule *io) {
+  if (!json_has_type(line, "\"window\"")) {
+    return -1;
+  }
+  if (json_get_u64(line, "\"start_at_ns\"", &io->start_at_ns) != 0 ||
+      json_get_u64(line, "\"stop_at_ns\"", &io->stop_at_ns) != 0 ||
+      json_get_u64(line, "\"drain_until_ns\"", &io->drain_until_ns) != 0) {
+    return -1;
+  }
+
+  const int64_t margin_ns = diff_i64(io->start_at_ns, recv_ns);
+  char ack[128];
+  const int n = snprintf(ack, sizeof(ack),
+                         "{\"type\":\"window_ack\",\"margin_ns\":%" PRId64 "}\n",
+                         margin_ns);
+  if (n < 0 || (size_t)n >= sizeof(ack)) {
+    return -1;
+  }
+  return write_all(c->fd, ack, (size_t)n);
+}
+
+int bk_control_poll_window(bk_control *c, bk_schedule *io) {
+  if (c == NULL || io == NULL) {
+    return -1;
+  }
+
+  char line[1024];
+  for (;;) {
+    const int has = extract_line(c, line, sizeof(line));
+    if (has < 0) {
+      return -1;
+    }
+    if (has == 1) {
+      break;
+    }
+    if (c->rlen == sizeof(c->rbuf)) {
+      return -1;  // 改行なしで行バッファが溢れた
+    }
+    const ssize_t n = recv(c->fd, c->rbuf + c->rlen, sizeof(c->rbuf) - c->rlen,
+                           MSG_DONTWAIT);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return 0;
+      }
+      return -1;
+    }
+    if (n == 0) {
+      return -1;  // orchestrator 切断
+    }
+    c->rlen += (size_t)n;
+  }
+
+  const uint64_t recv_ns = bk_now_ns();
+  if (parse_window_and_ack(c, line, recv_ns, io) != 0) {
+    return -1;
+  }
+  return 1;
+}
+
+// rate 報告の周期(benchspec v2 で固定)
+#define BK_RATE_INTERVAL_NS (250ull * 1000 * 1000)
+
+int bk_steady_tick(bk_steady *st, bk_control *c, uint64_t sent,
+                   uint64_t received, bk_schedule *schedule, uint64_t now_ns) {
+  if (st == NULL || c == NULL || schedule == NULL) {
+    return -1;
+  }
+  if (st->window_final) {
+    return 0;
+  }
+  // 窓が開いたら以降 rate 報告も window 待ちも不要(暫定窓のまま計測)
+  if (now_ns >= schedule->start_at_ns) {
+    st->window_final = true;
+    return 0;
+  }
+  if (st->next_rate_ns == 0) {
+    st->next_rate_ns = now_ns + BK_RATE_INTERVAL_NS;
+  }
+  if (now_ns >= st->next_rate_ns) {
+    if (bk_control_send_rate(c, sent, received) != 0) {
+      return -1;
+    }
+    do {
+      st->next_rate_ns += BK_RATE_INTERVAL_NS;
+    } while (st->next_rate_ns <= now_ns);
+  }
+  const int wr = bk_control_poll_window(c, schedule);
+  if (wr < 0) {
+    return -1;
+  }
+  if (wr == 1) {
+    st->window_final = true;
+    return 1;
+  }
+  return 0;
+}
+
 int bk_control_done(bk_control *c, const char *stats_json) {
   if (c == NULL) {
     return -1;

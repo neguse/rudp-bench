@@ -27,6 +27,11 @@ func writeSummary(path string, result *Result) error {
 			result.Control.Schedule.StartAtNS,
 			result.Control.Schedule.StopAtNS,
 			result.Control.Schedule.DrainUntilNS)
+		if result.Control.SteadyEnabled {
+			fmt.Fprintf(f, "steady_warmup: reached=%t warmup_actual_ms=%d\n",
+				result.Control.SteadyReached,
+				result.Control.WarmupActualNS/1000000)
+		}
 	}
 	fmt.Fprintf(f, "processes:\n")
 	for _, p := range result.Processes {
@@ -60,6 +65,13 @@ func writeSummary(path string, result *Result) error {
 			result.Metrics.StalenessNS.P50NS,
 			result.Metrics.StalenessNS.P90NS,
 			result.Metrics.StalenessNS.P99NS)
+		if result.Metrics.UpdateGapNS.Count > 0 {
+			fmt.Fprintf(f, "update_gap_ns: count=%d p50=%d p90=%d p99=%d\n",
+				result.Metrics.UpdateGapNS.Count,
+				result.Metrics.UpdateGapNS.P50NS,
+				result.Metrics.UpdateGapNS.P90NS,
+				result.Metrics.UpdateGapNS.P99NS)
+		}
 	}
 	if result.Netem != nil && result.Netem.Enabled {
 		fmt.Fprintf(f, "client_udp_drop_delta: InErrors=%d RcvbufErrors=%d\n",

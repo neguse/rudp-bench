@@ -15,6 +15,13 @@ public struct BenchClassCounts
     public ulong DeadlineHit;
 }
 
+// 生カウント(計測 bit 無関係の累積)。rate 報告(benchspec v2)用。
+public readonly record struct BenchRawCounts(
+    ulong Slots,
+    ulong Submitted,
+    ulong RecvMeasured,
+    ulong RecvUnmeasured);
+
 public sealed class BenchMetrics
 {
     private sealed class Hist
@@ -65,6 +72,7 @@ public sealed class BenchMetrics
     {
         public bool Has;
         public ulong SchedTsNs;
+        public ulong RecvTsNs;
     }
 
     private readonly record struct SeenKey(uint LocalIndex, uint OriginId, byte ClassIndex, ulong Seq);
@@ -79,6 +87,10 @@ public sealed class BenchMetrics
     private readonly BenchMetricsConfig config;
     private readonly ClassMetrics[] classes = [new ClassMetrics(), new ClassMetrics()];
     private readonly Hist staleness = new();
+    // update gap: (origin, class) の latest-value が前進した受信の間隔。
+    // p99 が「ロス/HoL 事象1回あたりの空白時間」に対応する事象アライン指標
+    //(窓全体の staleness p99 より事象数に対して安定)
+    private readonly Hist updateGap = new();
     private readonly Latest[] latest;
     private readonly HashSet<SeenKey> seen = [];
     private ulong nextStalenessSampleNs;
@@ -162,8 +174,15 @@ public sealed class BenchMetrics
             var index = checked((int)header.OriginId * BenchConstants.ClassCount + classIndex);
             if (!latest[index].Has || header.SchedTsNs > latest[index].SchedTsNs)
             {
+                // update gap: latest-value を前進させた受信同士の間隔(事象アライン)。
+                // 古い並べ替え到着は latest を進めないので gap にも数えない
+                if (latest[index].Has)
+                {
+                    updateGap.Add(BenchClock.SaturatingSub(recvTsNs, latest[index].RecvTsNs));
+                }
                 latest[index].Has = true;
                 latest[index].SchedTsNs = header.SchedTsNs;
+                latest[index].RecvTsNs = recvTsNs;
             }
         }
     }
@@ -197,6 +216,11 @@ public sealed class BenchMetrics
         }
     }
 
+    // 別スレッドが OnSlot/OnRecv を書く実装では、呼び出し側の同期規約
+    //(metrics gate 等)の下で読むこと
+    public BenchRawCounts RawCounts() =>
+        new(rawSlots, rawSubmitted, rawRecvMeasured, rawRecvUnmeasured);
+
     public BenchClassCounts Counts(bool mustDeliver) =>
         classes[mustDeliver ? BenchConstants.ClassMustDeliver : BenchConstants.ClassLossTolerant].Counts;
 
@@ -213,6 +237,8 @@ public sealed class BenchMetrics
         AppendClassJson(sb, classes[BenchConstants.ClassMustDeliver]);
         sb.Append("},\"staleness_ns\":");
         AppendHistJson(sb, staleness);
+        sb.Append(",\"update_gap_ns\":");
+        AppendHistJson(sb, updateGap);
         sb.Append(",\"raw\":{\"slots\":").Append(rawSlots.ToString(CultureInfo.InvariantCulture))
             .Append(",\"submitted\":").Append(rawSubmitted.ToString(CultureInfo.InvariantCulture))
             .Append(",\"recv_measured\":").Append(rawRecvMeasured.ToString(CultureInfo.InvariantCulture))

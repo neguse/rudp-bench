@@ -110,8 +110,15 @@ type RunConfig struct {
 	ClientProcs        int           `json:"client_procs"`
 	TotalConns         int           `json:"total_conns"`
 	Warmup             Duration      `json:"warmup"`
-	Duration           Duration      `json:"duration"`
-	Drain              Duration      `json:"drain"`
+	// SteadyWarmup: 定常判定つき warmup(benchspec v2)。true のとき Warmup は
+	// 上限になり、全 client の送受レート定常を検出した時点で計測窓が確定する。
+	// 接続ストーム直後の非定常区間が計測窓に入る二峰性(ledger #14)への対処
+	SteadyWarmup bool `json:"steady_warmup,omitempty"`
+	// SteadyMinWarmup: 定常が見えてもこれより早く窓を開かない。レート形状から
+	// 予測できない遅い過渡を持つ transport(enet throttle ~13s)の宣言値
+	SteadyMinWarmup Duration `json:"steady_min_warmup,omitempty"`
+	Duration        Duration `json:"duration"`
+	Drain           Duration `json:"drain"`
 	DeadlineNS         uint64        `json:"deadline_ns"`
 	StalenessPeriodNS  uint64        `json:"staleness_period_ns"`
 	Netem              *NetemRegime  `json:"netem,omitempty"`
@@ -257,6 +264,13 @@ func (n NetemRegime) pairSpec() netops.PairSpec {
 	}
 	spec.ServerEgress = n.ServerEgress
 	spec.ClientEgress = n.ClientEgress
+	// 決定的 loss 注入(loss_seed)は netns 内で orchestrator 自身を
+	// `ip netns exec` するため、実行ファイル path を渡す
+	if n.ServerEgress.LossSeed != 0 || n.ClientEgress.LossSeed != 0 {
+		if exe, err := os.Executable(); err == nil {
+			spec.SelfExe = exe
+		}
+	}
 	return spec
 }
 

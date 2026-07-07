@@ -74,6 +74,20 @@ int bk_control_poll_schedule(bk_control *c, bk_schedule *out);
 // done を送る。stats_json は bk_metrics_dump_json の出力等。
 int bk_control_done(bk_control *c, const char *stats_json);
 
+// ---- 定常判定つき warmup(benchspec v2)------------------------------------
+//
+// schedule は暫定窓(start_at = ready + warmup 上限)として届く。client は
+// 受信直後から送信を開始し、累積送受カウントを周期報告(rate)する。
+// orchestrator が全 client の定常を検出すると確定窓(window)が届くので、
+// ローカルの schedule と plan の計測窓を差し替える。window が届かないまま
+// 暫定 start_at に達したら暫定窓のまま計測に入る。
+
+// rate を送る(sent/received は累積の生カウント)。戻り値 0=ok / -1=err。
+int bk_control_send_rate(bk_control *c, uint64_t sent, uint64_t received);
+// window の非ブロッキング確認。受信したら io を確定窓で上書きし window_ack を
+// 返信して 1。未着 0 / エラー -1。schedule 受信後にのみ呼ぶこと。
+int bk_control_poll_window(bk_control *c, bk_schedule *io);
+
 // ---- 送信計画(slot planner)------------------------------------------------
 
 // 1 stream = 1 (class, distribution, rate) の送信系列。client は conn ごとに
@@ -98,6 +112,10 @@ typedef struct bk_plan bk_plan;
 bk_plan *bk_plan_new(const bk_stream *streams, int n_streams, uint64_t start_ns,
                      uint64_t measure_start_ns, uint64_t measure_stop_ns);
 void bk_plan_free(bk_plan *p);
+// 計測窓を差し替える(benchspec v2 の window 受信時)。measure bit は slot 生成時
+// 評価なので、旧窓にまだ達していなければ遡及の不整合は起きない。
+void bk_plan_set_window(bk_plan *p, uint64_t measure_start_ns,
+                        uint64_t measure_stop_ns);
 
 // now までに due になった slot を1つ返す(なければ false)。due が複数あれば
 // sched_ts 順。呼び出し側は send するか、coalesce するなら未送信として
@@ -167,9 +185,36 @@ void bk_metrics_counts(const bk_metrics *m, bool must_deliver,
                        bk_class_counts *out);
 // staleness の percentile(ns)。p は 0.0-1.0。サンプルがなければ 0。
 uint64_t bk_metrics_staleness_pctl(const bk_metrics *m, double p);
+// update gap((origin, class) の latest-value が前進した受信同士の間隔)の
+// percentile(ns)。「ロス/HoL 事象1回あたりの空白時間」に対応する
+// 事象アライン指標。窓全体の staleness p99 より事象数に対して安定
+uint64_t bk_metrics_update_gap_pctl(const bk_metrics *m, double p);
 // sched 起点 latency percentile(ns)。class 別。
 uint64_t bk_metrics_latency_pctl(const bk_metrics *m, bool must_deliver,
                                  double p);
+// 生カウント(計測 bit 無関係の累積)。rate 報告(benchspec v2)用。
+// 不要な出力は NULL でよい。
+void bk_metrics_raw_counts(const bk_metrics *m, uint64_t *slots,
+                           uint64_t *submitted, uint64_t *recv_measured,
+                           uint64_t *recv_unmeasured);
+
+// ---- 定常判定つき warmup の client ループヘルパ(benchspec v2)--------------
+
+// rate の周期送信(250ms)と window の受信を1呼び出しにまとめる。
+// sent/received は bk_metrics_raw_counts の submitted / (recv_measured +
+// recv_unmeasured) の累積値。metrics をロックで守る実装(msquic 等)でも
+// 使えるよう、値渡しにしてある(呼び出し側が自分の同期規約で読む)。
+// window 受信時は schedule をその場で確定窓に上書きして 1 を返すので、
+// 呼び出し側は自分の全 plan に bk_plan_set_window を適用すること。
+// 窓確定後(window 受信 or 暫定 start_at 到達)は何もしない。
+// 戻り値: 1=window 受信(schedule 更新済み)/ 0=継続 / -1=制御チャネルエラー。
+typedef struct {
+  uint64_t next_rate_ns;  // 0 なら初回呼び出し時に now+interval で初期化
+  bool window_final;
+} bk_steady;
+
+int bk_steady_tick(bk_steady *st, bk_control *c, uint64_t sent,
+                   uint64_t received, bk_schedule *schedule, uint64_t now_ns);
 
 #ifdef __cplusplus
 }

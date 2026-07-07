@@ -462,7 +462,7 @@ class ClientApp {
       }
     }
 
-    int rc = run_schedule(schedule);
+    int rc = run_schedule(control, schedule);
 
     char default_metrics_path[128];
     const char *metrics_path =
@@ -671,10 +671,11 @@ class ClientApp {
     return connected_count_.load(std::memory_order_relaxed) == cfg_.conns;
   }
 
-  int run_schedule(const bk_schedule &schedule) {
+  int run_schedule(bk_control *control, bk_schedule schedule) {
     std::vector<uint8_t> payload(std::max(cfg_.payload_lt, cfg_.payload_md), 0);
     bool marked_unsent = false;
     int rc = 0;
+    bk_steady steady = {0, false};
 
     while (bk_now_ns() < schedule.drain_until_ns) {
       uint64_t now = bk_now_ns();
@@ -682,6 +683,32 @@ class ClientApp {
         std::fprintf(stderr, "msquic connection failed during run\n");
         rc = -1;
         break;
+      }
+
+      // 定常判定つき warmup(benchspec v2): rate 報告と確定窓(window)の受信。
+      // raw counts は metrics_mu_ 下で読む(msquic は callback スレッドが書く)
+      if (control != nullptr) {
+        uint64_t raw_submitted = 0;
+        uint64_t raw_rm = 0;
+        uint64_t raw_ru = 0;
+        {
+          std::lock_guard<std::mutex> lock(metrics_mu_);
+          bk_metrics_raw_counts(metrics_, nullptr, &raw_submitted, &raw_rm,
+                                &raw_ru);
+        }
+        const int sr = bk_steady_tick(&steady, control, raw_submitted,
+                                      raw_rm + raw_ru, &schedule, now);
+        if (sr < 0) {
+          std::fprintf(stderr, "benchkit steady tick failed\n");
+          rc = -1;
+          break;
+        }
+        if (sr == 1) {
+          for (ClientConn *conn : conns_) {
+            bk_plan_set_window(conn->plan, schedule.start_at_ns,
+                               schedule.stop_at_ns);
+          }
+        }
       }
 
       if (now >= schedule.start_at_ns && now < schedule.stop_at_ns) {
