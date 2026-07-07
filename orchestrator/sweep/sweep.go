@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/neguse/rudp-bench/orchestrator/run"
@@ -245,6 +246,22 @@ func (s *Sweep) Run(ctx context.Context) ([]CellRecord, error) {
 			rec, err := s.runPoint(ctx, cell.Transport, cell.Workload, conns)
 			if err != nil {
 				return PointOutcome{}, err
+			}
+			// 測定不成立(インフラ故障・環境不成立)は break でも censored でも
+			// ないので1回だけ再測する(再生計画 D3)。再測も不成立なら
+			// censored 扱いで打ち切り、原因に invalid を残す(誤って「server の
+			// break」として capacity に載せない)
+			if strings.HasPrefix(rec.Judgment.Cause, "invalid:") {
+				fmt.Fprintf(os.Stderr, "[sweep] %s invalid — retrying once: %s\n",
+					pointKey(cell.Transport, cell.Workload, s.cfg.Regime, conns), rec.Judgment.Cause)
+				delete(s.cache, pointKey(cell.Transport, cell.Workload, s.cfg.Regime, conns))
+				rec, err = s.runPoint(ctx, cell.Transport, cell.Workload, conns)
+				if err != nil {
+					return PointOutcome{}, err
+				}
+				if strings.HasPrefix(rec.Judgment.Cause, "invalid:") {
+					return PointOutcome{Censored: true, Cause: "measurement_invalid: " + rec.Judgment.Cause}, nil
+				}
 			}
 			return PointOutcome{OK: rec.Judgment.OK, Censored: rec.Judgment.Censored, Cause: rec.Judgment.Cause}, nil
 		}

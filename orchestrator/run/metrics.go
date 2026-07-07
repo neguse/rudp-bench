@@ -64,7 +64,9 @@ type MergedMetrics struct {
 	Histogram   HistogramLayout           `json:"histogram"`
 	Classes     map[string]ClassAggregate `json:"classes"`
 	StalenessNS Histogram                 `json:"staleness_ns"`
-	Raw         RawCounts                 `json:"raw"`
+	// update gap: latest-value が前進した受信同士の間隔(事象アライン指標)
+	UpdateGapNS Histogram `json:"update_gap_ns"`
+	Raw         RawCounts `json:"raw"`
 }
 
 type metricsFile struct {
@@ -72,6 +74,7 @@ type metricsFile struct {
 	Histogram   HistogramLayout        `json:"histogram"`
 	Classes     map[string]classMetric `json:"classes"`
 	StalenessNS Histogram              `json:"staleness_ns"`
+	UpdateGapNS Histogram              `json:"update_gap_ns"`
 	Raw         RawCounts              `json:"raw"`
 }
 
@@ -160,6 +163,12 @@ func (m *MergedMetrics) add(file metricsFile) error {
 	if err := addHistogram(&m.StalenessNS, file.StalenessNS, m.Histogram); err != nil {
 		return fmt.Errorf("staleness_ns: %w", err)
 	}
+	// update_gap_ns を出さない実装(移行中の client)は欠落を許容する
+	if len(file.UpdateGapNS.Bins) > 0 {
+		if err := addHistogram(&m.UpdateGapNS, file.UpdateGapNS, m.Histogram); err != nil {
+			return fmt.Errorf("update_gap_ns: %w", err)
+		}
+	}
 	m.Raw.Slots += file.Raw.Slots
 	m.Raw.Submitted += file.Raw.Submitted
 	m.Raw.RecvMeasured += file.Raw.RecvMeasured
@@ -182,6 +191,7 @@ func (m *MergedMetrics) finalize() error {
 		m.Classes[name] = c
 	}
 	finalizeHistogram(&m.StalenessNS, m.Histogram)
+	finalizeHistogram(&m.UpdateGapNS, m.Histogram)
 	return nil
 }
 

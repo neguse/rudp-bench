@@ -66,7 +66,8 @@ func TestPlanProbes(t *testing.T) {
 
 func TestJudgeProbe(t *testing.T) {
 	mk := func(expect string, ok, censored bool) Probe {
-		p := Probe{Expect: expect, Judgment: sweep.Judgment{OK: ok, Censored: censored, Cause: "x"}}
+		p := Probe{Expect: expect, Verdict: "VALID",
+			Judgment: sweep.Judgment{OK: ok, Censored: censored, Cause: "x"}}
 		judgeProbe(&p)
 		return p
 	}
@@ -87,5 +88,24 @@ func TestJudgeProbe(t *testing.T) {
 		if c.p.Outcome != c.want {
 			t.Fatalf("case %d: outcome=%s want=%s (%+v)", i, c.p.Outcome, c.want, c.p)
 		}
+	}
+}
+
+// 測定不成立(validity gate 不成立)は expect にかかわらず INVALID に分離され、
+// 漂移(DRIFT)として数えられないこと。
+func TestJudgeProbeInvalid(t *testing.T) {
+	for _, expect := range []string{"ok", "fail", "bound"} {
+		p := Probe{Expect: expect, Verdict: "INVALID",
+			Judgment: sweep.Judgment{OK: false, Cause: "invalid: sampler failed"}}
+		judgeProbe(&p)
+		if p.Outcome != "INVALID" {
+			t.Fatalf("expect=%s: outcome=%s want=INVALID (%+v)", expect, p.Outcome, p)
+		}
+	}
+	// verdict 未設定(単体テスト経路)は従来どおり判定に進む
+	p := Probe{Expect: "ok", Judgment: sweep.Judgment{OK: true}}
+	judgeProbe(&p)
+	if p.Outcome != "PASS" {
+		t.Fatalf("no-verdict probe: outcome=%s want=PASS", p.Outcome)
 	}
 }

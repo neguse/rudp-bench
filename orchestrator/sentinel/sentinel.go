@@ -42,7 +42,10 @@ type Config struct {
 	Workloads []string     `json:"workloads"`
 	Regimes   []RegimeSpec `json:"regimes"`
 	// プローブの計測時間(短い固定値。既定 30s)
-	Duration          run.Duration `json:"duration,omitempty"`
+	Duration run.Duration `json:"duration,omitempty"`
+	// RecheckOff: true で flap 政策(乖離プローブの即時再測 → 2回連続で
+	// のみ報知)を無効化する。既定は有効
+	RecheckOff        bool         `json:"recheck_off,omitempty"`
 	Warmup            run.Duration `json:"warmup"`
 	Drain             run.Duration `json:"drain"`
 	DeadlineNS        uint64       `json:"deadline_ns"`
@@ -81,17 +84,20 @@ type Probe struct {
 
 	Verdict  string         `json:"verdict,omitempty"`
 	Judgment sweep.Judgment `json:"judgment,omitempty"`
-	Outcome  string         `json:"outcome,omitempty"` // PASS / DRIFT / ERROR
-	Note     string         `json:"note,omitempty"`
+	// Outcome: PASS(基準どおり)/ DRIFT(測定成立・基準から乖離)/
+	// INVALID(測定不成立 — 環境・インフラ起因。漂移とは別集計し、
+	// 終了コードも分ける。全滅時に「全点漂移」と誤読させないため)
+	Outcome string `json:"outcome,omitempty"`
+	Note    string `json:"note,omitempty"`
 }
 
 // PlanProbes は基準 capacity.json から番兵点を導く:
-// - 正直な break セル → capacity の 0.9 倍(expect ok)と break の 1.15 倍
-//   (expect fail)の2点。**際そのものは突かない** — 境界上の点は run 間の
-//   自然なゆらぎ(IQR)で毎回パタつくため、日常スモークの感度は
-//   「±10-15% を超える漂移の検知」に置く
-// - censored / range-limited セル → 下限点1点(expect bound)
-// - capacity 0 のセル → break 点(= min probe)1点(expect fail)
+//   - 正直な break セル → capacity の 0.9 倍(expect ok)と break の 1.15 倍
+//     (expect fail)の2点。**際そのものは突かない** — 境界上の点は run 間の
+//     自然なゆらぎ(IQR)で毎回パタつくため、日常スモークの感度は
+//     「±10-15% を超える漂移の検知」に置く
+//   - censored / range-limited セル → 下限点1点(expect bound)
+//   - capacity 0 のセル → break 点(= min probe)1点(expect fail)
 func PlanProbes(cfg Config) ([]Probe, error) {
 	var probes []Probe
 	for _, reg := range cfg.Regimes {
@@ -167,6 +173,14 @@ func loadCapacityCells(path string) (map[string]sweep.CellRecord, error) {
 
 // judgeProbe は実測と期待の突き合わせ。
 func judgeProbe(p *Probe) {
+	// 測定不成立(validity gate 不成立 = sampler 故障・プロセス即死・
+	// 環境セットアップ失敗など)は期待との突き合わせ以前の問題なので、
+	// 漂移判定に入れず INVALID として分離する
+	if p.Verdict != "" && p.Verdict != run.VerdictValid {
+		p.Outcome = "INVALID"
+		p.Note = "測定不成立: " + p.Judgment.Cause
+		return
+	}
 	j := p.Judgment
 	switch p.Expect {
 	case "ok":
@@ -203,18 +217,19 @@ func judgeProbe(p *Probe) {
 	}
 }
 
-// Run は番兵点を順に実行し、sentinel.json と PASS/DRIFT 表を出力する。
-func Run(ctx context.Context, cfg Config) (int, error) {
+// Run は番兵点を順に実行し、sentinel.json と PASS/DRIFT/INVALID 表を出力する。
+// 戻り値は (drift数, invalid数, err)。
+func Run(ctx context.Context, cfg Config) (int, int, error) {
 	r, err := rig.Load(cfg.Rig)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	probes, err := PlanProbes(cfg)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	regimes := map[string]RegimeSpec{}
@@ -223,75 +238,121 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 	}
 	gateDone := map[string]bool{}
 
-	drift := 0
 	for i := range probes {
 		p := &probes[i]
 		if ctx.Err() != nil {
-			return drift, ctx.Err()
+			drift, invalid := countOutcomes(probes)
+			return drift, invalid, ctx.Err()
 		}
-		spec := cfg.Transports[p.Transport]
-		reg := regimes[p.Regime]
-		runDir := filepath.Join(cfg.OutputDir, "runs",
-			fmt.Sprintf("%s-%s-%s-c%d", p.Regime, p.Transport, p.Workload, p.Conns))
-		rcfg := run.RunConfig{
-			Transport:         p.Transport,
-			Workload:          p.Workload,
-			ServerCommand:     spec.ServerCommand,
-			ClientCommand:     spec.ClientCommand,
-			ClientProcs:       spec.ClientProcs,
-			SchedIsMeasurand:  spec.SchedIsMeasurand,
-			TotalConns:        p.Conns,
-			Warmup:            cfg.Warmup,
-			Duration:          probeDuration(cfg, reg),
-			Drain:             cfg.Drain,
-			DeadlineNS:        cfg.DeadlineNS,
-			StalenessPeriodNS: cfg.StalenessPeriodNS,
-			Netem:             reg.Netem,
-			NetemGateOff:      gateDone[p.Regime],
-			ServerCPUs:        r.ServerCPUs,
-			ClientCPUs:        r.ClientCPUs,
-			OutputDir:         runDir,
-		}
-		rcfg, err := rcfg.Prepare()
-		if err != nil {
-			p.Outcome, p.Note = "ERROR", err.Error()
-			drift++
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "[sentinel] %s/%s/%s c%d (expect %s)...\n",
-			p.Regime, p.Transport, p.Workload, p.Conns, p.Expect)
-		result, err := run.Run(ctx, rcfg)
-		if err != nil {
-			p.Outcome, p.Note = "ERROR", err.Error()
-			drift++
-			continue
-		}
-		if reg.Netem != nil && result.Netem != nil && result.Netem.Gate != nil && result.Netem.Gate.OK() {
-			gateDone[p.Regime] = true
-		}
-		w, _ := run.LookupWorkload(p.Workload)
-		p.Verdict = result.Verdict
-		p.Judgment = sweep.Judge(result, w, p.Conns, reg.Netem, cfg.StalenessPeriodNS)
-		judgeProbe(p)
-		if p.Outcome != "PASS" {
-			drift++
-		}
+		runOneProbe(ctx, cfg, r, regimes, gateDone, p, "")
 		fmt.Fprintf(os.Stderr, "[sentinel] → %s %s\n", p.Outcome, p.Note)
 	}
+
+	// flap 政策: 単発の乖離では報知しない。DRIFT / INVALID をその場で1回だけ
+	// 再測し、再測が PASS なら FLAP(確率的ゆらぎ)、再び乖離なら DRIFT 確定。
+	// 境界薄マージンセルの偽報知(~10-20%/probe)を落とすための2回連続条件
+	if !cfg.RecheckOff {
+		for i := range probes {
+			p := &probes[i]
+			if ctx.Err() != nil {
+				drift, invalid := countOutcomes(probes)
+				return drift, invalid, ctx.Err()
+			}
+			if p.Outcome == "PASS" {
+				continue
+			}
+			firstOutcome, firstNote := p.Outcome, p.Note
+			fmt.Fprintf(os.Stderr, "[sentinel] recheck %s/%s/%s c%d (was %s)...\n",
+				p.Regime, p.Transport, p.Workload, p.Conns, firstOutcome)
+			runOneProbe(ctx, cfg, r, regimes, gateDone, p, "-recheck")
+			if p.Outcome == "PASS" {
+				p.Outcome = "FLAP"
+				p.Note = "初回 " + firstOutcome + "(" + firstNote + ")、再測 PASS — 単発ゆらぎとして報知しない"
+			} else {
+				p.Note = "2回連続: " + p.Note
+			}
+			fmt.Fprintf(os.Stderr, "[sentinel] → %s %s\n", p.Outcome, p.Note)
+		}
+	}
+	drift, invalid := countOutcomes(probes)
 
 	data, err := json.MarshalIndent(struct {
 		At     time.Time `json:"at"`
 		Probes []Probe   `json:"probes"`
 	}{time.Now(), probes}, "", " ")
 	if err != nil {
-		return drift, err
+		return drift, invalid, err
 	}
 	if err := os.WriteFile(filepath.Join(cfg.OutputDir, "sentinel.json"), append(data, '\n'), 0o644); err != nil {
-		return drift, err
+		return drift, invalid, err
 	}
 
 	fmt.Println(RenderTable(probes))
-	return drift, nil
+	return drift, invalid, nil
+}
+
+// runOneProbe は1点を実測して p の Verdict/Judgment/Outcome を更新する。
+// dirSuffix は再測時の出力ディレクトリ分離用。
+func runOneProbe(ctx context.Context, cfg Config, r rig.Rig,
+	regimes map[string]RegimeSpec, gateDone map[string]bool, p *Probe,
+	dirSuffix string) {
+	spec := cfg.Transports[p.Transport]
+	reg := regimes[p.Regime]
+	runDir := filepath.Join(cfg.OutputDir, "runs",
+		fmt.Sprintf("%s-%s-%s-c%d%s", p.Regime, p.Transport, p.Workload, p.Conns, dirSuffix))
+	rcfg := run.RunConfig{
+		Transport:         p.Transport,
+		Workload:          p.Workload,
+		ServerCommand:     spec.ServerCommand,
+		ClientCommand:     spec.ClientCommand,
+		ClientProcs:       spec.ClientProcs,
+		SchedIsMeasurand:  spec.SchedIsMeasurand,
+		TotalConns:        p.Conns,
+		Warmup:            cfg.Warmup,
+		Duration:          probeDuration(cfg, reg),
+		Drain:             cfg.Drain,
+		DeadlineNS:        cfg.DeadlineNS,
+		StalenessPeriodNS: cfg.StalenessPeriodNS,
+		Netem:             reg.Netem,
+		NetemGateOff:      gateDone[p.Regime],
+		ServerCPUs:        r.ServerCPUs,
+		ClientCPUs:        r.ClientCPUs,
+		OutputDir:         runDir,
+	}
+	rcfg, err := rcfg.Prepare()
+	if err != nil {
+		p.Outcome, p.Note = "INVALID", "測定不成立(prepare): "+err.Error()
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[sentinel] %s/%s/%s c%d (expect %s)...\n",
+		p.Regime, p.Transport, p.Workload, p.Conns, p.Expect)
+	result, err := run.Run(ctx, rcfg)
+	if err != nil {
+		p.Outcome, p.Note = "INVALID", "測定不成立(run): "+err.Error()
+		return
+	}
+	if reg.Netem != nil && result.Netem != nil && result.Netem.Gate != nil && result.Netem.Gate.OK() {
+		gateDone[p.Regime] = true
+	}
+	w, _ := run.LookupWorkload(p.Workload)
+	p.Verdict = result.Verdict
+	p.Note = ""
+	p.Judgment = sweep.Judge(result, w, p.Conns, reg.Netem, cfg.StalenessPeriodNS)
+	judgeProbe(p)
+}
+
+// countOutcomes は最終 outcome から (drift, invalid) を数える。FLAP は報知しない。
+func countOutcomes(probes []Probe) (drift, invalid int) {
+	for _, p := range probes {
+		switch p.Outcome {
+		case "PASS", "FLAP", "":
+		case "INVALID":
+			invalid++
+		default:
+			drift++
+		}
+	}
+	return drift, invalid
 }
 
 // RenderTable は PASS/DRIFT の一覧表。

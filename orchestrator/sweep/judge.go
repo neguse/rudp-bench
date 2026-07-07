@@ -18,6 +18,11 @@ const (
 	// stalenessAllowanceIntervals: staleness p99 ≤ floor + N × 送信間隔
 	// (profiles.md の平面 gate 規則: N=1)
 	stalenessAllowanceIntervals = 1
+	// farmCPUSaturation: client farm を「計算資源律速」とみなす、割当論理 CPU
+	// に対する使用率のしきい値。gate 失敗の censoring はこれを超えた場合のみ
+	// (ledger #6。CPU が暇なのに送信が遅い = transport client 側の stall で
+	// あり、farm のせいにしない — 再生計画 Phase 1-5)
+	farmCPUSaturation = 0.85
 )
 
 // Judgment は 1 run(1 点)の capacity 判定。
@@ -175,16 +180,34 @@ func Judge(result *run.Result, w run.Workload, totalConns int, netem *run.NetemR
 			causes = append(causes, fmt.Sprintf("staleness_p99=%dms over floor(%dms)+%d interval", st.P99NS/1_000_000, j.FloorStaleNS/1_000_000, stalenessAllowanceIntervals))
 		}
 
-		// farm 十分性: pacing 遅延(design spec の3点セットの1つ、v1 client_tick
-		// gate の v2 版)。**失敗の帰属フィルタ**であり単独 gate ではない —
-		// end-to-end が予算内なら client の sched 揺れは結果が吸収済み。
-		// gate が落ち、かつ client 自身の送信遅延が staleness 予算を超えている
-		// 場合のみ「劣化を server に帰属できない」→ censored。
-		if len(causes) > 0 && j.SchedP99 > budget && !result.Config.SchedIsMeasurand {
-			j.Censored = true
-			j.Cause = fmt.Sprintf("farm_limited: client sched p99=%dms exceeds staleness budget %dms (pacing stall); %s",
-				j.SchedP99/1_000_000, budget/1_000_000, strings.Join(causes, "; "))
-			return j
+		// farm 十分性の帰属フィルタ(**失敗の帰属**であり単独 gate ではない)。
+		// 旧実装は sched 起点 latency p99(= end-to-end。loss 下では transport
+		// の HoL/CC がそのまま載る)を「client の送信遅延」とみなして censoring
+		// しており、loss regime で transport 側 stall が farm 律速に誤帰属されて
+		// いた(ブロック間で censored ≥N と正直 0 に割れる `!` の主因)。
+		// v2: client farm の CPU 実測で分離する —
+		//   - CPU 飽和 → farm の計算資源律速。censored(rig の限界)
+		//   - CPU が暇なのに sched latency が予算超過 → transport client 側の
+		//     stall(= その transport を選んだときの実挙動)。censoring せず
+		//     正直に break、原因に client_stall を開示
+		if len(causes) > 0 && !result.Config.SchedIsMeasurand {
+			util, known := clientCPUUtilization(result)
+			switch {
+			case known && util >= farmCPUSaturation:
+				j.Censored = true
+				j.Cause = fmt.Sprintf("farm_limited: client farm cpu=%.0f%% of allotted CPUs (saturated); %s",
+					util*100, strings.Join(causes, "; "))
+				return j
+			case j.SchedP99 > budget:
+				note := fmt.Sprintf("client_stall: sched p99=%dms over staleness budget %dms with idle farm",
+					j.SchedP99/1_000_000, budget/1_000_000)
+				if known {
+					note += fmt.Sprintf(" (cpu=%.0f%%)", util*100)
+				} else {
+					note += " (cpu unknown)"
+				}
+				causes = append(causes, note)
+			}
 		}
 	}
 
@@ -197,4 +220,76 @@ func Judge(result *run.Result, w run.Workload, totalConns int, netem *run.NetemR
 	}
 	j.OK = true
 	return j
+}
+
+// clientCPUUtilization は計測窓内の client プロセス群の CPU 使用率を、
+// 割当論理 CPU 数に対する割合で返す(known=false はサンプル不足)。
+func clientCPUUtilization(result *run.Result) (float64, bool) {
+	if result.Control == nil || len(result.Samples) == 0 {
+		return 0, false
+	}
+	windowNS := result.Control.Schedule.StopAtNS - result.Control.Schedule.StartAtNS
+	if windowNS <= 0 {
+		return 0, false
+	}
+	clientPIDs := map[int]bool{}
+	for _, p := range result.Processes {
+		if p.Role == "client" {
+			clientPIDs[p.PID] = true
+		}
+	}
+	if len(clientPIDs) == 0 {
+		return 0, false
+	}
+	var busyNS int64
+	seen := false
+	for _, series := range result.Samples {
+		if !clientPIDs[series.PID] || len(series.Samples) < 2 {
+			continue
+		}
+		first := series.Samples[0]
+		last := series.Samples[len(series.Samples)-1]
+		if span := last.TimeNS - first.TimeNS; span > 0 {
+			// サンプル区間を窓全体に外挿(窓端の欠けを補正)
+			busyNS += int64(float64(last.CPUTimeNS-first.CPUTimeNS) / float64(span) * float64(windowNS))
+			seen = true
+		}
+	}
+	if !seen {
+		return 0, false
+	}
+	nCPUs := countCPUList(result.Config.ClientCPUs)
+	if nCPUs == 0 {
+		return 0, false
+	}
+	return float64(busyNS) / (float64(windowNS) * float64(nCPUs)), true
+}
+
+// countCPUList は taskset -c 形式("3,4,11-14" 等)の CPU 数を数える。
+func countCPUList(list string) int {
+	if list == "" {
+		return 0
+	}
+	n := 0
+	for _, part := range strings.Split(list, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if lo, hi, ok := strings.Cut(part, "-"); ok {
+			var a, b int
+			if _, err := fmt.Sscanf(lo, "%d", &a); err != nil {
+				continue
+			}
+			if _, err := fmt.Sscanf(hi, "%d", &b); err != nil {
+				continue
+			}
+			if b >= a {
+				n += b - a + 1
+			}
+		} else {
+			n++
+		}
+	}
+	return n
 }

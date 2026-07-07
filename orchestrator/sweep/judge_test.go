@@ -4,8 +4,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/netops"
 	"github.com/neguse/rudp-bench/orchestrator/run"
+	"github.com/neguse/rudp-bench/orchestrator/sampler"
 )
 
 func lossWorstNetem() *run.NetemRegime {
@@ -190,24 +192,57 @@ func TestJudgeNoNetemFloors(t *testing.T) {
 	}
 }
 
-func TestJudgePacingStallCensored(t *testing.T) {
-	// client 自身の送信遅延が staleness 予算を超える → server に帰属不能 → censored
+// withClientCPU は Result に client farm の CPU 実測(計測窓 10s、論理 8 CPU、
+// 使用率 util)を付与する。
+func withClientCPU(res *run.Result, util float64) *run.Result {
+	const windowNS = int64(10_000_000_000)
+	res.Control = &control.Result{Schedule: control.ScheduleMessage{
+		StartAtNS: 1_000_000_000, StopAtNS: 1_000_000_000 + windowNS}}
+	res.Config.ClientCPUs = "3,4,5,6,11,12,13,14" // 8 CPUs
+	res.Processes = []run.ProcessResult{{Role: "client", PID: 100}}
+	busy := int64(util * float64(windowNS) * 8)
+	res.Samples = []sampler.Series{{PID: 100, Samples: []sampler.Sample{
+		{TimeNS: 1_000_000_000, CPUTimeNS: 0},
+		{TimeNS: 1_000_000_000 + windowNS, CPUTimeNS: busy},
+	}}}
+	return res
+}
+
+func TestJudgeFarmCPUSaturatedCensored(t *testing.T) {
+	// gate 失敗 + client farm CPU 飽和 → farm の計算資源律速 → censored
 	w, _ := run.LookupWorkload("r10p128") // interval 100ms、netem なし予算 = 110+100 = 210ms
-	res := validResult(0.99, 1.0, 819_000_000)
+	res := withClientCPU(validResult(0.99, 1.0, 819_000_000), 0.95)
+	j := Judge(res, w, 66, nil, samplePeriodNS)
+	if !j.Censored || !strings.Contains(j.Cause, "farm_limited") {
+		t.Fatalf("expected farm CPU censor: %+v", j)
+	}
+}
+
+func TestJudgeClientStallNotCensored(t *testing.T) {
+	// gate 失敗 + farm は暇 + sched latency 予算超過 → transport client 側の
+	// stall。censoring せず正直に break(原因に client_stall を開示)
+	w, _ := run.LookupWorkload("r10p128")
+	res := withClientCPU(validResult(0.99, 1.0, 819_000_000), 0.10)
 	cls := res.Metrics.Classes["loss_tolerant"]
 	cls.LatencySchedNS = run.Histogram{Count: 100, P99NS: 819_000_000}
 	res.Metrics.Classes["loss_tolerant"] = cls
 	j := Judge(res, w, 66, nil, samplePeriodNS)
-	if !j.Censored || !strings.Contains(j.Cause, "pacing stall") {
-		t.Fatalf("expected pacing-stall censor: %+v", j)
+	if j.Censored || j.OK {
+		t.Fatalf("idle-farm stall must be an honest break: %+v", j)
 	}
+	if !strings.Contains(j.Cause, "client_stall") {
+		t.Fatalf("expected client_stall disclosure: %+v", j)
+	}
+}
 
+func TestJudgeSchedNoiseWithinBudgetStaysOK(t *testing.T) {
 	// end-to-end が予算内なら sched が高くても censor しない(帰属フィルタ)
-	res = validResult(0.99, 1.0, 150_000_000) // 予算 210ms 内
-	cls = res.Metrics.Classes["loss_tolerant"]
+	w, _ := run.LookupWorkload("r10p128")
+	res := validResult(0.99, 1.0, 150_000_000) // 予算 210ms 内
+	cls := res.Metrics.Classes["loss_tolerant"]
 	cls.LatencySchedNS = run.Histogram{Count: 100, P99NS: 500_000_000}
 	res.Metrics.Classes["loss_tolerant"] = cls
-	j = Judge(res, w, 66, nil, samplePeriodNS)
+	j := Judge(res, w, 66, nil, samplePeriodNS)
 	if !j.OK || j.Censored {
 		t.Fatalf("passing point must stay OK despite sched noise: %+v", j)
 	}

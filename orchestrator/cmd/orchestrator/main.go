@@ -52,8 +52,15 @@ func main() {
 		exitOnErr(err)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		drift, err := sentinel.Run(ctx, cfg)
+		drift, invalid, err := sentinel.Run(ctx, cfg)
 		exitOnErr(err)
+		// invalid(測定不成立)は drift(漂移)と別の終了コード。環境不成立の
+		// 全滅を「全点漂移」として検知させない。invalid が1つでもあれば
+		// 結果自体が信用できないので rc=4 を優先する
+		if invalid > 0 {
+			fmt.Fprintf(os.Stderr, "sentinel: %d probe(s) INVALID (measurement failed), %d drifted\n", invalid, drift)
+			os.Exit(4)
+		}
 		if drift > 0 {
 			fmt.Fprintf(os.Stderr, "sentinel: %d probe(s) drifted\n", drift)
 			os.Exit(3)
@@ -117,6 +124,10 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		exitOnErr(block.Run(ctx, cfg))
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "losstrace" {
+		losstraceMain(os.Args[2:])
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "isolate" {
