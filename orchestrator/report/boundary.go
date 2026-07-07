@@ -138,6 +138,7 @@ func (bd *BoundaryData) BoundaryTable(anchor, loadLabel string) string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n*セル = staleness p99 ms / 物理フロア ms(フロア = 遅延+バースト黒塗り+間隔+サンプル周期)。" +
-		"`inv` = validity gate 不成立。負荷 = " + loadLabel + "(conns は transport ごとに capacity@wired 比で決まる)。*\n")
+		"`inv` = validity gate 不成立。`0` = 計測窓内に measured update が1本も届かず標本ゼロ(崩壊の極値として読む)。" +
+		"負荷 = " + loadLabel + "(conns は transport ごとに capacity@wired 比で決まる)。*\n")
 	return b.String()
 }
