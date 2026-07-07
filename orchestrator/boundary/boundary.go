@@ -21,24 +21,30 @@ import (
 )
 
 type Config struct {
-	DelayMS   int       `json:"delay_ms"`
-	LossPcts  []float64 `json:"loss_pcts"`
-	BurstLens []float64 `json:"burst_lens"`
-	Anchors   []string  `json:"anchors"`
+	DelayMS int `json:"delay_ms"`
+	// LossSeedBase > 0 で決定的 loss 注入(netops/losstrace)。セルごとに
+	// (loss, burst) から導出した seed を使う — 同じセルは全 transport・全 run で
+	// 同じ落ち方を再生する(再生計画 D2)
+	LossSeedBase uint64    `json:"loss_seed_base,omitempty"`
+	LossPcts     []float64 `json:"loss_pcts"`
+	BurstLens    []float64 `json:"burst_lens"`
+	Anchors      []string  `json:"anchors"`
 	// 負荷アンカー: FloorConns = 無負荷極限、Fractions = capacity@wired 比
 	FloorConns int       `json:"floor_conns"`
 	Fractions  []float64 `json:"fractions"`
 	// capacity@wired の出典(sweep 出力の capacity.json)
-	CapacityJSON      string                         `json:"capacity_json"`
-	Transports        map[string]sweep.TransportSpec `json:"transports"`
-	Seed              int64                          `json:"seed"`
-	Warmup            run.Duration                   `json:"warmup"`
-	Drain             run.Duration                   `json:"drain"`
-	DeadlineNS        uint64                         `json:"deadline_ns"`
-	StalenessPeriodNS uint64                         `json:"staleness_period_ns"`
-	ServerCPUs        string                         `json:"server_cpus,omitempty"`
-	ClientCPUs        string                         `json:"client_cpus,omitempty"`
-	OutputDir         string                         `json:"output_dir"`
+	CapacityJSON string                         `json:"capacity_json"`
+	Transports   map[string]sweep.TransportSpec `json:"transports"`
+	Seed         int64                          `json:"seed"`
+	Warmup       run.Duration                   `json:"warmup"`
+	// SteadyWarmup: 定常判定つき warmup(benchspec v2)。Warmup は上限になる
+	SteadyWarmup      bool         `json:"steady_warmup,omitempty"`
+	Drain             run.Duration `json:"drain"`
+	DeadlineNS        uint64       `json:"deadline_ns"`
+	StalenessPeriodNS uint64       `json:"staleness_period_ns"`
+	ServerCPUs        string       `json:"server_cpus,omitempty"`
+	ClientCPUs        string       `json:"client_cpus,omitempty"`
+	OutputDir         string       `json:"output_dir"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -213,7 +219,15 @@ func (b *Boundary) cells() []cell {
 
 func (b *Boundary) netemFor(loss, burst float64) *run.NetemRegime {
 	egress := netops.Netem{DelayMS: b.cfg.DelayMS, LossPercent: loss, LossBurstLen: burst}
-	return &run.NetemRegime{ServerEgress: egress, ClientEgress: egress}
+	server, client := egress, egress
+	if b.cfg.LossSeedBase > 0 && loss > 0 {
+		// (loss, burst) ごとに固定の seed 対。cell 内の全 transport・全 load で
+		// 同じ trace が再生される(cross-transport 比較から乱数差が消える)
+		cell := uint64(loss*100)*1000 + uint64(burst*10)
+		server.LossSeed = b.cfg.LossSeedBase + cell*2
+		client.LossSeed = b.cfg.LossSeedBase + cell*2 + 1
+	}
+	return &run.NetemRegime{ServerEgress: server, ClientEgress: client}
 }
 
 func (b *Boundary) runPoint(ctx context.Context, c cell, loss, burst float64, load Load) (PointRecord, error) {
@@ -237,6 +251,8 @@ func (b *Boundary) runPoint(ctx context.Context, c cell, loss, burst float64, lo
 		ClientProcs:       spec.ClientProcs,
 		TotalConns:        load.Conns,
 		Warmup:            b.cfg.Warmup,
+		SteadyWarmup:      b.cfg.SteadyWarmup,
+		SteadyMinWarmup:   spec.SteadyMinWarmup,
 		Drain:             b.cfg.Drain,
 		DeadlineNS:        b.cfg.DeadlineNS,
 		StalenessPeriodNS: b.cfg.StalenessPeriodNS,

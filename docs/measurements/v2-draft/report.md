@@ -44,6 +44,14 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 > 出典としてのみ読むこと。詳細は
 > [再生計画](../../superpowers/specs/2026-07-07-v2-measurement-recovery.md)。
 
+<!-- generated:capacity-wired-v3 -->
+(Phase 3 の再測で生成 — benchspec v2 測定器・anchor 3 セル)
+<!-- /generated:capacity-wired-v3 -->
+
+<!-- generated:anchors-wired-v3 -->
+(Phase 3 の再測で生成)
+<!-- /generated:anchors-wired-v3 -->
+
 <!-- generated:capacity-wired -->
 | workload | enet | gns | litenetlib | msquic | websocket | magiconion |
 |---|---|---|---|---|---|---|
@@ -88,6 +96,19 @@ anchor セルには archetype の絶対予算(br 100ms / vr 150ms / video 150ms)
 
 *anchor 予算判定は探索済み capacity 点での近似(平面 gate で探索した点のみ使用)。*
 <!-- /generated:anchors-wired -->
+
+**capacity @ loss 1%×burst4(anchor のみ、決定的 trace 注入)** — loss-worst
+capacity の後継。実在する運用点(国際回線・モバイル級の 1% ロス)での収容数
+主張で、ロスは seed 固定の事前生成 trace(eBPF)で毎 run 同一に再生される
+(再生計画 Phase 1-2 / Phase 3)。測定器は benchspec v2(定常判定つき warmup):
+
+<!-- generated:capacity-loss1-b4 -->
+(Phase 3 の再測で生成)
+<!-- /generated:capacity-loss1-b4 -->
+
+<!-- generated:anchors-loss1-b4 -->
+(Phase 3 の再測で生成)
+<!-- /generated:anchors-loss1-b4 -->
 
 **capacity @ loss 最悪点(3%×burst16、anchor のみ)** — wired とのペアで
 環境劣化への頑健性を表す:

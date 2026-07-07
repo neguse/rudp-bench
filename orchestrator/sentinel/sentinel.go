@@ -45,7 +45,10 @@ type Config struct {
 	Duration run.Duration `json:"duration,omitempty"`
 	// RecheckOff: true で flap 政策(乖離プローブの即時再測 → 2回連続で
 	// のみ報知)を無効化する。既定は有効
-	RecheckOff        bool         `json:"recheck_off,omitempty"`
+	RecheckOff bool `json:"recheck_off,omitempty"`
+	// SteadyWarmup: 定常判定つき warmup(benchspec v2)。基準測定と同じ
+	// 設定にしないと窓の取り方の差が偽 drift になる
+	SteadyWarmup      bool         `json:"steady_warmup,omitempty"`
 	Warmup            run.Duration `json:"warmup"`
 	Drain             run.Duration `json:"drain"`
 	DeadlineNS        uint64       `json:"deadline_ns"`
@@ -309,6 +312,8 @@ func runOneProbe(ctx context.Context, cfg Config, r rig.Rig,
 		SchedIsMeasurand:  spec.SchedIsMeasurand,
 		TotalConns:        p.Conns,
 		Warmup:            cfg.Warmup,
+		SteadyWarmup:      cfg.SteadyWarmup,
+		SteadyMinWarmup:   spec.SteadyMinWarmup,
 		Duration:          probeDuration(cfg, reg),
 		Drain:             cfg.Drain,
 		DeadlineNS:        cfg.DeadlineNS,

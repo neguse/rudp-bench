@@ -24,6 +24,8 @@ type TransportSpec struct {
 	ClientProcs   int               `json:"client_procs"`
 	// TCP 系(blocking send)は true: sched 遅延を farm でなく transport に帰属
 	SchedIsMeasurand bool `json:"sched_is_measurand,omitempty"`
+	// 定常が見えてもこれより早く窓を開かない(遅い過渡の宣言。enet は 15s)
+	SteadyMinWarmup run.Duration `json:"steady_min_warmup,omitempty"`
 }
 
 type ConnsRange struct {
@@ -32,20 +34,22 @@ type ConnsRange struct {
 }
 
 type Config struct {
-	Regime            string                   `json:"regime"` // 表示・結果行用のラベル(wired 等)
-	Transports        map[string]TransportSpec `json:"transports"`
-	Workloads         []string                 `json:"workloads"`
-	Conns             ConnsRange               `json:"conns"`
-	Seed              int64                    `json:"seed"`
-	Warmup            run.Duration             `json:"warmup"`
-	Drain             run.Duration             `json:"drain"`
-	Duration          run.Duration             `json:"duration,omitempty"` // 0 = loss イベント規則で自動
-	DeadlineNS        uint64                   `json:"deadline_ns"`
-	StalenessPeriodNS uint64                   `json:"staleness_period_ns"`
-	Netem             *run.NetemRegime         `json:"netem,omitempty"`
-	ServerCPUs        string                   `json:"server_cpus,omitempty"`
-	ClientCPUs        string                   `json:"client_cpus,omitempty"`
-	OutputDir         string                   `json:"output_dir"`
+	Regime     string                   `json:"regime"` // 表示・結果行用のラベル(wired 等)
+	Transports map[string]TransportSpec `json:"transports"`
+	Workloads  []string                 `json:"workloads"`
+	Conns      ConnsRange               `json:"conns"`
+	Seed       int64                    `json:"seed"`
+	Warmup     run.Duration             `json:"warmup"`
+	// SteadyWarmup: 定常判定つき warmup(benchspec v2)。Warmup は上限になる
+	SteadyWarmup      bool             `json:"steady_warmup,omitempty"`
+	Drain             run.Duration     `json:"drain"`
+	Duration          run.Duration     `json:"duration,omitempty"` // 0 = loss イベント規則で自動
+	DeadlineNS        uint64           `json:"deadline_ns"`
+	StalenessPeriodNS uint64           `json:"staleness_period_ns"`
+	Netem             *run.NetemRegime `json:"netem,omitempty"`
+	ServerCPUs        string           `json:"server_cpus,omitempty"`
+	ClientCPUs        string           `json:"client_cpus,omitempty"`
+	OutputDir         string           `json:"output_dir"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -186,6 +190,8 @@ func (s *Sweep) runPoint(ctx context.Context, transport, workload string, conns 
 		ClientProcs:       spec.ClientProcs,
 		TotalConns:        conns,
 		Warmup:            s.cfg.Warmup,
+		SteadyWarmup:      s.cfg.SteadyWarmup,
+		SteadyMinWarmup:   spec.SteadyMinWarmup,
 		Duration:          s.cfg.Duration,
 		Drain:             s.cfg.Drain,
 		DeadlineNS:        s.cfg.DeadlineNS,
