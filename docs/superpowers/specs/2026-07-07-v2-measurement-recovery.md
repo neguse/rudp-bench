@@ -54,8 +54,8 @@ sentinel(定点再測チェック、26 条件、1 回 13 分)を同一環境で 
 
 ## 4. 計画
 
-> **進捗(2026-07-07)**: Phase 0 / Phase 1 完了(受け入れ実測値は各 Phase 末尾)。
-> Phase 2 実行中。
+> **進捗(2026-07-08)**: Phase 0–3 完了(受け入れ実測値は各 Phase 末尾)。
+> Phase 4(sentinel の v3 基準での 5 連走検証 + 継続運用手順)実行中。
 
 ### Phase 0: 衛生処置(半日)
 
@@ -153,6 +153,27 @@ p99 を支配していた(全セルで p99≈1016ms に張り付く)ため class
 - レポートの全表を新測定器の値で再生成
 - **完了条件**: ブロック間食い違いフラグ(`!`)がゼロ、全表が新測定器由来
 
+**Phase 3 の実測結果(2026-07-08)**:
+
+- capacity @ wired-v3 / 1%×b4 を anchor 3 セル × 6 transport で再測、
+  boundary-v3(2 anchor × loss {0.1,1,3}% × burst {1,16} × floor/q75)を
+  30s 窓・決定的 trace で再測。report の全 v3 表を再生成
+- **`!` フラグはゼロ**(単一測定器・単一パス。旧 N=3 ブロック間食い違いの
+  構造自体が消えた)。ただし表の解釈は Phase 2 の必要反復数に従う
+  (非崖 N=1、gate 際・TCP×loss は要 N≥3)
+- 途中で 3 つの測定器バグを発見・修正(いずれも新測定器を回して初めて出た):
+  1. **boundary の run duration が乱数 loss 前提の自動規則のまま**で、固定
+     trace 下では無意味に 120s 級に伸び boundary 一式が 6.5h 化。明示 30s に
+  2. **netem gate が決定的 trace のロス率をサンプル検証**していて、3%×burst16
+     が iperf3 の 3s 窓でバースト間(平均間隔 ~533 pkt)に当たり 0% を観測 →
+     全 3%×b16 セルが gate 不成立。trace egress は率チェックを skip(正しさは
+     losstrace 単体テスト + ping ビット一致で担保)、RTT 検証は維持
+  3. **update_gap が class 混合**で must-deliver 送信間隔(1Hz=1s)が p99 を
+     支配 → class 別に分離(Phase 2 の項参照)
+- 新測定器で見えた新知見: enet/msquic は broadcast 高 conns で **client 接続死
+  による crash 打ち切り**(ledger #8/#17)。`≥N (crash)` として farm 律速とは
+  別ラベルで開示。旧測定器では delivery gate が先に落ちて到達しなかった探索域
+
 ### Phase 4: 継続運用
 
 - sentinel を変更ごと(および日次 cron)に実行、基準は Phase 2/3 の集約値
@@ -177,5 +198,7 @@ p99 を支配していた(全セルで p99≈1016ms に張り付く)ため class
 | #6 farm 律速の機械判定 | Phase 1-5 |
 | #12 enet throttle の duration 依存 | Phase 1-2(固定 trace 化で条件が制御可能になる)+ 定常性チェックは事象アライン指標で代替 |
 | #13 gns client の pacing stall | Phase 1-5(誤帰属の解消)。stall 自体の改善は別件のまま |
-| #14 enet cold-start 二峰性 | Phase 1-1(定常判定化)。発生率 ~17% は 2026-07-07 の sentinel 反復で実測済み |
-| #15 sentinel 基準の単一ブロック参照 | Phase 2(基準を反復群の中央値へ) |
+| #14 enet cold-start 二峰性 | **解決** Phase 1-1(定常判定 + 最小 warmup 15s)。20 反復で単峰化を確認 |
+| #15 sentinel 基準の単一ブロック参照 | Phase 2–3(基準を v3 単一パスへ差し替え。sentinel 5 連走で偽報知ゼロを確認) |
+| #16 magiconion 持続 drift | **解決** 実回帰でなく #15 の基準側問題と切り分け |
+| #8/#17 enet/msquic client 接続死 | Phase 3 で crash 打ち切りとして開示。会計意味論の整理は残 |
