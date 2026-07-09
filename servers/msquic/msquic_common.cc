@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <string>
 
 namespace rudp_bench_msquic {
@@ -40,8 +41,28 @@ const QUIC_BUFFER *alpn() { return &kAlpn; }
 
 void apply_common_settings(QUIC_SETTINGS *settings) {
   std::memset(settings, 0, sizeof(*settings));
-  settings->IdleTimeoutMs = 30000;
+  // tune-to-plateau(全て upstream 公式ノブ。--describe の tuning に開示):
+  // - Idle/Disconnect timeout: DisconnectTimeoutMs 既定 16s は「最古の未 ACK
+  //   が 16s 未確認で QUIC_STATUS_CONNECTION_TIMEOUT」(loss_detection.c:
+  //   1853-1866)。過負荷で ACK が滞ると transport shutdown → client crash
+  //   (docs/ledger.md #17)の主経路。60s へ延長し、KeepAlive で片方向
+  //   無通信時の idle timeout も防ぐ
+  // - SendBufferingEnabled=FALSE: 既定 TRUE は StreamSend データを内部
+  //   バッファへ copy する(stream_send.c:264,468,661)。SendBuf を
+  //   SEND_COMPLETE まで保持する本実装では不要な copy
+  // - StreamRecvWindowDefault: 既定 64KB → 1MB(md fanout の flow control)
+  settings->IdleTimeoutMs = 60000;
   settings->IsSet.IdleTimeoutMs = TRUE;
+  settings->DisconnectTimeoutMs = 60000;
+  settings->IsSet.DisconnectTimeoutMs = TRUE;
+  settings->KeepAliveIntervalMs = 5000;
+  settings->IsSet.KeepAliveIntervalMs = TRUE;
+  settings->HandshakeIdleTimeoutMs = 30000;
+  settings->IsSet.HandshakeIdleTimeoutMs = TRUE;
+  settings->SendBufferingEnabled = FALSE;
+  settings->IsSet.SendBufferingEnabled = TRUE;
+  settings->StreamRecvWindowDefault = 1024 * 1024;
+  settings->IsSet.StreamRecvWindowDefault = TRUE;
   settings->PeerBidiStreamCount = 16384;
   settings->IsSet.PeerBidiStreamCount = TRUE;
   settings->DatagramReceiveEnabled = TRUE;
@@ -99,14 +120,11 @@ void print_describe() {
       "\"encryption\":true,"
       "\"max_payload_bytes\":1000,"
       "\"tuning\":["
-      "{\"knob\":\"QUIC_SETTINGS.CongestionControlAlgorithm\","
-      "\"value\":\"QUIC_CONGESTION_CONTROL_ALGORITHM_BBR\","
-      "\"upstream_ref\":\"MsQuic QUIC_SETTINGS.CongestionControlAlgorithm; "
-      "third_party/msquic/src/inc/msquic.h\"},"
-      "{\"knob\":\"QUIC_SETTINGS.DatagramReceiveEnabled\","
-      "\"value\":\"TRUE\","
-      "\"upstream_ref\":\"MsQuic QUIC_SETTINGS.DatagramReceiveEnabled and "
-      "RFC 9221 QUIC Datagrams\"}"
+      "\"cc=bbr\",\"datagram_receive=on\","
+      "\"disconnect_timeout=60s\",\"idle_timeout=60s\",\"keep_alive=5s\","
+      "\"send_buffering=off\",\"stream_recv_window=1MB\","
+      "\"shared-sendbuf-broadcast\",\"sendbuf-direct-write\","
+      "\"atomic-stats/cow-conns\""
       "]}");
 }
 
@@ -123,42 +141,73 @@ bool status_ok(QUIC_STATUS status, const char *what) {
   return false;
 }
 
-int send_datagram_payload(HQUIC conn, const void *data, size_t len) {
+SendBuf *send_buf_new(size_t len, int refs) {
   if (len > UINT32_MAX) {
-    return -1;
+    return nullptr;
   }
+  auto *buf = static_cast<SendBuf *>(std::malloc(sizeof(SendBuf) + len));
+  if (buf == nullptr) {
+    return nullptr;
+  }
+  new (&buf->refs) std::atomic<int>(refs);
+  buf->len = static_cast<uint32_t>(len);
+  return buf;
+}
+
+void send_buf_unref(SendBuf *buf) {
+  if (buf->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+    std::free(buf);
+  }
+}
+
+int send_datagram_buf(HQUIC conn, SendBuf *buf) {
   auto *ctx = new SendCtx();
-  ctx->data.assign(static_cast<const uint8_t *>(data),
-                   static_cast<const uint8_t *>(data) + len);
-  ctx->buffer.Buffer = ctx->data.data();
-  ctx->buffer.Length = static_cast<uint32_t>(ctx->data.size());
+  ctx->buf = buf;
+  ctx->buffer.Buffer = buf->data();
+  ctx->buffer.Length = buf->len;
   const QUIC_STATUS status =
       MsQuic->DatagramSend(conn, &ctx->buffer, 1, QUIC_SEND_FLAG_NONE, ctx);
   if (QUIC_FAILED(status)) {
     delete ctx;
+    send_buf_unref(buf);
     return -1;
   }
   return 0;
 }
 
-int send_stream_frame(HQUIC stream, const void *data, size_t len) {
-  if (len > UINT32_MAX) {
-    return -1;
-  }
+int send_stream_buf(HQUIC stream, SendBuf *buf) {
   auto *ctx = new SendCtx();
-  ctx->data.resize(sizeof(uint32_t) + len);
-  const uint32_t nlen = htonl(static_cast<uint32_t>(len));
-  std::memcpy(ctx->data.data(), &nlen, sizeof(nlen));
-  std::memcpy(ctx->data.data() + sizeof(nlen), data, len);
-  ctx->buffer.Buffer = ctx->data.data();
-  ctx->buffer.Length = static_cast<uint32_t>(ctx->data.size());
+  ctx->buf = buf;
+  ctx->buffer.Buffer = buf->data();
+  ctx->buffer.Length = buf->len;
   const QUIC_STATUS status =
       MsQuic->StreamSend(stream, &ctx->buffer, 1, QUIC_SEND_FLAG_NONE, ctx);
   if (QUIC_FAILED(status)) {
     delete ctx;
+    send_buf_unref(buf);
     return -1;
   }
   return 0;
+}
+
+int send_datagram_payload(HQUIC conn, const void *data, size_t len) {
+  SendBuf *buf = send_buf_new(len, 1);
+  if (buf == nullptr) {
+    return -1;
+  }
+  std::memcpy(buf->data(), data, len);
+  return send_datagram_buf(conn, buf);
+}
+
+int send_stream_frame(HQUIC stream, const void *data, size_t len) {
+  SendBuf *buf = send_buf_new(sizeof(uint32_t) + len, 1);
+  if (buf == nullptr) {
+    return -1;
+  }
+  const uint32_t nlen = htonl(static_cast<uint32_t>(len));
+  std::memcpy(buf->data(), &nlen, sizeof(nlen));
+  std::memcpy(buf->data() + sizeof(nlen), data, len);
+  return send_stream_buf(stream, buf);
 }
 
 void handle_datagram_send_state(QUIC_CONNECTION_EVENT *event) {
@@ -169,6 +218,7 @@ void handle_datagram_send_state(QUIC_CONNECTION_EVENT *event) {
   }
   auto *ctx =
       static_cast<SendCtx *>(event->DATAGRAM_SEND_STATE_CHANGED.ClientContext);
+  send_buf_unref(ctx->buf);
   delete ctx;
   event->DATAGRAM_SEND_STATE_CHANGED.ClientContext = nullptr;
 }
@@ -178,6 +228,7 @@ void handle_stream_send_complete(QUIC_STREAM_EVENT *event) {
     return;
   }
   auto *ctx = static_cast<SendCtx *>(event->SEND_COMPLETE.ClientContext);
+  send_buf_unref(ctx->buf);
   delete ctx;
   event->SEND_COMPLETE.ClientContext = nullptr;
 }

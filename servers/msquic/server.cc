@@ -1,6 +1,7 @@
 #include "benchkit.h"
 #include "msquic_common.h"
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cinttypes>
@@ -8,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -16,6 +18,7 @@ namespace {
 
 using rudp_bench_msquic::FrameDecoder;
 using rudp_bench_msquic::MsQuic;
+using rudp_bench_msquic::SendBuf;
 
 constexpr uint32_t kServiceSliceMs = 10;
 
@@ -31,13 +34,16 @@ enum DistIndex {
   DIST_COUNT = 2
 };
 
+// カウンタは atomic: handle_payload は msquic worker スレッド(複数 partition)
+// の callback から並行に走るため、単一 mutex だと全 worker がメッセージごとに
+// 直列化される。
 struct ServerStats {
-  uint64_t recv[CLASS_COUNT][DIST_COUNT] = {};
-  uint64_t recv_measured[CLASS_COUNT][DIST_COUNT] = {};
-  uint64_t submit[CLASS_COUNT][DIST_COUNT] = {};
-  uint64_t submit_measured[CLASS_COUNT][DIST_COUNT] = {};
-  uint64_t send_failed[CLASS_COUNT][DIST_COUNT] = {};
-  uint64_t invalid_payload = 0;
+  std::atomic<uint64_t> recv[CLASS_COUNT][DIST_COUNT] = {};
+  std::atomic<uint64_t> recv_measured[CLASS_COUNT][DIST_COUNT] = {};
+  std::atomic<uint64_t> submit[CLASS_COUNT][DIST_COUNT] = {};
+  std::atomic<uint64_t> submit_measured[CLASS_COUNT][DIST_COUNT] = {};
+  std::atomic<uint64_t> send_failed[CLASS_COUNT][DIST_COUNT] = {};
+  std::atomic<uint64_t> invalid_payload = {};
 };
 
 class ServerApp;
@@ -45,10 +51,9 @@ class ServerApp;
 struct ConnState {
   ServerApp *app;
   HQUIC conn;
-  HQUIC stream = nullptr;
+  std::atomic<HQUIC> stream = {nullptr};
   uint64_t id;
-  bool connected = false;
-  std::mutex mu;
+  std::atomic<bool> connected = {false};
 };
 
 struct StreamCtx {
@@ -185,9 +190,16 @@ class ServerApp {
     conn->app = this;
     conn->conn = event->NEW_CONNECTION.Connection;
     {
+      // conns_ の更新は稀(接続/切断時のみ)。読み手(broadcast fanout、
+      // メッセージごと)は copy-on-write な snapshot を atomic_load で取る
       std::lock_guard<std::mutex> lock(conns_mu_);
       conn->id = next_conn_id_++;
-      conns_.push_back(conn);
+      auto next =
+          std::make_shared<std::vector<ConnState *>>(*std::atomic_load(&conns_));
+      next->push_back(conn);
+      std::atomic_store(
+          &conns_,
+          std::shared_ptr<const std::vector<ConnState *>>(std::move(next)));
     }
 
     MsQuic->SetCallbackHandler(conn->conn,
@@ -199,10 +211,7 @@ class ServerApp {
                                   QUIC_CONNECTION_EVENT *event) {
     switch (event->Type) {
       case QUIC_CONNECTION_EVENT_CONNECTED:
-        {
-          std::lock_guard<std::mutex> lock(conn->mu);
-          conn->connected = true;
-        }
+        conn->connected.store(true, std::memory_order_release);
         break;
 
       case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
@@ -219,11 +228,8 @@ class ServerApp {
         break;
 
       case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
-        {
-          std::lock_guard<std::mutex> lock(conn->mu);
-          conn->connected = false;
-          conn->stream = nullptr;
-        }
+        conn->connected.store(false, std::memory_order_release);
+        conn->stream.store(nullptr, std::memory_order_release);
         break;
 
       default:
@@ -252,10 +258,8 @@ class ServerApp {
 
       case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
         {
-          std::lock_guard<std::mutex> lock(ctx->conn->mu);
-          if (ctx->conn->stream == stream) {
-            ctx->conn->stream = nullptr;
-          }
+          HQUIC expected = stream;
+          ctx->conn->stream.compare_exchange_strong(expected, nullptr);
         }
         MsQuic->StreamClose(stream);
         delete ctx;
@@ -270,20 +274,16 @@ class ServerApp {
   void handle_payload(ConnState *origin, const uint8_t *data, size_t len) {
     bk_header header;
     if (bk_payload_read(data, len, &header) != 0) {
-      std::lock_guard<std::mutex> lock(stats_mu_);
-      stats_.invalid_payload++;
+      stats_.invalid_payload.fetch_add(1, std::memory_order_relaxed);
       return;
     }
 
     const ClassIndex cls = class_from_flags(header.flags);
     const DistIndex dist = dist_from_flags(header.flags);
     const bool measured = (header.flags & BK_FLAG_MEASURE) != 0;
-    {
-      std::lock_guard<std::mutex> lock(stats_mu_);
-      stats_.recv[cls][dist]++;
-      if (measured) {
-        stats_.recv_measured[cls][dist]++;
-      }
+    stats_.recv[cls][dist].fetch_add(1, std::memory_order_relaxed);
+    if (measured) {
+      stats_.recv_measured[cls][dist].fetch_add(1, std::memory_order_relaxed);
     }
 
     if (dist == DIST_ECHO) {
@@ -292,31 +292,78 @@ class ServerApp {
       return;
     }
 
-    std::vector<ConnState *> targets;
-    {
-      std::lock_guard<std::mutex> lock(conns_mu_);
-      targets = conns_;
+    // broadcast: frame バイト列を SendBuf で 1 回だけ構築し、全 target で
+    // refcount 共有する(per-target の malloc+copy を排除)。class は header
+    // 由来で全 target 共通なので framing も 1 種で足りる。
+    const bool is_md = (header.flags & BK_FLAG_MUST_DELIVER) != 0;
+    const auto targets = std::atomic_load(&conns_);
+    const int n_targets = static_cast<int>(targets->size());
+    if (n_targets == 0) {
+      return;
     }
-    for (ConnState *target : targets) {
-      bool connected = false;
-      {
-        std::lock_guard<std::mutex> lock(target->mu);
-        connected = target->connected;
+    SendBuf *buf = nullptr;
+    if (is_md) {
+      buf = rudp_bench_msquic::send_buf_new(sizeof(uint32_t) + len, n_targets);
+      if (buf != nullptr) {
+        const uint32_t nlen = htonl(static_cast<uint32_t>(len));
+        std::memcpy(buf->data(), &nlen, sizeof(nlen));
+        std::memcpy(buf->data() + sizeof(nlen), data, len);
       }
-      if (!connected) {
+    } else {
+      buf = rudp_bench_msquic::send_buf_new(len, n_targets);
+      if (buf != nullptr) {
+        std::memcpy(buf->data(), data, len);
+      }
+    }
+    if (buf == nullptr) {
+      for (int i = 0; i < n_targets; ++i) {
+        count_submit(cls, dist, measured, false);
+      }
+      return;
+    }
+    for (ConnState *target : *targets) {
+      if (!target->connected.load(std::memory_order_acquire)) {
+        rudp_bench_msquic::send_buf_unref(buf);
+        count_submit(cls, dist, measured, false);
         continue;
       }
-      const bool ok = send_by_flags(target, data, len, header.flags) == 0;
+      bool ok = false;
+      if (is_md) {
+        const HQUIC stream = target->stream.load(std::memory_order_acquire);
+        ok = stream != nullptr &&
+             rudp_bench_msquic::send_stream_buf(stream, buf) == 0;
+        if (stream == nullptr) {
+          rudp_bench_msquic::send_buf_unref(buf);
+        }
+      } else {
+        ok = rudp_bench_msquic::send_datagram_buf(target->conn, buf) == 0;
+      }
       count_submit(cls, dist, measured, ok);
     }
   }
 
   int format_stats_json(char *buf, size_t cap) {
-    ServerStats s;
-    {
-      std::lock_guard<std::mutex> lock(stats_mu_);
-      s = stats_;
+    struct {
+      uint64_t recv[CLASS_COUNT][DIST_COUNT];
+      uint64_t recv_measured[CLASS_COUNT][DIST_COUNT];
+      uint64_t submit[CLASS_COUNT][DIST_COUNT];
+      uint64_t submit_measured[CLASS_COUNT][DIST_COUNT];
+      uint64_t send_failed[CLASS_COUNT][DIST_COUNT];
+      uint64_t invalid_payload;
+    } s;
+    for (int c = 0; c < CLASS_COUNT; ++c) {
+      for (int d = 0; d < DIST_COUNT; ++d) {
+        s.recv[c][d] = stats_.recv[c][d].load(std::memory_order_relaxed);
+        s.recv_measured[c][d] =
+            stats_.recv_measured[c][d].load(std::memory_order_relaxed);
+        s.submit[c][d] = stats_.submit[c][d].load(std::memory_order_relaxed);
+        s.submit_measured[c][d] =
+            stats_.submit_measured[c][d].load(std::memory_order_relaxed);
+        s.send_failed[c][d] =
+            stats_.send_failed[c][d].load(std::memory_order_relaxed);
+      }
     }
+    s.invalid_payload = stats_.invalid_payload.load(std::memory_order_relaxed);
     const int n = std::snprintf(
         buf, cap,
         "{\"recv\":{\"loss_tolerant\":{\"echo\":%" PRIu64
@@ -363,12 +410,8 @@ class ServerApp {
     auto *ctx = new StreamCtx();
     ctx->conn = conn;
     ctx->stream = stream;
-    {
-      std::lock_guard<std::mutex> lock(conn->mu);
-      if (conn->stream == nullptr) {
-        conn->stream = stream;
-      }
-    }
+    HQUIC expected = nullptr;
+    conn->stream.compare_exchange_strong(expected, stream);
     MsQuic->SetCallbackHandler(stream, reinterpret_cast<void *>(stream_cb),
                                ctx);
   }
@@ -378,11 +421,7 @@ class ServerApp {
     if ((flags & BK_FLAG_MUST_DELIVER) == 0) {
       return rudp_bench_msquic::send_datagram_payload(conn->conn, data, len);
     }
-    HQUIC stream = nullptr;
-    {
-      std::lock_guard<std::mutex> lock(conn->mu);
-      stream = conn->stream;
-    }
+    const HQUIC stream = conn->stream.load(std::memory_order_acquire);
     if (stream == nullptr) {
       return -1;
     }
@@ -390,14 +429,14 @@ class ServerApp {
   }
 
   void count_submit(ClassIndex cls, DistIndex dist, bool measured, bool ok) {
-    std::lock_guard<std::mutex> lock(stats_mu_);
     if (ok) {
-      stats_.submit[cls][dist]++;
+      stats_.submit[cls][dist].fetch_add(1, std::memory_order_relaxed);
       if (measured) {
-        stats_.submit_measured[cls][dist]++;
+        stats_.submit_measured[cls][dist].fetch_add(1,
+                                                    std::memory_order_relaxed);
       }
     } else {
-      stats_.send_failed[cls][dist]++;
+      stats_.send_failed[cls][dist].fetch_add(1, std::memory_order_relaxed);
     }
   }
 
@@ -422,11 +461,11 @@ class ServerApp {
   HQUIC configuration_ = nullptr;
   HQUIC listener_ = nullptr;
 
-  std::mutex conns_mu_;
-  std::vector<ConnState *> conns_;
+  std::mutex conns_mu_;  // conns_ の copy-on-write 更新のみ直列化
+  std::shared_ptr<const std::vector<ConnState *>> conns_ =
+      std::make_shared<const std::vector<ConnState *>>();
   uint64_t next_conn_id_ = 1;
 
-  std::mutex stats_mu_;
   ServerStats stats_;
 };
 

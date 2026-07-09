@@ -672,7 +672,6 @@ class ClientApp {
   }
 
   int run_schedule(bk_control *control, bk_schedule schedule) {
-    std::vector<uint8_t> payload(std::max(cfg_.payload_lt, cfg_.payload_md), 0);
     bool marked_unsent = false;
     int rc = 0;
     bk_steady steady = {0, false};
@@ -722,7 +721,7 @@ class ClientApp {
             const size_t payload_size = (slot.flags & BK_FLAG_MUST_DELIVER)
                                             ? cfg_.payload_md
                                             : cfg_.payload_lt;
-            send_slot(conn, &slot, payload.data(), payload_size);
+            send_slot(conn, &slot, payload_size);
           }
         }
       } else if (!marked_unsent) {
@@ -761,33 +760,48 @@ class ClientApp {
     return rc;
   }
 
-  void send_slot(ClientConn *conn, const bk_slot *slot, uint8_t *payload,
-                 size_t payload_size) {
+  // frame を SendBuf に直接構築する(中間バッファ経由の memcpy を削減)。
+  // header 32B 以降は受信側で読まれない契約(bk_payload_read はヘッダのみ
+  // 検証)なので未初期化のまま送る。
+  void send_slot(ClientConn *conn, const bk_slot *slot, size_t payload_size) {
     bk_header header;
     make_header_from_slot(slot, conn->origin_id, bk_now_ns(), &header);
     bool submitted = false;
-    if (bk_payload_write(payload, payload_size, &header) == 0) {
-      submitted = send_by_flags(conn, payload, payload_size, header.flags) == 0;
+    if ((slot->flags & BK_FLAG_MUST_DELIVER) == 0) {
+      rudp_bench_msquic::SendBuf *buf =
+          rudp_bench_msquic::send_buf_new(payload_size, 1);
+      if (buf != nullptr) {
+        if (bk_payload_write(buf->data(), payload_size, &header) == 0) {
+          submitted =
+              rudp_bench_msquic::send_datagram_buf(conn->conn, buf) == 0;
+        } else {
+          rudp_bench_msquic::send_buf_unref(buf);
+        }
+      }
+    } else {
+      HQUIC stream = nullptr;
+      bool ready = false;
+      {
+        std::lock_guard<std::mutex> lock(conn->mu);
+        stream = conn->stream;
+        ready = conn->stream_ready;
+      }
+      if (stream != nullptr && ready) {
+        rudp_bench_msquic::SendBuf *buf = rudp_bench_msquic::send_buf_new(
+            sizeof(uint32_t) + payload_size, 1);
+        if (buf != nullptr) {
+          const uint32_t nlen = htonl(static_cast<uint32_t>(payload_size));
+          std::memcpy(buf->data(), &nlen, sizeof(nlen));
+          if (bk_payload_write(buf->data() + sizeof(nlen), payload_size,
+                               &header) == 0) {
+            submitted = rudp_bench_msquic::send_stream_buf(stream, buf) == 0;
+          } else {
+            rudp_bench_msquic::send_buf_unref(buf);
+          }
+        }
+      }
     }
     metrics_on_slot(&header, submitted);
-  }
-
-  int send_by_flags(ClientConn *conn, const void *data, size_t len,
-                    uint8_t flags) {
-    if ((flags & BK_FLAG_MUST_DELIVER) == 0) {
-      return rudp_bench_msquic::send_datagram_payload(conn->conn, data, len);
-    }
-    HQUIC stream = nullptr;
-    bool ready = false;
-    {
-      std::lock_guard<std::mutex> lock(conn->mu);
-      stream = conn->stream;
-      ready = conn->stream_ready;
-    }
-    if (stream == nullptr || !ready) {
-      return -1;
-    }
-    return rudp_bench_msquic::send_stream_frame(stream, data, len);
   }
 
   void mark_unsent_until(ClientConn *conn, uint64_t cutoff_ns) {
