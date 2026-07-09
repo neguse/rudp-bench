@@ -373,10 +373,14 @@ static void mark_unsent_until(client_conn *conn, uint64_t cutoff_ns,
   }
 }
 
-// 1 conn の受信 socket を drain する。戻り値 0=ok / -1=err。
+// 1 conn の受信 socket を最大 budget パケットまで drain する。
+// 戻り値 0=ok / -1=err。**上限が必須**: broadcast fanout(受信 conns² スケール)
+// では上限なしだとこのループから抜けられず、main ループの制御チャネル poll
+// (bk_steady_tick)と送信が飢えて window を取りこぼす(negative margin で
+// INVALID)。budget を超えても POLLIN は残るので次イテレーションで続きを引く。
 static int drain_conn(client_conn *conn, bk_metrics *metrics, uint8_t *buf,
-                      size_t cap) {
-  for (;;) {
+                      size_t cap, int budget) {
+  for (int drained = 0; drained < budget; ++drained) {
     ssize_t n = recv(conn->fd, buf, cap, 0);
     if (n < 0) {
       if (errno == EINTR) {
@@ -392,6 +396,7 @@ static int drain_conn(client_conn *conn, bk_metrics *metrics, uint8_t *buf,
       bk_metrics_on_recv(metrics, conn->local_index, &header, bk_now_ns());
     }
   }
+  return 0;
 }
 
 static uint64_t next_plan_due(const client_conn *conns, int n_conns) {
@@ -717,8 +722,10 @@ static int run_client(const client_config *cfg) {
         if ((pfds[i].revents & POLLIN) == 0) {
           continue;
         }
+        // 1 conn あたりの drain 上限。制御チャネルと送信を飢えさせない範囲で
+        // 大きめ(受信のバックログは次イテレーションで続きを引く)。
         if (drain_conn(&conns[i], metrics, recv_buf,
-                       RAWUDP_MAX_PAYLOAD_BYTES) != 0) {
+                       RAWUDP_MAX_PAYLOAD_BYTES, 256) != 0) {
           drain_err = true;
           break;
         }

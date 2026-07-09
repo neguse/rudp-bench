@@ -1,0 +1,59 @@
+{
+ "regime": "wired-v3",
+ "netem": {
+  "server_egress": {
+   "delay_ms": 10,
+   "loss_pct": 0.1
+  },
+  "client_egress": {
+   "delay_ms": 10,
+   "loss_pct": 0.1
+  }
+ },
+ "workloads": [
+  "r20p128",
+  "r60p200",
+  "r20p1000"
+ ],
+ "conns": {
+  "min": 4,
+  "max": 512
+ },
+ "seed": 1,
+ "warmup": "25s",
+ "drain": "1s",
+ "deadline_ns": 150000000,
+ "staleness_period_ns": 10000000,
+ "output_dir": "results-v2/sweep-ceiling-wired",
+ "transports": {
+  "raw_udp": {
+   "server_command": [
+    "build-v2-rawudp/raw_udp_server",
+    "--port",
+    "42917"
+   ],
+   "client_command": [
+    "build-v2-rawudp/raw_udp_client",
+    "--host",
+    "10.200.0.1",
+    "--port",
+    "42917",
+    "--conns",
+    "{conns}",
+    "--proc-index",
+    "{proc_index}",
+    "--origin-base",
+    "{origin_id_start}",
+    "--deadline-ns",
+    "150000000",
+    "--staleness-period-ns",
+    "10000000"
+   ],
+   "client_procs": 8
+  }
+ },
+ "duration": "10s",
+ "server_cpus": "7,15",
+ "client_cpus": "3,4,5,6,11,12,13,14",
+ "steady_warmup": true
+}
