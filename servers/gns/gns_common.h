@@ -38,8 +38,32 @@ inline void ensure_gns() {
       std::fprintf(stderr, "GameNetworkingSockets_Init failed: %s\n", err);
       std::abort();
     }
-    SteamNetworkingUtils()->SetDebugOutputFunction(
+    ISteamNetworkingUtils *utils = SteamNetworkingUtils();
+    utils->SetDebugOutputFunction(
         k_ESteamNetworkingSocketsDebugOutputType_Important, debug_output);
+    // tune-to-plateau(全て upstream 公式ノブ。--describe の tuning に開示):
+    // - SendRateMin/Max: 既定は両方 256KB/s の token bucket clamp
+    //   (csteamnetworkingsockets.cpp:84-85)で、unreliable も含む全送信が
+    //   この帯域に律速される。上限値(0x10000000 = 256MB/s)へ解放
+    // - SendBufferSize: 既定 512KB。溢れると送信が k_EResultLimitExceeded で
+    //   即失敗する(snp.cpp:321-326)ため fanout burst 向けに拡大
+    // - RecvBufferSize/Messages: 既定 1MB/1000msg per conn。app 側 drain が
+    //   一瞬遅れただけで unreliable がここで破棄される
+    //   (connections.cpp:2760-2774)ため拡大
+    // - TimeoutConnected: 既定 10s。高負荷でサービススレッドが遅れた際の
+    //   切断を遅らせる(判定は connections.cpp:3599-3634)
+    utils->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMin,
+                                     0x10000000);
+    utils->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax,
+                                     0x10000000);
+    utils->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendBufferSize,
+                                     16 * 1024 * 1024);
+    utils->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_RecvBufferSize,
+                                     64 * 1024 * 1024);
+    utils->SetGlobalConfigValueInt32(
+        k_ESteamNetworkingConfig_RecvBufferMessages, 65536);
+    utils->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_TimeoutConnected,
+                                     60000);
     std::atexit([]() { GameNetworkingSockets_Kill(); });
   });
 }
@@ -62,22 +86,26 @@ inline int send_payload(ISteamNetworkingSockets *iface,
   return r == k_EResultOK ? 0 : -1;
 }
 
-// 開示 metadata。cc_algo: GNS(SNP) は送信レートを SendRateMin/Max
-// (library 既定はどちらも 256KB/s)に clamp する token bucket で制御する。
-// v2 では既定値のまま。encryption は GNS 既定で有効(AES-256-GCM +
-// curve25519 鍵交換)。max_payload_bytes は両 class 共通で使える上限 =
-// unreliable 送信上限 16500B(reliable 単体は 512KB まで — README 参照)。
+// 開示 metadata。cc_algo: GNS(SNP) は送信レートを SendRateMin/Max に clamp
+// する token bucket で制御する(tuned: 両方 256MB/s = 実質解放)。
+// encryption は GNS 既定で有効(AES-256-GCM + curve25519 鍵交換)。
+// max_payload_bytes は両 class 共通で使える上限 = unreliable 送信上限
+// 16500B(reliable 単体は 512KB まで — README 参照)。
 inline void print_describe() {
   std::puts(
       "{\"transport\":\"gns\","
       "\"class_mapping\":{\"loss_tolerant\":\"unreliable-no-nagle\","
       "\"must_deliver\":\"reliable\"},"
       "\"coalescing\":\"none\","
-      "\"cc_algo\":\"token-bucket-fixed-rate-256KBps\","
+      "\"cc_algo\":\"token-bucket(SendRateMin=Max=256MBps)\","
       "\"thread_model\":\"internal_worker\","
       "\"encryption\":true,"
       "\"max_payload_bytes\":16500,"
       "\"tuning\":["
+      "\"send_rate=256MBps\",\"send_buffer=16MB\","
+      "\"recv_buffer=64MB/65536msg\",\"timeout_connected=60s\","
+      "\"drain-budget\",\"sendmessages-shared-broadcast\","
+      "\"allocatemessage-direct-write\","
       "{\"knob\":\"_CERT compile definition\","
       "\"value\":\"defined\","
       "\"upstream_ref\":\"Valve retail build flag: disables DBGFLAG_ASSERT "

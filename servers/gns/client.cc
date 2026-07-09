@@ -29,6 +29,7 @@ constexpr uint64_t kConnectTimeoutNs = 10000000000ull;
 constexpr uint64_t kServiceMaxSleepNs = 1000000ull;  // 1ms(受信は polling)
 constexpr int kMaxConns = 4095;
 constexpr int kRecvBatch = 256;
+constexpr int kMaxDrainBatches = 16;  // 1 service あたり最大 4096 msg
 
 struct ClientConfig {
   const char *host = nullptr;
@@ -509,6 +510,7 @@ class ClientApp {
   bool open_connections() {
     rudp_bench_gns::ensure_gns();
     iface_ = SteamNetworkingSockets();
+    utils_ = SteamNetworkingUtils();
 
     poll_group_ = iface_->CreatePollGroup();
     if (poll_group_ == k_HSteamNetPollGroup_Invalid) {
@@ -565,8 +567,6 @@ class ClientApp {
   }
 
   int run_schedule(bk_control *control, bk_schedule schedule) {
-    std::vector<uint8_t> payload(
-        std::max(cfg_.payload_lt, cfg_.payload_md), 0);
     bool marked_unsent = false;
     int rc = 0;
     bk_steady steady = {0, false};
@@ -615,7 +615,7 @@ class ClientApp {
             const size_t payload_size = (slot.flags & BK_FLAG_MUST_DELIVER)
                                             ? cfg_.payload_md
                                             : cfg_.payload_lt;
-            send_slot(&conn, &slot, payload.data(), payload_size);
+            send_slot(&conn, &slot, payload_size);
           }
         }
       } else if (!marked_unsent) {
@@ -655,10 +655,14 @@ class ClientApp {
   }
 
   // RunCallbacks + poll group の受信 drain。
+  // drain は batch 数で bound する: broadcast fanout(受信 conns² スケール)では
+  // 上限なしだとこのループから抜けられず、送信 pacing と bk_steady_tick が
+  // 飢える(docs/ledger.md #13)。受信キューは GNS 内部スレッドが埋め続ける
+  // ので、残りは次呼び出しで続きを引けばよい。
   void service() {
     iface_->RunCallbacks();
     SteamNetworkingMessage_t *msgs[kRecvBatch];
-    for (;;) {
+    for (int batch = 0; batch < kMaxDrainBatches; ++batch) {
       const int n =
           iface_->ReceiveMessagesOnPollGroup(poll_group_, msgs, kRecvBatch);
       if (n <= 0) {
@@ -685,15 +689,27 @@ class ClientApp {
     }
   }
 
-  void send_slot(ClientConn *conn, const bk_slot *slot, uint8_t *payload,
-                 size_t payload_size) {
+  // AllocateMessage で確保した message バッファに header を直接書き、
+  // SendMessages で所有権ごと渡す。SendMessageToConnection は enqueue 時に
+  // malloc+memcpy が入る(connections.cpp:2038,2044)のに対しこちらは copy 0
+  // (isteamnetworkingsockets.h:270-274)。header 32B 以降は受信側で読まれない
+  // 契約(bk_payload_read はヘッダのみ検証)なので未初期化のまま送る。
+  void send_slot(ClientConn *conn, const bk_slot *slot, size_t payload_size) {
     bk_header header;
     make_header_from_slot(slot, conn->origin_id, bk_now_ns(), &header);
     bool submitted = false;
-    if (bk_payload_write(payload, payload_size, &header) == 0) {
-      submitted = rudp_bench_gns::send_payload(iface_, conn->conn, payload,
-                                               payload_size,
-                                               header.flags) == 0;
+    SteamNetworkingMessage_t *msg =
+        utils_->AllocateMessage(static_cast<int>(payload_size));
+    if (msg != nullptr) {
+      if (bk_payload_write(msg->m_pData, payload_size, &header) == 0) {
+        msg->m_conn = conn->conn;
+        msg->m_nFlags = rudp_bench_gns::send_flags_for(header.flags);
+        int64 result = 0;
+        iface_->SendMessages(1, &msg, &result);
+        submitted = result > 0;
+      } else {
+        msg->Release();
+      }
     }
     bk_metrics_on_slot(metrics_, &header, submitted);
   }
@@ -726,6 +742,7 @@ class ClientApp {
 
   ClientConfig cfg_;
   ISteamNetworkingSockets *iface_ = nullptr;
+  ISteamNetworkingUtils *utils_ = nullptr;
   HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
   std::vector<ClientConn> conns_;
   bk_metrics *metrics_ = nullptr;

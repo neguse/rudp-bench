@@ -6,6 +6,7 @@
 #include "benchkit.h"
 #include "gns_common.h"
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cinttypes>
@@ -13,13 +14,45 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <thread>
 #include <vector>
 
 namespace {
 
+// broadcast fanout 用の共有 payload バッファ。GNS に同報 API は無く、
+// SendMessageToConnection は enqueue のたびに malloc+memcpy する
+// (connections.cpp:2038,2044)。AllocateMessage(0) で struct だけ確保して
+// m_pData を共有バッファへ向け、m_pfnFreeData の refcount で寿命管理するのが
+// upstream が保証する最小コスト経路(isteamnetworkingsockets.h:276-293)。
+// 解放 callback は任意スレッドから呼ばれうるため refcount は atomic。
+struct SharedPayload {
+  std::atomic<int> refs;
+  alignas(std::max_align_t) uint8_t data[1];  // 実体は malloc で len 分連続確保
+};
+
+SharedPayload *shared_payload_new(const uint8_t *src, size_t len, int refs) {
+  auto *sp = static_cast<SharedPayload *>(
+      std::malloc(offsetof(SharedPayload, data) + len));
+  if (sp == nullptr) {
+    return nullptr;
+  }
+  new (&sp->refs) std::atomic<int>(refs);
+  std::memcpy(sp->data, src, len);
+  return sp;
+}
+
+void shared_payload_free_cb(SteamNetworkingMessage_t *msg) {
+  auto *sp = reinterpret_cast<SharedPayload *>(
+      static_cast<uint8_t *>(msg->m_pData) - offsetof(SharedPayload, data));
+  if (sp->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+    std::free(sp);
+  }
+}
+
 constexpr int kRecvBatch = 256;
-constexpr uint64_t kServiceSliceNs = 1000000ull;  // 1ms
+constexpr int kMaxDrainBatches = 16;  // 1 service あたり最大 4096 msg
+constexpr uint64_t kServiceSliceNs = 1000000ull;  // 1ms(アイドル時のみ)
 
 enum ClassIndex {
   CLASS_LOSS_TOLERANT = 0,
@@ -119,6 +152,7 @@ class ServerApp {
   bool start(uint16_t port) {
     rudp_bench_gns::ensure_gns();
     iface_ = SteamNetworkingSockets();
+    utils_ = SteamNetworkingUtils();
 
     poll_group_ = iface_->CreatePollGroup();
     if (poll_group_ == k_HSteamNetPollGroup_Invalid) {
@@ -143,18 +177,21 @@ class ServerApp {
   }
 
   // RunCallbacks(status callback を同期発火)+ poll group の受信 drain。
-  // 戻り値 0=ok / -1=致命的エラー。
+  // 戻り値: 処理した message 数 / -1=致命的エラー。
+  // drain は batch 数で bound する(制御チャネル poll を飢えさせない。
+  // docs/ledger.md #13 と同族)。残りは次呼び出しで続きを引く。
   int service() {
     iface_->RunCallbacks();
     SteamNetworkingMessage_t *msgs[kRecvBatch];
-    for (;;) {
+    int total = 0;
+    for (int batch = 0; batch < kMaxDrainBatches; ++batch) {
       const int n =
           iface_->ReceiveMessagesOnPollGroup(poll_group_, msgs, kRecvBatch);
       if (n < 0) {
         return -1;
       }
       if (n == 0) {
-        return 0;
+        break;
       }
       for (int i = 0; i < n; ++i) {
         handle_payload(msgs[i]->m_conn,
@@ -162,10 +199,12 @@ class ServerApp {
                        static_cast<size_t>(msgs[i]->m_cbSize));
         msgs[i]->Release();
       }
+      total += n;
       if (n < kRecvBatch) {
-        return 0;
+        break;
       }
     }
+    return total;
   }
 
   // RunCallbacks から同期的に呼ばれる(= main スレッド)。
@@ -286,11 +325,36 @@ class ServerApp {
     }
 
     // broadcast: 現在の全接続(origin 含む)へ無変更で fanout。
-    for (const HSteamNetConnection conn : conns_) {
-      const bool ok =
-          rudp_bench_gns::send_payload(iface_, conn, data, len,
-                                       header.flags) == 0;
-      count_submit(cls, dist, measured, ok);
+    // payload は SharedPayload で 1 回だけ copy し、conn ごとには
+    // AllocateMessage(0) の struct のみ確保して SendMessages で一括投入する
+    // (同一 conn 連続分のロック取り直しも避けられる、
+    // csteamnetworkingsockets.cpp:1338-1353)。
+    const int n_conns = static_cast<int>(conns_.size());
+    if (n_conns == 0) {
+      return;
+    }
+    SharedPayload *sp = shared_payload_new(data, len, n_conns);
+    if (sp == nullptr) {
+      for (int i = 0; i < n_conns; ++i) {
+        count_submit(cls, dist, measured, false);
+      }
+      return;
+    }
+    const int send_flags = rudp_bench_gns::send_flags_for(header.flags);
+    bcast_msgs_.resize(static_cast<size_t>(n_conns));
+    bcast_results_.resize(static_cast<size_t>(n_conns));
+    for (int i = 0; i < n_conns; ++i) {
+      SteamNetworkingMessage_t *msg = utils_->AllocateMessage(0);
+      msg->m_pData = sp->data;
+      msg->m_cbSize = static_cast<uint32>(len);
+      msg->m_pfnFreeData = shared_payload_free_cb;
+      msg->m_conn = conns_[static_cast<size_t>(i)];
+      msg->m_nFlags = send_flags;
+      bcast_msgs_[static_cast<size_t>(i)] = msg;
+    }
+    iface_->SendMessages(n_conns, bcast_msgs_.data(), bcast_results_.data());
+    for (int i = 0; i < n_conns; ++i) {
+      count_submit(cls, dist, measured, bcast_results_[static_cast<size_t>(i)] > 0);
     }
   }
 
@@ -306,9 +370,12 @@ class ServerApp {
   }
 
   ISteamNetworkingSockets *iface_ = nullptr;
+  ISteamNetworkingUtils *utils_ = nullptr;
   HSteamListenSocket listen_sock_ = k_HSteamListenSocket_Invalid;
   HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
   std::vector<HSteamNetConnection> conns_;
+  std::vector<SteamNetworkingMessage_t *> bcast_msgs_;   // fanout scratch
+  std::vector<int64> bcast_results_;
   ServerStats stats_;
 };
 
@@ -360,7 +427,7 @@ int main(int argc, char **argv) {
         bk_control_close(control);
         return EXIT_FAILURE;
       }
-      if (app->service() != 0) {
+      if (app->service() < 0) {
         std::fprintf(stderr, "gns service failed\n");
         bk_control_close(control);
         return EXIT_FAILURE;
@@ -399,14 +466,20 @@ int main(int argc, char **argv) {
         sleep_ns = remain_ns;
       }
     }
-    if (app->service() != 0) {
+    const int serviced = app->service();
+    if (serviced < 0) {
       std::fprintf(stderr, "gns service failed\n");
       if (control != nullptr) {
         bk_control_close(control);
       }
       return EXIT_FAILURE;
     }
-    std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+    // 受信が続いている間は sleep しない: 固定 1ms sleep は app スレッドの
+    // drain スループット上限(≒ batch×4096/ms)を作ってしまう。
+    // queue を引き切った時だけ idle sleep で CPU を返す
+    if (serviced < kRecvBatch) {
+      std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+    }
   }
 
   char stats_json[4096];
