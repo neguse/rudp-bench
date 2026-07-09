@@ -36,6 +36,9 @@ public static class LnlDescribe
             "all conns pumped from one loop via PollEvents+ManualUpdate)\"," +
             "\"encryption\":false," +
             "\"max_payload_bytes\":" + maxUnreliable + "," +
-            "\"tuning\":[]}";
+            "\"tuning\":[\"use_native_sockets\",\"mtu_discovery\"," +
+            "\"disconnect_timeout=60s\",\"unsynced_receive_event(server)\"," +
+            "\"update_time=1ms+trigger_update(server)\"," +
+            "\"pooled-packet-direct-write(client)\"]}";
     }
 }

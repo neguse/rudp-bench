@@ -1,13 +1,12 @@
-# LiteNetLib v2 transport
+# LiteNetLib v2 transport(tuned)
 
-Idiomatic LiteNetLib 2.1.4 server+client pair implementing benchspec v1
-(`benchspec/README.md`). Structural template: `servers/magiconion/` (solution
-layout, BenchKit.CS wiring, client control-channel lifecycle). LiteNetLib
-usage patterns verified against the library's own README sample
-(`EventBasedNetListener` + `NetManager` + explicit `PollEvents()` loop,
-`peer.Send(data, DeliveryMethod)`) and, where the README didn't say enough,
-against LiteNetLib 2.1.4 source (`LiteNetManager.cs`, `NetPeer.cs`,
-`NetConstants.cs`) and reflection over the built NuGet DLL.
+LiteNetLib 2.1.4 server+client pair implementing benchspec
+(`benchspec/README.md`)。「ライブラリが想定する最速の使い方」をソース読解に
+基づいて設計した tune-to-plateau 版(方針: ルート CLAUDE.md)。チューニングは
+全て upstream 公式ノブ/API で、`--describe` の `tuning` に開示する。
+Structural template: `servers/magiconion/`(solution layout, BenchKit.CS
+wiring, client control-channel lifecycle)。ソース引用は tag 2.1.4
+(RevenantX/LiteNetLib)。
 
 Build:
 
@@ -75,14 +74,60 @@ calls, so — unlike magiconion's gRPC streaming client, which needs an async
 send pipe to avoid RTT-bound coalescing — each scheduled slot is sent inline
 from the main loop with no queue.
 
-## Library settings
+## レイテンシ機構(ソース根拠)と設計
 
-Every `NetManager` property is left at its LiteNetLib default (verified by
-reflecting a freshly-constructed `NetManager` against 2.1.4: `AutoRecycle` /
-`UnsyncedEvents` = `false`, `IPv6Enabled` = `true`, `UpdateTime` = `15`,
-`UseNativeSockets` = `false`). `--describe`'s `tuning` array is therefore
-empty — no v1 overrides (e.g. `PacketPoolSize`) were carried into v2, per the
-v2 rule that undisclosed defaults must not silently change. Received packets
-are recycled explicitly via `reader.Recycle()` after use, matching the
-pattern in LiteNetLib's own README sample, rather than setting
+LiteNetLib には遅延源が 2 段ある:
+
+1. **イベント配送**: 既定では受信イベントは `PollEvents()` までキューされる
+   (`LiteNetManager.cs:404-413`)→ server 側 poll 粒度(≤15ms)が床になる。
+   → server は `UnsyncedReceiveEvent = true` で受信スレッド直発火
+   (`LiteNetManager.cs:159,1016-1033`)。
+2. **送信 flush**: `Send()` はチャネルに積むだけで、実際のソケット送出は
+   logic スレッドの tick(`UpdateTime` 既定 15ms)まで出ない
+   (`LiteNetPeer.cs:1187-1213`, `LiteNetManager.cs:498-551`)。
+   → 送信後に `TriggerUpdate()`(upstream が送信レイテンシ短縮用と明記、
+   `LiteNetManager.cs:110-111,1307`)で logic スレッドを即 wake。
+
+**fanout worker(server)**: broadcast は 1 受信 → 全 peer `Send` の O(N) 仕事
+なので、受信スレッド(UnsyncedReceiveEvent)で inline に行うと受信自体が
+滞る(c64 で p50 が 622ms に悪化するのを実測)。payload を ArrayPool へ
+1 copy して専用 fanout スレッドに委譲し、受信ハンドラは O(1) を保つ。
+SendToAll 相当のバッファ共有 API は無く per-peer copy は不可避
+(`LiteNetManager.cs:1083-1095`)。
+
+**client 送信**: `CreatePacketFromPool` + 直書き + `SendPooledPacket`
+(`LiteNetPeer.cs:349-389`)で per-send の managed alloc/copy 0。
+MTU に収まらない md はライブラリの fragment 経路(通常 `Send`)へ
+フォールバック。
+
+**client pump**: sleep 上限 1ms(既定構造は 10ms)。manual mode の受信は
+pump でしか進まず、sleep 粒度が farm の受信レイテンシ床になる。
+spin-pump(sleep なし)は farm proc が core を焼き同居プロセスを starve
+させて逆効果だったため不採用。
+
+## チューニング(`--describe` の `tuning` に開示)
+
+| ノブ | 値(既定) | 根拠 |
+|---|---|---|
+| UnsyncedReceiveEvent(server) | true(false) | 上記 1 |
+| UpdateTime(server) | 1ms(15ms)+ TriggerUpdate | 上記 2 |
+| MtuDiscovery | true(false) | 既定 off だと MTU 1024 固定(`NetConstants.cs:89-107`)。有効化で 1432 まで交渉、merge 効率と unreliable 上限が上がる |
+| UseNativeSockets | true(false) | recvfrom/sendto P/Invoke 直呼びで managed Socket 層と EndPoint alloc を回避(`LiteNetManager.cs:252-255`)。off だと c64 bcast の delivery が悪化するのを実測 |
+| DisconnectTimeout | 60s(5s) | 高負荷で pump/相手 ping が滞った際の切断猶予(`LiteNetPeer.cs:1222-1234`) |
+
+SocketBufferSize(1MB)は定数で公開ノブが無い(`NetConstants.cs:48`)。
+farm 側 rcvbuf 増強が必要になった場合(ledger #5 のシグナル発火時)は
+ソース vendor か reflection が必要 — 未実施。
+
+## 確認結果(loopback 5s run、2026-07-10)
+
+- echo c4: VALID delivery 1.000、p50 sched **19.5ms → 1.2ms**(N=3 安定)
+- broadcast c64(30Hz×1000B、期待 123k msg/s): delivery 1.000、
+  p50 sched **34.8ms → 17.4ms**
+- broadcast c128: VALID delivery 0.156 = 単一 logic スレッドの sendto が
+  ceiling(正直な過負荷、crash なし)。ここはライブラリ構造の限界で
+  アダプタでは削れない
+
+received packets are recycled explicitly via `reader.Recycle()` after use,
+matching the pattern in LiteNetLib's own README sample, rather than setting
 `AutoRecycle=true`.

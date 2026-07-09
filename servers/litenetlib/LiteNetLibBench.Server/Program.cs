@@ -36,22 +36,33 @@ using var sigInt = PosixSignalRegistration.Create(PosixSignal.SIGINT, ctx =>
 
 var stats = new LnlServerStats();
 var connectedPeers = new List<NetPeer>();
+// UnsyncedReceiveEvent により受信ハンドラは受信スレッドから走る一方、
+// connect/disconnect イベントは main ループの PollEvents から来る。
+// fanout の読み手(受信スレッド)には copy-on-write の snapshot を渡す。
+var peersBox = new PeersBox();
 
 var listener = new EventBasedNetListener();
 listener.ConnectionRequestEvent += req => req.AcceptIfKey(LnlConstants.ConnectKey);
 listener.PeerConnectedEvent += peer =>
 {
     connectedPeers.Add(peer);
+    peersBox.Set(connectedPeers.ToArray());
     stats.Connected();
 };
 listener.PeerDisconnectedEvent += (peer, _) =>
 {
     connectedPeers.Remove(peer);
+    peersBox.Set(connectedPeers.ToArray());
     stats.Disconnected();
 };
+// broadcast fanout(1 受信 → 全 peer 送信)は受信スレッドで inline に行うと
+// 受信そのものが滞る(受信イベントハンドラは O(1) を保つ)ため、専用の
+// fanout スレッドへ逃がす。echo(O(1))は受信スレッド inline のまま。
+var fanout = new FanoutWorker(peersBox, stats);
+
 listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 {
-    HandleReceive(peer, reader, connectedPeers, stats);
+    HandleReceive(peer, reader, fanout, stats);
     reader.Recycle();
 };
 
@@ -61,7 +72,28 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 // library's default (non-manual) mode: NetManager.Start() runs its own
 // receive+logic threads, which is what "thread_model":"internal_worker"
 // (--describe) reports for the server role.
-var manager = new NetManager(listener);
+//
+// tune-to-plateau(全て upstream 公式ノブ。--describe の tuning に開示):
+// - UnsyncedReceiveEvent: 既定では受信イベントは PollEvents までキューされ、
+//   main ループの poll 粒度(≤15ms)がレイテンシと queue 成長の源泉になる。
+//   受信スレッド直発火で echo/broadcast を inline 化(LiteNetManager.cs:159)
+// - UpdateTime 1ms + 送信後 TriggerUpdate: Send はキューするだけで、実送信は
+//   logic スレッドの tick(既定 15ms)まで出ない(LiteNetPeer.cs:1187-1213)。
+//   TriggerUpdate は upstream が送信レイテンシ短縮用と明記する即時 wake
+//   (LiteNetManager.cs:110-111,1307)
+// - MtuDiscovery: 既定 off だと MTU 1024 固定(NetConstants.cs:89-107)。
+//   有効化で 1432 まで交渉され、merge 効率と unreliable 上限が上がる
+// - UseNativeSockets: recvfrom/sendto を P/Invoke 直呼びし managed Socket 層と
+//   EndPoint alloc を回避(LiteNetManager.cs:252-255)
+// - DisconnectTimeout 60s(既定 5s): 高負荷で相手の ping が滞った際の切断猶予
+var manager = new NetManager(listener)
+{
+    UnsyncedReceiveEvent = true,
+    UpdateTime = 1,
+    MtuDiscovery = true,
+    UseNativeSockets = true,
+    DisconnectTimeout = 60000,
+};
 manager.Start(config.Port);
 
 await using var control = await BenchControl.ConnectFromEnvironmentAsync(stopCts.Token).ConfigureAwait(false);
@@ -139,7 +171,7 @@ if (control is not null)
 manager.Stop();
 return 0;
 
-static void HandleReceive(NetPeer origin, NetPacketReader reader, List<NetPeer> peers, LnlServerStats stats)
+static void HandleReceive(NetPeer origin, NetPacketReader reader, FanoutWorker fanout, LnlServerStats stats)
 {
     var len = reader.UserDataSize;
     if (len < BenchConstants.HeaderSize)
@@ -175,26 +207,13 @@ static void HandleReceive(NetPeer origin, NetPacketReader reader, List<NetPeer> 
             stats.CountSubmit(header.Flags, 0, 1);
         }
 
+        // Send はキューするだけ。logic スレッドを即 wake して flush する
+        origin.NetManager.TriggerUpdate();
         return;
     }
 
-    // broadcast: fan out unchanged to every currently connected peer,
-    // including the origin (benchspec: "現在の全接続(origin 含む)へ").
-    ulong ok = 0;
-    ulong failed = 0;
-    foreach (var target in peers)
-    {
-        if (TrySend(target, span, deliveryMethod))
-        {
-            ok++;
-        }
-        else
-        {
-            failed++;
-        }
-    }
-
-    stats.CountSubmit(header.Flags, ok, failed);
+    // broadcast: fanout スレッドへ委譲(受信スレッドを O(1) に保つ)
+    fanout.Enqueue(origin.NetManager, span, header.Flags, deliveryMethod);
 }
 
 static bool TrySend(NetPeer peer, ReadOnlySpan<byte> payload, DeliveryMethod method)
@@ -261,10 +280,10 @@ public sealed class LnlServerStats
     private ulong invalidPayload;
     private int connections;
 
-    // All counters are only ever touched from callbacks invoked inside
-    // NetManager.PollEvents(), and only one thread (the server's main loop)
-    // ever calls PollEvents() — so, unlike magiconion's ServerStats, no lock
-    // is needed here (see Shared/LnlPump.cs and thread_model in --describe).
+    // 受信系カウンタ(CountRecv/CountSubmit/InvalidPayload)は受信スレッド
+    // (UnsyncedReceiveEvent)だけが書き、Connected/Disconnected は main ループ
+    // (PollEvents)だけが書く。フィールドが分かれた single-writer 構成なので
+    // ロック不要。ToJson は全 peer 停止後にのみ呼ぶ。
     public void Connected() => connections++;
 
     public void Disconnected() => connections--;
@@ -323,4 +342,91 @@ public sealed class LnlServerStats
 
     private static int DistFromFlags(byte flags) =>
         (flags & BenchConstants.FlagBroadcast) != 0 ? DistBroadcast : DistEcho;
+}
+
+/// <summary>
+/// connectedPeers の copy-on-write snapshot。書き手は main ループ
+/// (PollEvents の connect/disconnect イベント)のみ、読み手は受信スレッド
+/// (echo)と fanout スレッド(broadcast)。
+/// </summary>
+public sealed class PeersBox
+{
+    private NetPeer[] peers = Array.Empty<NetPeer>();
+
+    public void Set(NetPeer[] next) => Volatile.Write(ref peers, next);
+
+    public NetPeer[] Get() => Volatile.Read(ref peers);
+}
+
+/// <summary>
+/// broadcast fanout 専用スレッド。受信スレッド(UnsyncedReceiveEvent)は
+/// payload を pool バッファへ 1 copy して積むだけ(O(1))で戻り、
+/// N peer への Send はこのスレッドが行う。submit 系カウンタ(broadcast 列)は
+/// このスレッドだけが書く(single-writer 維持)。
+/// キューは LiteNetLib の unreliable channel と同様に上限なし —
+/// 過負荷時は破棄でなく遅延として現れる(staleness gate が検出する)。
+/// </summary>
+public sealed class FanoutWorker
+{
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(LiteNetManager Manager, byte[] Buf, int Len, byte Flags, DeliveryMethod Method)> queue = new();
+    private readonly AutoResetEvent wake = new(false);
+    private readonly PeersBox peersBox;
+    private readonly LnlServerStats stats;
+
+    public FanoutWorker(PeersBox peersBox, LnlServerStats stats)
+    {
+        this.peersBox = peersBox;
+        this.stats = stats;
+        var thread = new Thread(Loop) { IsBackground = true, Name = "lnl-fanout" };
+        thread.Start();
+    }
+
+    public void Enqueue(LiteNetManager manager, ReadOnlySpan<byte> payload, byte flags, DeliveryMethod method)
+    {
+        var buf = System.Buffers.ArrayPool<byte>.Shared.Rent(payload.Length);
+        payload.CopyTo(buf);
+        queue.Enqueue((manager, buf, payload.Length, flags, method));
+        wake.Set();
+    }
+
+    private void Loop()
+    {
+        while (true)
+        {
+            wake.WaitOne(1);
+            LiteNetManager? manager = null;
+            while (queue.TryDequeue(out var item))
+            {
+                manager = item.Manager;
+                var peers = peersBox.Get();
+                var span = new ReadOnlySpan<byte>(item.Buf, 0, item.Len);
+                ulong ok = 0;
+                ulong failed = 0;
+                foreach (var target in peers)
+                {
+                    if (target.ConnectionState == ConnectionState.Connected)
+                    {
+                        try
+                        {
+                            target.Send(span, item.Method);
+                            ok++;
+                        }
+                        catch
+                        {
+                            failed++;
+                        }
+                    }
+                    else
+                    {
+                        failed++;
+                    }
+                }
+
+                stats.CountSubmit(item.Flags, ok, failed);
+                System.Buffers.ArrayPool<byte>.Shared.Return(item.Buf);
+            }
+
+            manager?.TriggerUpdate();
+        }
+    }
 }

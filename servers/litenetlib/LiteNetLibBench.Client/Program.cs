@@ -105,7 +105,15 @@ try
             reader.Recycle();
         };
 
-        var manager = new NetManager(listener);
+        // tune(公式ノブ、--describe に開示): MtuDiscovery 有効(既定 off だと
+        // MTU 1024 固定)、native socket、DisconnectTimeout 60s(manual pump が
+        // 高負荷で遅れた際の切断猶予 — 既定 5s)
+        var manager = new NetManager(listener)
+        {
+            MtuDiscovery = true,
+            UseNativeSockets = true,
+            DisconnectTimeout = 60000,
+        };
         if (!manager.StartInManualMode(0))
         {
             throw new InvalidOperationException($"NetManager.StartInManualMode failed for conn {i}");
@@ -231,7 +239,23 @@ try
             }
         }
 
-        await DelayUntilNextAsync(now, nextNs, schedule.DrainUntilNs, stopCts.Token).ConfigureAwait(false);
+        // sleep 上限 1ms。manual mode の受信は PumpAll でしか進まないため、
+        // sleep 粒度がそのまま farm の受信レイテンシ床になる。spin-pump は
+        // farm proc が core を焼き、同居プロセス(local run では server)を
+        // starve させて逆効果だったため不採用(farm 凍結構成も sleep 前提)
+        if (now < nextNs)
+        {
+            var deltaNs = BenchClock.SaturatingSub(
+                nextNs < schedule.DrainUntilNs ? nextNs : schedule.DrainUntilNs, now);
+            if (deltaNs >= 1_000_000UL)
+            {
+                await Task.Delay(1, stopCts.Token).ConfigureAwait(false);
+            }
+            else
+            {
+                await Task.Yield();
+            }
+        }
     }
 
     if (!markedUnsent)
@@ -316,15 +340,31 @@ static void SendSlot(NetPeer peer, uint originId, BenchSlot slot, ClientConfig c
     var header = new BenchHeader(slot.Seq, slot.SchedTsNs, sendTsNs, slot.Flags, originId);
     var mustDeliver = (slot.Flags & BenchConstants.FlagMustDeliver) != 0;
     var payloadSize = mustDeliver ? config.PayloadMd : config.PayloadLt;
-    var payload = new byte[payloadSize];
     var submitted = false;
 
-    if (BenchPayload.TryWrite(payload, header) && peer.ConnectionState == ConnectionState.Connected)
+    if (peer.ConnectionState == ConnectionState.Connected)
     {
         var method = mustDeliver ? DeliveryMethod.ReliableOrdered : DeliveryMethod.Unreliable;
         try
         {
-            peer.Send(payload, method);
+            // CreatePacketFromPool + 直書き = per-send の managed alloc 0・
+            // copy 0(通常の Send は毎回 pool packet へ CopyTo する)。
+            // header 32B 以降は受信側で読まれない契約なので未初期化のまま。
+            // MTU(1 packet)に収まらない md はライブラリの fragment 経路
+            // (通常 Send)へフォールバック。
+            var pooled = peer.CreatePacketFromPool(method);
+            if (payloadSize <= pooled.MaxUserDataSize)
+            {
+                BenchPayload.TryWrite(
+                    pooled.Data.AsSpan(pooled.UserDataOffset, payloadSize), header);
+                peer.SendPooledPacket(pooled, payloadSize);
+            }
+            else
+            {
+                var payload = new byte[payloadSize];
+                BenchPayload.TryWrite(payload, header);
+                peer.Send(payload, method);
+            }
             submitted = peer.ConnectionState == ConnectionState.Connected;
         }
         catch
@@ -362,34 +402,6 @@ static ulong NextPlanDue(BenchPlan?[] plans)
     }
 
     return next;
-}
-
-static async Task DelayUntilNextAsync(ulong nowNs, ulong nextNs, ulong limitNs, CancellationToken cancellationToken)
-{
-    var wakeNs = nextNs;
-    var sliceNs = BenchClock.AddSaturating(nowNs, 10_000_000UL);
-    if (wakeNs > sliceNs)
-    {
-        wakeNs = sliceNs;
-    }
-    if (wakeNs > limitNs)
-    {
-        wakeNs = limitNs;
-    }
-    if (wakeNs <= nowNs)
-    {
-        await Task.Yield();
-        return;
-    }
-
-    var deltaNs = wakeNs - nowNs;
-    if (deltaNs < 1_000_000UL)
-    {
-        await Task.Yield();
-        return;
-    }
-
-    await Task.Delay((int)(deltaNs / 1_000_000UL), cancellationToken).ConfigureAwait(false);
 }
 
 static string MetricsPathOrDefault()
