@@ -16,6 +16,11 @@
 #define ENET_CHANNEL_RELIABLE 0u
 #define ENET_CHANNEL_UNRELIABLE 1u
 #define ENET_SERVICE_SLICE_MS 10u
+// 1 回の service_once で処理するイベント数の上限。無制限だと持続的な受信で
+// ループから抜けられず、main ループの制御チャネル poll が飢える(raw_udp の
+// drain 上限と同じ理由)。超過分は dispatch queue に残り次呼び出しで続きを引く。
+#define ENET_SERVICE_EVENT_BUDGET 4096
+#define ENET_BENCH_SOCKBUF_BYTES (4 * 1024 * 1024)
 
 typedef enum {
   CLASS_LOSS_TOLERANT = 0,
@@ -50,11 +55,13 @@ static void print_describe(void) {
        "\"class_mapping\":{\"loss_tolerant\":\"unreliable-unsequenced\","
        "\"must_deliver\":\"reliable\"},"
        "\"coalescing\":\"none\","
-       "\"cc_algo\":\"enet-packet-throttle(scale=32,default=32,accel=2,decel=2,interval=5000ms)\","
+       "\"cc_algo\":\"enet-packet-throttle(scale=32,default=32,accel=32,decel=0,interval=5000ms)\","
        "\"thread_model\":\"single\","
        "\"encryption\":false,"
        "\"max_payload_bytes\":65536,"
-       "\"tuning\":[]}");
+       "\"tuning\":[\"throttle_configure(accel=32,decel=0)\","
+       "\"peer_timeout(min=10s,max=60s)\","
+       "\"sockbuf=4MB\",\"zero-copy-forward\",\"check-events-drain\"]}");
 }
 
 static int parse_u16(const char *s, uint16_t *out) {
@@ -103,34 +110,22 @@ static dist_index dist_from_flags(uint8_t flags) {
   return (flags & BK_FLAG_BROADCAST) != 0 ? DIST_BROADCAST : DIST_ECHO;
 }
 
-static int enet_class_route(uint8_t flags, enet_uint8 *channel,
-                            enet_uint32 *packet_flags) {
-  if ((flags & BK_FLAG_MUST_DELIVER) != 0) {
-    *channel = ENET_CHANNEL_RELIABLE;
-    *packet_flags = ENET_PACKET_FLAG_RELIABLE;
-  } else {
-    *channel = ENET_CHANNEL_UNRELIABLE;
-    *packet_flags = ENET_PACKET_FLAG_UNSEQUENCED;
-  }
-  return 0;
+static enet_uint8 channel_from_flags(uint8_t flags) {
+  return (flags & BK_FLAG_MUST_DELIVER) != 0 ? ENET_CHANNEL_RELIABLE
+                                             : ENET_CHANNEL_UNRELIABLE;
 }
 
-static int send_payload(ENetPeer *peer, const void *data, size_t len,
-                        uint8_t flags) {
-  enet_uint8 channel = 0;
-  enet_uint32 packet_flags = 0;
-  if (enet_class_route(flags, &channel, &packet_flags) != 0) {
-    return -1;
-  }
-  ENetPacket *packet = enet_packet_create(data, len, packet_flags);
-  if (packet == NULL) {
-    return -1;
-  }
-  if (enet_peer_send(peer, channel, packet) != 0) {
-    enet_packet_destroy(packet);
-    return -1;
-  }
-  return 0;
+// peer 単位チューニング(upstream 公式 API。--describe の tuning に開示):
+// - packet throttle: 減速を無効化。既定(accel=2,decel=2)は burst loss で
+//   throttle が 32→0 に滑落し、unreliable の大半をライブラリが送信キューで
+//   自己破棄する(docs/ledger.md #11)。throttle は reliable window の実効幅
+//   (packetThrottle*windowSize/32, protocol.c:1470)にも掛かる
+// - timeout: service が高負荷で間引かれると reliable timeout
+//   (既定 min5s/max30s)で切断される(ledger #8)。検出遅延と引き換えに延長
+static void tune_peer(ENetPeer *peer) {
+  enet_peer_throttle_configure(peer, ENET_PEER_PACKET_THROTTLE_INTERVAL,
+                               ENET_PEER_PACKET_THROTTLE_SCALE, 0);
+  enet_peer_timeout(peer, ENET_PEER_TIMEOUT_LIMIT, 10000, 60000);
 }
 
 static void count_submit(server_stats *stats, class_index cls, dist_index dist,
@@ -145,12 +140,15 @@ static void count_submit(server_stats *stats, class_index cls, dist_index dist,
   }
 }
 
+// 受信 packet の所有権はこの関数が引き取る(転送成功なら ENet の refcount
+// 管理に移り、失敗・不正 payload ならここで destroy する)。
 static void handle_receive(ENetHost *host, const ENetEvent *event,
                            server_stats *stats) {
+  ENetPacket *packet = event->packet;
   bk_header header;
-  if (bk_payload_read(event->packet->data, event->packet->dataLength,
-                      &header) != 0) {
+  if (bk_payload_read(packet->data, packet->dataLength, &header) != 0) {
     stats->invalid_payload++;
+    enet_packet_destroy(packet);
     return;
   }
 
@@ -162,43 +160,55 @@ static void handle_receive(ENetHost *host, const ENetEvent *event,
     stats->recv_measured[cls][dist]++;
   }
 
+  // 受信 packet をそのまま転送する(zero-copy)。受信経路で class 相当の
+  // packet flag(RELIABLE / UNSEQUENCED)が付与済みなので(protocol.c:462,506)
+  // 再 create せず forward しても class mapping は保存される。
+  const enet_uint8 channel = channel_from_flags(header.flags);
+
   if (dist == DIST_ECHO) {
-    const bool ok = send_payload(event->peer, event->packet->data,
-                                 event->packet->dataLength, header.flags) == 0;
+    const bool ok = enet_peer_send(event->peer, channel, packet) == 0;
     count_submit(stats, cls, dist, measured, ok);
+    if (!ok) {
+      enet_packet_destroy(packet);
+    }
     return;
   }
 
+  // broadcast: 1 packet を全 peer で refcount 共有(enet_host_broadcast と
+  // 同方式、host.c:271-288)。per-peer の malloc+copy を発生させない。
+  // per-peer の submit 会計が要るため enet_host_broadcast は使わず手で回す。
   for (size_t i = 0; i < host->peerCount; ++i) {
     ENetPeer *peer = &host->peers[i];
     if (peer->state != ENET_PEER_STATE_CONNECTED) {
       continue;
     }
-    const bool ok =
-        send_payload(peer, event->packet->data, event->packet->dataLength,
-                     header.flags) == 0;
+    const bool ok = enet_peer_send(peer, channel, packet) == 0;
     count_submit(stats, cls, dist, measured, ok);
+  }
+  if (packet->referenceCount == 0) {
+    enet_packet_destroy(packet);
   }
 }
 
+// イベント処理ループ。dispatch 済みイベントは enet_host_check_events で
+// I/O なしに引く。enet_host_service は 1 呼び出しで最大 1 event しか返さず、
+// 毎回 全 peer 走査の送信パス×2 + 受信を回すため(protocol.c:1830,1846,1862)、
+// event ごとに service(0) を呼ぶ旧構成は多 peer で O(events×peers) だった。
 static int service_once(ENetHost *host, enet_uint32 timeout_ms,
                         server_stats *stats) {
   ENetEvent event;
-  const int rc = enet_host_service(host, &event, timeout_ms);
+  int rc = enet_host_service(host, &event, timeout_ms);
   if (rc < 0) {
     return -1;
   }
-  if (rc == 0) {
-    return 0;
-  }
-
-  for (;;) {
+  int handled = 0;
+  while (rc > 0) {
     switch (event.type) {
       case ENET_EVENT_TYPE_CONNECT:
+        tune_peer(event.peer);
         break;
       case ENET_EVENT_TYPE_RECEIVE:
         handle_receive(host, &event, stats);
-        enet_packet_destroy(event.packet);
         break;
       case ENET_EVENT_TYPE_DISCONNECT:
         event.peer->data = NULL;
@@ -207,15 +217,21 @@ static int service_once(ENetHost *host, enet_uint32 timeout_ms,
         break;
     }
 
-    const int next = enet_host_service(host, &event, 0);
-    if (next < 0) {
+    if (++handled >= ENET_SERVICE_EVENT_BUDGET) {
+      // budget 到達で中断: 積んだ応答だけ吐いて制御チャネルに戻る
+      enet_host_flush(host);
+      return 0;
+    }
+    rc = enet_host_check_events(host, &event);
+    if (rc == 0) {
+      // dispatch queue が空になったら service(0) で送信+受信をもう 1 パス。
+      // このパスが直前までに積んだ応答を flush する
+      rc = enet_host_service(host, &event, 0);
+    }
+    if (rc < 0) {
       return -1;
     }
-    if (next == 0) {
-      break;
-    }
   }
-  enet_host_flush(host);
   return 0;
 }
 
@@ -307,6 +323,12 @@ int main(int argc, char **argv) {
             port);
     return EXIT_FAILURE;
   }
+  // 全 conn の集約トラフィックを 1 socket で受ける。ENet 既定 256KB
+  // (enet.h:213-214)は broadcast fanout の burst で溢れる
+  enet_socket_set_option(host->socket, ENET_SOCKOPT_RCVBUF,
+                         ENET_BENCH_SOCKBUF_BYTES);
+  enet_socket_set_option(host->socket, ENET_SOCKOPT_SNDBUF,
+                         ENET_BENCH_SOCKBUF_BYTES);
 
   server_stats stats;
   memset(&stats, 0, sizeof(stats));

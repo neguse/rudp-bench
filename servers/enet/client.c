@@ -16,6 +16,11 @@
 #define ENET_BENCH_MAX_CONNS 4095u
 #define ENET_CHANNEL_RELIABLE 0u
 #define ENET_CHANNEL_UNRELIABLE 1u
+// 1 回の drain_events で処理するイベント数の上限。broadcast fanout
+// (受信 conns² スケール)では上限なしだとループから抜けられず、送信と
+// 制御チャネル poll(bk_steady_tick)が飢える(raw_udp の drain 上限と同じ)。
+#define ENET_DRAIN_EVENT_BUDGET 4096
+#define ENET_BENCH_SOCKBUF_BYTES (4 * 1024 * 1024)
 #define DEV_WARMUP_NS 200000000ull
 #define DEV_DURATION_NS 2000000000ull
 #define DEV_DRAIN_NS 500000000ull
@@ -51,11 +56,13 @@ static void print_describe(void) {
        "\"class_mapping\":{\"loss_tolerant\":\"unreliable-unsequenced\","
        "\"must_deliver\":\"reliable\"},"
        "\"coalescing\":\"none\","
-       "\"cc_algo\":\"enet-packet-throttle(scale=32,default=32,accel=2,decel=2,interval=5000ms)\","
+       "\"cc_algo\":\"enet-packet-throttle(scale=32,default=32,accel=32,decel=0,interval=5000ms)\","
        "\"thread_model\":\"single\","
        "\"encryption\":false,"
        "\"max_payload_bytes\":65536,"
-       "\"tuning\":[]}");
+       "\"tuning\":[\"throttle_configure(accel=32,decel=0)\","
+       "\"peer_timeout(min=10s,max=60s)\","
+       "\"sockbuf=4MB\",\"packet-direct-write\",\"check-events-drain\"]}");
 }
 
 static void usage(const char *argv0) {
@@ -293,8 +300,8 @@ static int build_streams(const client_config *cfg, bk_stream *streams,
   return n > 0 ? 0 : -1;
 }
 
-static int enet_class_route(uint8_t flags, enet_uint8 *channel,
-                            enet_uint32 *packet_flags) {
+static void enet_class_route(uint8_t flags, enet_uint8 *channel,
+                             enet_uint32 *packet_flags) {
   if ((flags & BK_FLAG_MUST_DELIVER) != 0) {
     *channel = ENET_CHANNEL_RELIABLE;
     *packet_flags = ENET_PACKET_FLAG_RELIABLE;
@@ -302,25 +309,17 @@ static int enet_class_route(uint8_t flags, enet_uint8 *channel,
     *channel = ENET_CHANNEL_UNRELIABLE;
     *packet_flags = ENET_PACKET_FLAG_UNSEQUENCED;
   }
-  return 0;
 }
 
-static int send_payload(ENetPeer *peer, const void *data, size_t len,
-                        uint8_t flags) {
-  enet_uint8 channel = 0;
-  enet_uint32 packet_flags = 0;
-  if (enet_class_route(flags, &channel, &packet_flags) != 0) {
-    return -1;
-  }
-  ENetPacket *packet = enet_packet_create(data, len, packet_flags);
-  if (packet == NULL) {
-    return -1;
-  }
-  if (enet_peer_send(peer, channel, packet) != 0) {
-    enet_packet_destroy(packet);
-    return -1;
-  }
-  return 0;
+// peer 単位チューニング(upstream 公式 API。--describe の tuning に開示):
+// - packet throttle: 減速を無効化。既定は burst loss で throttle が 32→0 に
+//   滑落し unreliable の大半を送信キューで自己破棄する(docs/ledger.md #11)
+// - timeout: 高負荷で service が間引かれた際の reliable timeout 切断
+//   (ledger #8 の client crash)を遅らせる
+static void tune_peer(ENetPeer *peer) {
+  enet_peer_throttle_configure(peer, ENET_PEER_PACKET_THROTTLE_INTERVAL,
+                               ENET_PEER_PACKET_THROTTLE_SCALE, 0);
+  enet_peer_timeout(peer, ENET_PEER_TIMEOUT_LIMIT, 10000, 60000);
 }
 
 static int handle_event(const ENetEvent *event, bk_metrics *metrics,
@@ -331,6 +330,7 @@ static int handle_event(const ENetEvent *event, bk_metrics *metrics,
       if (conn != NULL && !conn->connected) {
         conn->connected = true;
         (*connected_count)++;
+        tune_peer(event->peer);
       }
       break;
     }
@@ -353,21 +353,35 @@ static int handle_event(const ENetEvent *event, bk_metrics *metrics,
   return 0;
 }
 
+// dispatch 済みイベントは enet_host_check_events で I/O なしに引く。
+// enet_host_service は 1 呼び出しで最大 1 event しか返さず、毎回全 peer 走査の
+// 送信パス×2 + 受信を回すため(protocol.c:1830,1846,1862)、event ごとに
+// service(0) を呼ぶ旧構成は多 peer で O(events×peers) だった。
 static int drain_events(ENetHost *host, bk_metrics *metrics,
                         int *connected_count) {
   ENetEvent event;
-  for (;;) {
-    const int rc = enet_host_service(host, &event, 0);
-    if (rc < 0) {
-      return -1;
-    }
-    if (rc == 0) {
-      return 0;
-    }
+  int rc = enet_host_service(host, &event, 0);
+  if (rc < 0) {
+    return -1;
+  }
+  int handled = 0;
+  while (rc > 0) {
     if (handle_event(&event, metrics, connected_count) != 0) {
       return -1;
     }
+    if (++handled >= ENET_DRAIN_EVENT_BUDGET) {
+      // budget 到達: 残りは dispatch queue に置いたまま送信側に制御を返す
+      return 0;
+    }
+    rc = enet_host_check_events(host, &event);
+    if (rc == 0) {
+      rc = enet_host_service(host, &event, 0);
+    }
+    if (rc < 0) {
+      return -1;
+    }
   }
+  return 0;
 }
 
 static int wait_for_connects(ENetHost *host, int conns, bk_metrics *metrics) {
@@ -402,16 +416,29 @@ static void make_header_from_slot(const bk_slot *slot, uint32_t origin_id,
 }
 
 static int send_slot(client_conn *conn, const bk_slot *slot,
-                     uint8_t *payload_buf, size_t payload_size,
-                     bk_metrics *metrics) {
+                     size_t payload_size, bk_metrics *metrics) {
   bk_header header;
   make_header_from_slot(slot, conn->origin_id, bk_now_ns(), &header);
-  if (bk_payload_write(payload_buf, payload_size, &header) != 0) {
+  enet_uint8 channel = 0;
+  enet_uint32 packet_flags = 0;
+  enet_class_route(header.flags, &channel, &packet_flags);
+  // data=NULL で無初期化 packet を確保し、header を packet バッファへ直接書く
+  // (中間バッファ経由だと enet_packet_create が全 payload を memcpy する、
+  // packet.c:33-41)。header 32B 以降のバイトは受信側で読まれない契約
+  // (bk_payload_read はヘッダのみ検証)なので未初期化のまま送る。
+  ENetPacket *packet = enet_packet_create(NULL, payload_size, packet_flags);
+  if (packet == NULL ||
+      bk_payload_write(packet->data, payload_size, &header) != 0) {
+    if (packet != NULL) {
+      enet_packet_destroy(packet);
+    }
     bk_metrics_on_slot(metrics, &header, false);
     return -1;
   }
-  const bool submitted =
-      send_payload(conn->peer, payload_buf, payload_size, header.flags) == 0;
+  const bool submitted = enet_peer_send(conn->peer, channel, packet) == 0;
+  if (!submitted) {
+    enet_packet_destroy(packet);
+  }
   bk_metrics_on_slot(metrics, &header, submitted);
   return submitted ? 0 : -1;
 }
@@ -520,9 +547,12 @@ static int run_client(const client_config *cfg) {
   }
 
   // 計測器(client farm)側の受信バッファ。broadcast fanout の高 pps 受信で
-  // kernel 既定 rcvbuf が溢れると server の delivery が過小観測される
-  // (farm 十分性の問題であり transport の tuning ではない。server 側は不変)
-  enet_socket_set_option(host->socket, ENET_SOCKOPT_RCVBUF, 4 * 1024 * 1024);
+  // kernel 既定 rcvbuf が溢れると server の delivery が過小観測される。
+  // 送信側も ENet 既定 256KB(enet.h:213-214)では burst 送信で詰まる
+  enet_socket_set_option(host->socket, ENET_SOCKOPT_RCVBUF,
+                         ENET_BENCH_SOCKBUF_BYTES);
+  enet_socket_set_option(host->socket, ENET_SOCKOPT_SNDBUF,
+                         ENET_BENCH_SOCKBUF_BYTES);
   {
     int effective = 0;
     socklen_t optlen = sizeof(effective);
@@ -532,13 +562,8 @@ static int run_client(const client_config *cfg) {
   }
 
   client_conn *conns = (client_conn *)calloc((size_t)cfg->conns, sizeof(*conns));
-  const size_t payload_buf_size =
-      cfg->payload_lt > cfg->payload_md ? cfg->payload_lt : cfg->payload_md;
-  uint8_t *payload_buf = (uint8_t *)calloc(1, payload_buf_size);
-  if (conns == NULL || payload_buf == NULL) {
+  if (conns == NULL) {
     fprintf(stderr, "allocation failed\n");
-    free(payload_buf);
-    free(conns);
     enet_host_destroy(host);
     bk_metrics_free(metrics);
     return -1;
@@ -549,7 +574,6 @@ static int run_client(const client_config *cfg) {
       bk_control_hello(control, "client", "enet", cfg->proc_index) != 0) {
     fprintf(stderr, "benchkit hello failed\n");
     bk_control_close(control);
-    free(payload_buf);
     free(conns);
     enet_host_destroy(host);
     bk_metrics_free(metrics);
@@ -563,7 +587,6 @@ static int run_client(const client_config *cfg) {
     if (control != NULL) {
       bk_control_close(control);
     }
-    free(payload_buf);
     free(conns);
     enet_host_destroy(host);
     bk_metrics_free(metrics);
@@ -580,7 +603,6 @@ static int run_client(const client_config *cfg) {
       if (control != NULL) {
         bk_control_close(control);
       }
-      free(payload_buf);
       free(conns);
       enet_host_destroy(host);
       bk_metrics_free(metrics);
@@ -594,7 +616,6 @@ static int run_client(const client_config *cfg) {
     if (control != NULL) {
       bk_control_close(control);
     }
-    free(payload_buf);
     free(conns);
     enet_host_destroy(host);
     bk_metrics_free(metrics);
@@ -607,7 +628,6 @@ static int run_client(const client_config *cfg) {
         bk_control_wait_schedule(control, &schedule) != 0) {
       fprintf(stderr, "benchkit schedule failed\n");
       bk_control_close(control);
-      free(payload_buf);
       free(conns);
       enet_host_destroy(host);
       bk_metrics_free(metrics);
@@ -627,7 +647,6 @@ static int run_client(const client_config *cfg) {
     if (control != NULL) {
       bk_control_close(control);
     }
-    free(payload_buf);
     free(conns);
     enet_host_destroy(host);
     bk_metrics_free(metrics);
@@ -647,7 +666,6 @@ static int run_client(const client_config *cfg) {
       for (int j = 0; j < i; ++j) {
         bk_plan_free(conns[j].plan);
       }
-      free(payload_buf);
       free(conns);
       enet_host_destroy(host);
       bk_metrics_free(metrics);
@@ -701,8 +719,7 @@ static int run_client(const client_config *cfg) {
           const size_t payload_size = (slot.flags & BK_FLAG_MUST_DELIVER)
                                           ? cfg->payload_md
                                           : cfg->payload_lt;
-          if (send_slot(&conns[i], &slot, payload_buf, payload_size,
-                        metrics) == 0) {
+          if (send_slot(&conns[i], &slot, payload_size, metrics) == 0) {
             submitted_any = true;
           }
         }
@@ -774,7 +791,6 @@ static int run_client(const client_config *cfg) {
   for (int i = 0; i < cfg->conns; ++i) {
     bk_plan_free(conns[i].plan);
   }
-  free(payload_buf);
   free(conns);
   enet_host_destroy(host);
   bk_metrics_free(metrics);
