@@ -40,6 +40,10 @@ builder.Logging.ClearProviders();
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.ListenAnyIP(config.Port, listen => listen.Protocols = HttpProtocols.Http2);
+    // HTTP/2 flow-control window(既定 conn 128KB / stream 96KB)は
+    // 高 conns の受信集約で律速になりうる。公式ノブで拡大(--describe に開示)
+    options.Limits.Http2.InitialConnectionWindowSize = 8 * 1024 * 1024;
+    options.Limits.Http2.InitialStreamWindowSize = 4 * 1024 * 1024;
 });
 builder.Services.AddSingleton<ServerStats>();
 builder.Services.AddMagicOnion();
@@ -155,7 +159,10 @@ public sealed class ServerStats
     private const int DistEcho = 0;
     private const int DistBroadcast = 1;
 
-    private readonly object gate = new();
+    // カウンタは Interlocked: StreamingHub のメソッドは接続ごとに複数
+    // thread-pool スレッドで並行に走るため、単一 lock だと全 hub が
+    // メッセージごとに直列化される(msquic で同型の修正が broadcast の
+    // 主要律速だった)。ToJson は全接続停止後にのみ呼ぶ。
     private readonly ulong[,] recv = new ulong[BenchConstants.ClassCount, 2];
     private readonly ulong[,] recvMeasured = new ulong[BenchConstants.ClassCount, 2];
     private readonly ulong[,] submit = new ulong[BenchConstants.ClassCount, 2];
@@ -170,26 +177,16 @@ public sealed class ServerStats
 
     public void Disconnected() => Interlocked.Decrement(ref connections);
 
-    public void InvalidPayload()
-    {
-        lock (gate)
-        {
-            invalidPayload++;
-        }
-    }
+    public void InvalidPayload() => Interlocked.Increment(ref invalidPayload);
 
     public void CountRecv(byte flags)
     {
         var cls = BenchConstants.ClassIndexFromFlags(flags);
         var dist = DistFromFlags(flags);
-        var measured = (flags & BenchConstants.FlagMeasure) != 0;
-        lock (gate)
+        Interlocked.Increment(ref recv[cls, dist]);
+        if ((flags & BenchConstants.FlagMeasure) != 0)
         {
-            recv[cls, dist]++;
-            if (measured)
-            {
-                recvMeasured[cls, dist]++;
-            }
+            Interlocked.Increment(ref recvMeasured[cls, dist]);
         }
     }
 
@@ -197,21 +194,22 @@ public sealed class ServerStats
     {
         var cls = BenchConstants.ClassIndexFromFlags(flags);
         var dist = DistFromFlags(flags);
-        var measured = (flags & BenchConstants.FlagMeasure) != 0;
-        lock (gate)
+        if (okCount != 0)
         {
-            submit[cls, dist] += okCount;
-            sendFailed[cls, dist] += failedCount;
-            if (measured)
+            Interlocked.Add(ref submit[cls, dist], okCount);
+            if ((flags & BenchConstants.FlagMeasure) != 0)
             {
-                submitMeasured[cls, dist] += okCount;
+                Interlocked.Add(ref submitMeasured[cls, dist], okCount);
             }
+        }
+        if (failedCount != 0)
+        {
+            Interlocked.Add(ref sendFailed[cls, dist], failedCount);
         }
     }
 
     public string ToJson()
     {
-        lock (gate)
         {
             var sb = new StringBuilder(1024);
             sb.Append("{\"recv\":{\"loss_tolerant\":{\"echo\":").Append(recv[0, 0])

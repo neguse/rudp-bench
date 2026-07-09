@@ -39,3 +39,16 @@ python3 servers/websocket/smoke_test.py \
 The smoke test also checks that the client metrics JSON has the same structural
 shape as `benchkit` `bk_metrics_dump_json`: top-level keys, class keys, raw
 keys, `log2x16` histogram metadata, and 448-bin histogram arrays.
+
+## Tuned(2026-07-10)
+
+- **ServerStats を Interlocked 化**: 受信ループは接続ごとの async タスクで
+  並行に走るため、単一 lock だと全接続がメッセージごとに直列化される
+  (msquic で同型の修正が broadcast の主要律速だった)。
+- **client の受信ループ index キャプチャバグ修正**: `Task.Run(() =>
+  ReceiveLoopAsync(ws, (uint)i, ...))` が for 変数 `i` を共有キャプチャして
+  おり、Task 起動がループ前進より遅れると複数受信ループが同じ index を読む
+  (dedup キー破壊 → 偽 duplicates、c64 broadcast で決定的に再現)。
+  ループ内ローカルへの固定で解消。docs/ledger.md #19。
+- 確認(loopback 5s): echo c4 p50 0.26ms、bcast c64 delivery 1.000 /
+  dup 0 / p50 3.3-5.6ms。

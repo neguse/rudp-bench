@@ -64,6 +64,10 @@ try
     for (var i = 0; i < config.Conns; i++)
     {
         var originId = config.OriginBase + (uint)i;
+        // for 変数 i を lambda に直接キャプチャすると、Task.Run の起動が
+        // ループ前進より遅れた場合に複数の受信ループが同じ index を読む
+        // (dedup キー破壊 → 偽 duplicates)。ループ内ローカルに固定する
+        var localIndex = (uint)i;
         var ws = new ClientWebSocket();
         // Disabled: matches server-side KeepAliveInterval=0 -- no ping/pong control
         // frames on the measured path. See servers/websocket/README.md.
@@ -71,7 +75,7 @@ try
         await ws.ConnectAsync(uri, stopCts.Token).ConfigureAwait(false);
         var connection = new ClientConnection(originId, ws);
         connection.ReceiveTask = Task.Run(
-            () => ReceiveLoopAsync(ws, (uint)i, metrics, metricsGate, stopCts.Token),
+            () => ReceiveLoopAsync(ws, localIndex, metrics, metricsGate, stopCts.Token),
             CancellationToken.None);
         connections.Add(connection);
     }
