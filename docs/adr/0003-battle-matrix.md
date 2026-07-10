@@ -12,7 +12,7 @@
 |---|---|
 | transport | enet / gns / msquic / litenetlib / magiconion / websocket(+ raw_udp 天井) |
 | shape | echo(Q1)/ broadcast(Q2) |
-| workload | r20p128 / r60p200 / r20p1000(小高頻度・中高頻度・大) |
+| workload | br=r20p128 / vr=r60p200 / video=r20p1000(ADR-0000 のアーキタイプ)。表はアーキタイプ名で提示 |
 | regime | **wired-50**: 片道 25ms・loss 0.1%(RTT 50ms)/ **rough-50**: 片道 25ms・loss 1% |
 | conns 範囲 | broadcast: 4..512 / echo: 4..4096(v1 実績 1500-3000 を覆う) |
 | deadline | 150ms 固定(ゲーム要求として regime 非依存 — 遠い回線ほど capacity が落ちるのは現実の姿) |
