@@ -621,7 +621,7 @@ func (s *runState) apply(ev event) error {
 		p.SchedAck = ev.ack
 		p.AckReceived = true
 		if ev.ack.MarginNS < 0 {
-			s.invalid = append(s.invalid, fmt.Sprintf("proc_index=%d pid=%d negative schedule margin: %d ns", p.Hello.ProcIndex, p.Hello.PID, ev.ack.MarginNS))
+			s.invalid = append(s.invalid, fmt.Sprintf("role=%s proc_index=%d pid=%d negative schedule margin: %d ns", p.Hello.Role, p.Hello.ProcIndex, p.Hello.PID, ev.ack.MarginNS))
 		}
 	case eventRate:
 		p := s.participants[ev.connID]
@@ -666,7 +666,7 @@ func (s *runState) apply(ev event) error {
 		}
 		s.windowAcked[ev.connID] = true
 		if ev.windowAck.MarginNS < 0 {
-			s.invalid = append(s.invalid, fmt.Sprintf("proc_index=%d pid=%d negative window margin: %d ns", p.Hello.ProcIndex, p.Hello.PID, ev.windowAck.MarginNS))
+			s.invalid = append(s.invalid, fmt.Sprintf("role=%s proc_index=%d pid=%d negative window margin: %d ns", p.Hello.Role, p.Hello.ProcIndex, p.Hello.PID, ev.windowAck.MarginNS))
 		}
 	case eventDone:
 		p := s.participants[ev.connID]

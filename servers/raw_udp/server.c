@@ -290,6 +290,13 @@ static void handle_datagram(int fd, peer_table *pt, const struct sockaddr_in *sr
 }
 
 // timeout_ms 待って socket を drain する。戻り値 0=ok / -1=err。
+// **drain は budget で bound する**: broadcast fanout の持続負荷では socket が
+// 空にならず、無制限だとこのループから抜けられずに main ループの
+// bk_control_poll_window が飢える(window_ack が数秒〜run 全長遅れて
+// negative window margin INVALID になる — docs/ledger.md #20)。
+// 超過分は POLLIN が残るので次呼び出しで続きを引く。
+#define RAWUDP_SERVER_DRAIN_BUDGET 512
+
 static int service_once(int fd, peer_table *pt, int timeout_ms,
                         server_stats *stats) {
   struct pollfd pfd = {fd, POLLIN, 0};
@@ -305,7 +312,7 @@ static int service_once(int fd, peer_table *pt, int timeout_ms,
   }
 
   static uint8_t buf[RAWUDP_MAX_PAYLOAD_BYTES];
-  for (;;) {
+  for (int drained = 0; drained < RAWUDP_SERVER_DRAIN_BUDGET; ++drained) {
     struct sockaddr_in src;
     socklen_t sl = sizeof(src);
     ssize_t n = recvfrom(fd, buf, sizeof(buf), MSG_TRUNC,
@@ -329,6 +336,7 @@ static int service_once(int fd, peer_table *pt, int timeout_ms,
     }
     handle_datagram(fd, pt, &src, buf, (size_t)n, stats);
   }
+  return 0;
 }
 
 static int format_stats_json(const server_stats *s, char *buf, size_t cap) {
