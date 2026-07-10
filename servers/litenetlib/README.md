@@ -11,15 +11,15 @@ wiring, client control-channel lifecycle)。ソース引用は tag 2.1.4
 Build:
 
 ```sh
-DOTNET_CLI_HOME=/tmp/dotnet-cli-home dotnet build servers/litenetlib/LiteNetLibBench.sln
+DOTNET_CLI_HOME=/tmp/dotnet-cli-home dotnet build -c Release servers/litenetlib/LiteNetLibBench.sln
 ```
 
 Smoke:
 
 ```sh
 python3 servers/litenetlib/smoke_test.py \
-  servers/litenetlib/LiteNetLibBench.Server/bin/Debug/net10.0/LiteNetLibBench.Server \
-  servers/litenetlib/LiteNetLibBench.Client/bin/Debug/net10.0/LiteNetLibBench.Client
+  servers/litenetlib/LiteNetLibBench.Server/bin/Release/net10.0/LiteNetLibBench.Server \
+  servers/litenetlib/LiteNetLibBench.Client/bin/Release/net10.0/LiteNetLibBench.Client
 ```
 
 ## Thread model
@@ -114,19 +114,23 @@ spin-pump(sleep なし)は farm proc が core を焼き同居プロセスを sta
 | MtuDiscovery | true(false) | 既定 off だと MTU 1024 固定(`NetConstants.cs:89-107`)。有効化で 1432 まで交渉、merge 効率と unreliable 上限が上がる |
 | UseNativeSockets | true(false) | recvfrom/sendto P/Invoke 直呼びで managed Socket 層と EndPoint alloc を回避(`LiteNetManager.cs:252-255`)。off だと c64 bcast の delivery が悪化するのを実測 |
 | DisconnectTimeout | 60s(5s) | 高負荷で pump/相手 ping が滞った際の切断猶予(`LiteNetPeer.cs:1222-1234`) |
+| PacketPoolSize | server 16384 / client 4096(1000) | 枯渇すると全 packet が contended pool lock + GC alloc 経路に落ちる(`LiteNetManager.PacketPool.cs:42-80`)。fanout の in-flight は容易に 1000 を超える |
 
 SocketBufferSize(1MB)は定数で公開ノブが無い(`NetConstants.cs:48`)。
 farm 側 rcvbuf 増強が必要になった場合(ledger #5 のシグナル発火時)は
 ソース vendor か reflection が必要 — 未実施。
 
-## 確認結果(loopback 5s run、2026-07-10)
+## 確認結果(loopback 5s run、Release ビルド、2026-07-10)
 
-- echo c4: VALID delivery 1.000、p50 sched **19.5ms → 1.2ms**(N=3 安定)
-- broadcast c64(30Hz×1000B、期待 123k msg/s): delivery 1.000、
-  p50 sched **34.8ms → 17.4ms**
-- broadcast c128: VALID delivery 0.156 = 単一 logic スレッドの sendto が
-  ceiling(正直な過負荷、crash なし)。ここはライブラリ構造の限界で
-  アダプタでは削れない
+- echo c4: VALID delivery 1.000、p50 sched **19.5ms → 1.3ms**(改善は
+  Debug 計測でも N=3 で再現)
+- broadcast c64(30Hz×1000B、期待 123k msg/s): Debug 計測では delivery
+  1.000 / p50 17ms(旧 35ms)だったが、**Release では同居負荷のある開発機の
+  判定限界を超えて 0.61〜0.93 に振れる**(farm と server が CPU を取り合う
+  loopback 構成の限界)。スケール挙動の確定は wired rig(CPU 分離)での
+  バトル測定に委ねる
+- 過負荷点では単一 logic スレッドの sendto がライブラリ ceiling
+  (crash はしない)。アダプタでは削れない
 
 received packets are recycled explicitly via `reader.Recycle()` after use,
 matching the pattern in LiteNetLib's own README sample, rather than setting

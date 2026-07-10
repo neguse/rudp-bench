@@ -25,15 +25,15 @@ https://learn.microsoft.com/aspnet/core/fundamentals/websockets).
 Build:
 
 ```sh
-DOTNET_CLI_HOME=/tmp/dotnet-cli-home dotnet build servers/websocket/WebSocketBench.sln
+DOTNET_CLI_HOME=/tmp/dotnet-cli-home dotnet build -c Release servers/websocket/WebSocketBench.sln
 ```
 
 Smoke:
 
 ```sh
 python3 servers/websocket/smoke_test.py \
-  servers/websocket/WebSocketBench.Server/bin/Debug/net10.0/WebSocketBench.Server \
-  servers/websocket/WebSocketBench.Client/bin/Debug/net10.0/WebSocketBench.Client
+  servers/websocket/WebSocketBench.Server/bin/Release/net10.0/WebSocketBench.Server \
+  servers/websocket/WebSocketBench.Client/bin/Release/net10.0/WebSocketBench.Client
 ```
 
 The smoke test also checks that the client metrics JSON has the same structural
@@ -50,5 +50,5 @@ keys, `log2x16` histogram metadata, and 448-bin histogram arrays.
   おり、Task 起動がループ前進より遅れると複数受信ループが同じ index を読む
   (dedup キー破壊 → 偽 duplicates、c64 broadcast で決定的に再現)。
   ループ内ローカルへの固定で解消。docs/ledger.md #19。
-- 確認(loopback 5s): echo c4 p50 0.26ms、bcast c64 delivery 1.000 /
-  dup 0 / p50 3.3-5.6ms。
+- 確認(loopback 5s、Release): echo c4 p50 0.37ms、bcast c64 delivery
+  1.000 / dup 0 / p50 5.9ms。

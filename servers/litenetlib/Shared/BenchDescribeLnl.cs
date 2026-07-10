@@ -39,6 +39,7 @@ public static class LnlDescribe
             "\"tuning\":[\"use_native_sockets\",\"mtu_discovery\"," +
             "\"disconnect_timeout=60s\",\"unsynced_receive_event(server)\"," +
             "\"update_time=1ms+trigger_update(server)\"," +
+            "\"packet_pool_size=16384/4096\"," +
             "\"pooled-packet-direct-write(client)\"]}";
     }
 }

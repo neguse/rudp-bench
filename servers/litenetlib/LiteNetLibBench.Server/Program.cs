@@ -86,6 +86,11 @@ listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 // - UseNativeSockets: recvfrom/sendto を P/Invoke 直呼びし managed Socket 層と
 //   EndPoint alloc を回避(LiteNetManager.cs:252-255)
 // - DisconnectTimeout 60s(既定 5s): 高負荷で相手の ping が滞った際の切断猶予
+// - PacketPoolSize 16384(既定 1000): fanout の in-flight packet 数は
+//   conns×burst で余裕で 1000 を超え、枯渇すると全 packet が
+//   「contended pool lock + GC alloc」経路に落ちる(PoolGetPacket/
+//   PoolRecycle、LiteNetManager.PacketPool.cs:42-80)。Release ビルドで
+//   fanout が速くなると顕在化し c64 bcast が崩れるのを実測
 var manager = new NetManager(listener)
 {
     UnsyncedReceiveEvent = true,
@@ -93,6 +98,7 @@ var manager = new NetManager(listener)
     MtuDiscovery = true,
     UseNativeSockets = true,
     DisconnectTimeout = 60000,
+    PacketPoolSize = 16384,
 };
 manager.Start(config.Port);
 

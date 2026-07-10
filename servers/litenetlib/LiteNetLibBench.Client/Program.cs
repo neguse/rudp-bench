@@ -113,6 +113,7 @@ try
             MtuDiscovery = true,
             UseNativeSockets = true,
             DisconnectTimeout = 60000,
+            PacketPoolSize = 4096,  // 既定 1000。枯渇すると毎 packet が GC alloc
         };
         if (!manager.StartInManualMode(0))
         {

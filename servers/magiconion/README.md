@@ -3,15 +3,15 @@
 Build:
 
 ```sh
-DOTNET_CLI_HOME=/tmp/dotnet-cli-home dotnet build servers/magiconion/MagicOnionBench.sln
+DOTNET_CLI_HOME=/tmp/dotnet-cli-home dotnet build -c Release servers/magiconion/MagicOnionBench.sln
 ```
 
 Smoke:
 
 ```sh
 python3 servers/magiconion/smoke_test.py \
-  servers/magiconion/MagicOnionBench.Server/bin/Debug/net10.0/MagicOnionBench.Server \
-  servers/magiconion/MagicOnionBench.Client/bin/Debug/net10.0/MagicOnionBench.Client
+  servers/magiconion/MagicOnionBench.Server/bin/Release/net10.0/MagicOnionBench.Server \
+  servers/magiconion/MagicOnionBench.Client/bin/Release/net10.0/MagicOnionBench.Client
 ```
 
 The smoke test also checks that the client metrics JSON has the same structural
@@ -26,5 +26,6 @@ keys, `log2x16` histogram metadata, and 448-bin histogram arrays.
 - **Kestrel HTTP/2 flow-control window 拡大**(公式ノブ、--describe に開示):
   InitialConnectionWindowSize 128KB→8MB / InitialStreamWindowSize 96KB→4MB。
   高 conns の受信集約での flow-control 律速を除去。
-- 確認(loopback 5s): echo c4 p50 0.37ms、bcast c64 delivery 1.000 /
-  p50 23.6ms。
+- 確認(loopback 5s、Release): echo c4 p50 0.61ms。c64 broadcast は
+  同居負荷のある開発機では farm 側 pacing gate(attempted<0.99)で INVALID に
+  なるため、スケール挙動の確定は wired rig でのバトル測定に委ねる。

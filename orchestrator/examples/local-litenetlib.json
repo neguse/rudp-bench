@@ -2,12 +2,12 @@
  "transport": "litenetlib",
  "workload": "echo",
  "server_command": [
-  "servers/litenetlib/LiteNetLibBench.Server/bin/Debug/net10.0/LiteNetLibBench.Server",
+  "servers/litenetlib/LiteNetLibBench.Server/bin/Release/net10.0/LiteNetLibBench.Server",
   "--port",
   "42941"
  ],
  "client_command": [
-  "servers/litenetlib/LiteNetLibBench.Client/bin/Debug/net10.0/LiteNetLibBench.Client",
+  "servers/litenetlib/LiteNetLibBench.Client/bin/Release/net10.0/LiteNetLibBench.Client",
   "--host",
   "127.0.0.1",
   "--port",

@@ -1,7 +1,7 @@
 {
   "transport": "magiconion",
-  "server_command": ["servers/magiconion/MagicOnionBench.Server/bin/Debug/net10.0/MagicOnionBench.Server", "--port", "42931"],
-  "client_command": ["servers/magiconion/MagicOnionBench.Client/bin/Debug/net10.0/MagicOnionBench.Client",
+  "server_command": ["servers/magiconion/MagicOnionBench.Server/bin/Release/net10.0/MagicOnionBench.Server", "--port", "42931"],
+  "client_command": ["servers/magiconion/MagicOnionBench.Client/bin/Release/net10.0/MagicOnionBench.Client",
     "--host", "127.0.0.1", "--port", "42931",
     "--conns", "{conns}", "--proc-index", "{proc_index}",
     "--origin-base", "{origin_id_start}",
