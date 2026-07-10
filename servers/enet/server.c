@@ -201,6 +201,16 @@ static int service_once(ENetHost *host, enet_uint32 timeout_ms,
   if (rc < 0) {
     return -1;
   }
+  // budget はイベント数でなく仕事量で bound する: broadcast イベント 1 件の
+  // 仕事は O(接続数) なので、固定イベント数だと高 conns で 1 呼び出しが
+  // budget×conns 送信に膨らみ、main ループの制御チャネル poll が飢える
+  // (raw_udp server と同じ negative window margin、ledger #20 と同族)
+  const int fanout =
+      host->connectedPeers > 0 ? (int)host->connectedPeers : 1;
+  int budget = ENET_SERVICE_EVENT_BUDGET / fanout;
+  if (budget < 64) {
+    budget = 64;
+  }
   int handled = 0;
   while (rc > 0) {
     switch (event.type) {
@@ -217,7 +227,7 @@ static int service_once(ENetHost *host, enet_uint32 timeout_ms,
         break;
     }
 
-    if (++handled >= ENET_SERVICE_EVENT_BUDGET) {
+    if (++handled >= budget) {
       // budget 到達で中断: 積んだ応答だけ吐いて制御チャネルに戻る
       enet_host_flush(host);
       return 0;
