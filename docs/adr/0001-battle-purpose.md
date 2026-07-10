@@ -2,6 +2,7 @@
 
 - Status: **Proposed**(承認で Accepted、以後の変更は supersede する新 ADR でのみ)
 - Date: 2026-07-10
+- 依存: ADR-0000(バトルは ADR-0000 の目的に対する手段)
 
 ## Context
 

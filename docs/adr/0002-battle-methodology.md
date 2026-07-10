@@ -2,7 +2,7 @@
 
 - Status: **Proposed**
 - Date: 2026-07-10
-- 依存: ADR-0001
+- 依存: ADR-0000, ADR-0001
 
 ## Decision
 
