@@ -120,6 +120,13 @@ try
             throw new InvalidOperationException($"NetManager.StartInManualMode failed for conn {i}");
         }
 
+        // farm 側 kernel rcvbuf を 4MB へ。LiteNetLib の SocketBufferSize は
+        // const 1MB で公開ノブが無く(NetConstants.cs:48)、broadcast fanout の
+        // 受信で RcvbufErrors が発火する(ledger #5/#9 — wired c256 で
+        // InErrors=207k を実測)。protected フィールドへの reflection が唯一の
+        // 手段。計測器(farm)の十分性の話であり SUT 側は不変。
+        SetReceiveBuffer(manager, 4 * 1024 * 1024);
+
         var peer = manager.Connect(config.Host, config.Port, LnlConstants.ConnectKey);
         if (peer is null)
         {
@@ -300,6 +307,25 @@ finally
     {
         manager?.Stop();
     }
+}
+
+static void SetReceiveBuffer(NetManager manager, int bytes)
+{
+    for (var t = manager.GetType(); t is not null; t = t.BaseType)
+    {
+        var field = t.GetField(
+            "_udpSocketv4",
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.DeclaredOnly);
+        if (field?.GetValue(manager) is System.Net.Sockets.Socket socket)
+        {
+            socket.ReceiveBufferSize = bytes;
+            return;
+        }
+    }
+
+    Console.Error.WriteLine("warning: _udpSocketv4 not found; farm rcvbuf left at library default");
 }
 
 static IReadOnlyList<BenchStream> BuildStreams(ClientConfig config)
