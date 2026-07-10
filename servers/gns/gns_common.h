@@ -12,6 +12,15 @@
 #include <cstdlib>
 #include <mutex>
 
+// GNS の UDP socket バッファ(SO_RCVBUF/SO_SNDBUF)は公開 config が無く、
+// この extern グローバルが唯一のノブ(lowlevel.cpp:114、socket 作成時に
+// setsockopt へ渡る)。既定 256KB は broadcast fanout で kernel drop を
+// 起こす(farm 側 RcvbufErrors — docs/ledger.md #5 のシグナル)ため、
+// enet と同じ 4MB ポスチャに引き上げる(--describe の tuning に開示)。
+namespace SteamNetworkingSocketsLib {
+extern int g_cbUDPSocketBufferSize;
+}
+
 namespace rudp_bench_gns {
 
 // 送信パス上の実サイズ上限:
@@ -41,6 +50,7 @@ inline void ensure_gns() {
     ISteamNetworkingUtils *utils = SteamNetworkingUtils();
     utils->SetDebugOutputFunction(
         k_ESteamNetworkingSocketsDebugOutputType_Important, debug_output);
+    SteamNetworkingSocketsLib::g_cbUDPSocketBufferSize = 4 * 1024 * 1024;
     // tune-to-plateau(全て upstream 公式ノブ。--describe の tuning に開示):
     // - SendRateMin/Max: 既定は両方 256KB/s の token bucket clamp
     //   (csteamnetworkingsockets.cpp:84-85)で、unreliable も含む全送信が
@@ -102,7 +112,7 @@ inline void print_describe() {
       "\"encryption\":true,"
       "\"max_payload_bytes\":16500,"
       "\"tuning\":["
-      "\"send_rate=256MBps\",\"send_buffer=16MB\","
+      "\"send_rate=256MBps\",\"send_buffer=16MB\",\"udp_sockbuf=4MB\","
       "\"recv_buffer=64MB/65536msg\",\"timeout_connected=60s\","
       "\"drain-budget\",\"sendmessages-shared-broadcast\","
       "\"allocatemessage-direct-write\","
