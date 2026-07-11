@@ -106,6 +106,9 @@ func AggregateCapacity(dirs []string) (map[CapacityKey]CapacityAgg, error) {
 			if c.MeasurementInvalid {
 				return nil, fmt.Errorf("capacity cell %+v is measurement_invalid; reacquisition is required before numeric aggregation", key)
 			}
+			if c.BlockInvalid {
+				return nil, fmt.Errorf("capacity cell %+v is block_invalid (%s); the block failed its baseline drift gate", key, c.BlockInvalidCause)
+			}
 			if c.Outcome != "" {
 				return nil, fmt.Errorf("capacity cell %+v has terminal outcome %s; numeric aggregation is not defined", key, c.Outcome)
 			}

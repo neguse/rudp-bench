@@ -66,7 +66,7 @@ func TestLoadConfigReferenceRequiresDoctorReport(t *testing.T) {
 	data := []byte(`{
   "measurement_mode":"reference","regime":"local",
   "transports":{"t":{"server_command":["s"],"client_command":["c"],"client_procs":1}},
-  "workloads":["echo"],"conns":{"min":1,"max":1},"output_dir":"out"
+  "workloads":["echo"],"conns":{"min":1,"max":1},"output_dir":"out",` + baselineJSON + `
 }`)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)

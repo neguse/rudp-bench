@@ -297,7 +297,9 @@ reference開始には少なくとも次が残る。
   Promotable=false）。昇格可能な証跡はreference rigで同一probeを再実行して取得する
 - clean sourceから校正を含むrunを再実行し、source/calibration bundleを永続化する
 - reference preset、pilot precision、confirmatory stopping ruleを合意・凍結する
-- blockへdoctorと前後baseline drift gateを統合する（未統合中はreference modeを禁止）
+- ~~blockへdoctorと前後baseline drift gateを統合する~~（2026-07-12 実装済み —
+  reference modeはPASS doctor + baseline blockを必須とし、drift外れは
+  `block_invalid`としてaggregateから拒否される。許容幅の凍結値はpilotで決める）
 - topology schemaの必要範囲とRQ4/RQ5のcost/mechanism出力を実装する
 - deterministic `loss_seed`のknown-packet trace gateを実装する
 

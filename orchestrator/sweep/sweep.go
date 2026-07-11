@@ -58,7 +58,10 @@ type Config struct {
 	Netem             *run.NetemRegime `json:"netem,omitempty"`
 	ServerCPUs        string           `json:"server_cpus,omitempty"`
 	ClientCPUs        string           `json:"client_cpus,omitempty"`
-	OutputDir         string           `json:"output_dir"`
+	// Baseline は block 前後の environment baseline と drift 許容幅。
+	// reference mode では必須(ADR-0002 の block gate)
+	Baseline  *BaselineSpec `json:"baseline,omitempty"`
+	OutputDir string        `json:"output_dir"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -89,6 +92,9 @@ func LoadConfig(path string) (Config, error) {
 			}
 		}
 	case "reference":
+		if cfg.Baseline == nil {
+			return cfg, fmt.Errorf("reference mode requires a baseline block with drift tolerances")
+		}
 		if cfg.DoctorReport == "" {
 			return cfg, fmt.Errorf("reference mode requires doctor_report")
 		}
@@ -105,12 +111,16 @@ func LoadConfig(path string) (Config, error) {
 		if cfg.Netem != nil && (cfg.Netem.ClientEgress.LossSeed != 0 || cfg.Netem.ServerEgress.LossSeed != 0) {
 			return cfg, fmt.Errorf("reference mode does not yet accept loss_seed: deterministic trace delivery needs a known-packet conformance gate")
 		}
-		return cfg, fmt.Errorf("reference mode is reserved but disabled until confirmatory protocol and pre/post baseline drift gates are integrated")
 	default:
 		return cfg, fmt.Errorf("measurement_mode must be conformance, screening, pilot, or reference")
 	}
 	if len(cfg.Transports) == 0 {
 		return cfg, fmt.Errorf("transports are required")
+	}
+	if cfg.Baseline != nil {
+		if err := cfg.Baseline.validate(); err != nil {
+			return cfg, err
+		}
 	}
 	if (len(cfg.Workloads) == 0) == (len(cfg.Scenarios) == 0) {
 		return cfg, fmt.Errorf("exactly one of workloads or scenarios is required")
@@ -198,6 +208,10 @@ type CellRecord struct {
 	EvidenceIDs        []string `json:"evidence_ids,omitempty"`
 	AnalysisIdentity   string   `json:"analysis_identity,omitempty"`
 	Regime             string   `json:"regime"`
+	// BlockInvalid: block 前後 baseline の drift gate を外れた。SUT の break で
+	// はなく、数値 aggregate へは載せない(ADR-0002)
+	BlockInvalid      bool   `json:"block_invalid,omitempty"`
+	BlockInvalidCause string `json:"block_invalid_cause,omitempty"`
 	CellCapacity
 }
 
@@ -237,6 +251,7 @@ type Sweep struct {
 	campaignIdentity string
 	attempts         map[string]int
 	gateVerified     bool // retained for old result compatibility; fresh setups always gate
+	block            *BlockBaseline
 }
 
 func New(cfg Config) (*Sweep, error) {
@@ -502,6 +517,20 @@ func measurementInvalidDisposition(rec PointRecord) PointRecord {
 
 // Run は全セルの capacity 探索を実行し、capacity.json に結論を書く。
 func (s *Sweep) Run(ctx context.Context) ([]CellRecord, error) {
+	if s.cfg.Baseline != nil {
+		before, err := s.runBaseline(ctx, "before")
+		if err != nil {
+			return nil, err
+		}
+		s.block = &BlockBaseline{Before: before}
+		if !before.OK {
+			s.block.Cause = "baseline before did not pass: " + before.Cause
+			if err := s.writeCells(nil); err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("block invalid: %s", s.block.Cause)
+		}
+	}
 	var cells []CellRecord
 	for _, cell := range s.cells() {
 		if ctx.Err() != nil {
@@ -566,6 +595,26 @@ func (s *Sweep) Run(ctx context.Context) ([]CellRecord, error) {
 			return cells, err
 		}
 	}
+	if s.cfg.Baseline != nil {
+		after, err := s.runBaseline(ctx, "after")
+		if err != nil {
+			return cells, err
+		}
+		s.block.After = &after
+		s.block.DriftOK, s.block.Cause = evaluateDrift(s.block.Before, after, s.cfg.Baseline.Drift)
+		if !s.block.DriftOK {
+			for i := range cells {
+				cells[i].BlockInvalid = true
+				cells[i].BlockInvalidCause = s.block.Cause
+			}
+		}
+		if err := s.writeCells(cells); err != nil {
+			return cells, err
+		}
+		if !s.block.DriftOK {
+			return cells, fmt.Errorf("block invalid: %s", s.block.Cause)
+		}
+	}
 	return cells, nil
 }
 
@@ -601,9 +650,10 @@ func dedupeSorted(values []string) []string {
 
 func (s *Sweep) writeCells(cells []CellRecord) error {
 	data, err := json.MarshalIndent(struct {
-		Seed  int64        `json:"seed"`
-		Cells []CellRecord `json:"cells"`
-	}{s.cfg.Seed, cells}, "", " ")
+		Seed          int64          `json:"seed"`
+		BlockBaseline *BlockBaseline `json:"block_baseline,omitempty"`
+		Cells         []CellRecord   `json:"cells"`
+	}{s.cfg.Seed, s.block, cells}, "", " ")
 	if err != nil {
 		return err
 	}
