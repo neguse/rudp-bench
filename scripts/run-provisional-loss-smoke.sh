@@ -13,6 +13,16 @@ if [[ $EUID -ne 0 ]]; then
   printf '%s\n' 'run-provisional-loss-smoke: root is required (run with sudo)' >&2
   exit 2
 fi
+if [[ -z "${SUDO_UID:-}" || -z "${SUDO_GID:-}" ]]; then
+  printf '%s\n' 'run-provisional-loss-smoke: invoke through sudo so SUT processes can drop privileges' >&2
+  exit 2
+fi
+INVOKER_USER="$(id -nu "$SUDO_UID")"
+INVOKER_HOME="$(getent passwd "$SUDO_UID" | cut -d: -f6)"
+if [[ -z "$INVOKER_USER" || -z "$INVOKER_HOME" || ! -d "$INVOKER_HOME" ]]; then
+  printf '%s\n' 'run-provisional-loss-smoke: cannot resolve invoking user home' >&2
+  exit 2
+fi
 
 # The isolated rig moves system.slice/user.slice off the benchmark CPUs. Enter
 # bench.slice once so the taskset masks in the configs remain usable.
@@ -29,6 +39,12 @@ if [[ "${RUDP_BENCH_PROVISIONAL_LOSS_SCOPE:-0}" != 1 ]]; then
     RUDP_BENCH_PROVISIONAL_LOSS_SCOPE=1 \
     ORCHESTRATOR="$ORCHESTRATOR" \
     SESSION="$SESSION" \
+    SUDO_UID="$SUDO_UID" \
+    SUDO_GID="$SUDO_GID" \
+    SUDO_USER="$INVOKER_USER" \
+    HOME="$INVOKER_HOME" \
+    USER="$INVOKER_USER" \
+    LOGNAME="$INVOKER_USER" \
     /bin/bash "$SCRIPT"
 fi
 
@@ -49,9 +65,11 @@ cleanup_netns
 trap cleanup_netns EXIT
 
 mkdir -p "$SESSION_DIR"
+chown "$SUDO_UID:$SUDO_GID" "$SESSION_DIR"
 
 doctor_rc=0
-"$ORCHESTRATOR" doctor \
+setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups \
+  "$ORCHESTRATOR" doctor \
   -rig orchestrator/rigs/home.json \
   -output "$DOCTOR_REPORT" || doctor_rc=$?
 if [[ "$doctor_rc" -ne 0 && "$doctor_rc" -ne 2 ]]; then
@@ -162,5 +180,6 @@ jq -n \
   }' >"$SESSION_DIR/session-manifest.json"
 
 python3 scripts/session_bundle_manifest.py verify "$SESSION_DIR"
+chown -R "$SUDO_UID:$SUDO_GID" "$SESSION_DIR"
 
 printf 'provisional loss pipeline smoke session: %s\n' "$SESSION_DIR"
