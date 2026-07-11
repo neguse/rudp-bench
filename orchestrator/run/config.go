@@ -112,8 +112,12 @@ type RunConfig struct {
 	// reliable_echo)。指定時は orchestrator が共通フラグ(--rate-* /
 	// --payload-* / --broadcast-*)を client_command に付与し、duration
 	// 未指定なら loss イベント数規則から自動導出する。
-	Workload      string        `json:"workload,omitempty"`
-	Scenario      *ScenarioSpec `json:"scenario,omitempty"`
+	Workload string `json:"workload,omitempty"`
+	// Preset は凍結 reference preset 名(preset.go)。指定時は scenario /
+	// netem / warmup / duration / drain / staleness を preset が固定し、
+	// config 側での上書きを拒否する(ADR-0002 / ADR-0004)
+	Preset   string        `json:"preset,omitempty"`
+	Scenario *ScenarioSpec `json:"scenario,omitempty"`
 	ServerCommand CommandConfig `json:"server_command"`
 	ClientCommand CommandConfig `json:"client_command"`
 	ClientProcs   int           `json:"client_procs"`
@@ -181,6 +185,9 @@ func LoadConfig(path string) (RunConfig, error) {
 // Prepare はプログラム生成された config を LoadConfig と同じ経路で確定する
 // (workload 展開 → defaults → validation)。
 func (cfg RunConfig) Prepare() (RunConfig, error) {
+	if err := cfg.applyPreset(); err != nil {
+		return cfg, err
+	}
 	if err := cfg.applyScenario(); err != nil {
 		return cfg, err
 	}

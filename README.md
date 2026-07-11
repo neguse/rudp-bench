@@ -148,6 +148,18 @@ build-v2/orchestrator mapping-conformance \
 結果はcacheや集約で混合されない。現行の固定topologyで近似できないworkloadは、
 近いと装わずschema拡張後に測る。
 
+比較カタログ用の凍結条件は`preset`で指名する（[ADR-0004](docs/adr/0004-reference-preset.md)）。
+presetはscenario、netem、warmup/duration/drain、staleness periodを固定し、config側の
+上書きを拒否する。server resource budget（2 vCPU）として`server_cpus`がちょうど2 CPUで
+あることを要求する。定義は`orchestrator/run/preset.go`、変更は新versionの追加で行う。
+
+```sh
+build-v2/orchestrator run -config orchestrator/examples/ref-auth-wan-s1000-enet.json
+```
+
+preset名: `ref-auth-{lan,wan}-s{1000,4000}-v1`（authoritative-state、state payloadは
+MTU内1000 BとMTU超4000 Bの2点）、`ref-room-{lan,wan}-v1`（room-relay）。
+
 ## Verification
 
 ```sh
