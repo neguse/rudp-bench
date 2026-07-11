@@ -694,6 +694,23 @@ func equalStringMap(left, right map[string]string) bool {
 }
 
 func governorCheck(r rig.Rig, governors map[string]string) Check {
+	if r.ExpectFixedFrequency {
+		bench, err := parseCPUSet(r.BenchCPUs)
+		if err != nil {
+			return Check{Name: "bench_cpu_governor", Status: StatusFail, Observed: err.Error(), Expected: "no cpufreq (fixed-frequency platform)"}
+		}
+		var present []string
+		for _, cpu := range bench {
+			name := strconv.Itoa(cpu)
+			if governor, ok := governors[name]; ok {
+				present = append(present, "cpu"+name+"="+governor)
+			}
+		}
+		if len(present) > 0 {
+			return Check{Name: "bench_cpu_governor", Status: StatusFail, Observed: strings.Join(present, ","), Expected: "no cpufreq (fixed-frequency platform)"}
+		}
+		return Check{Name: "bench_cpu_governor", Status: StatusPass, Observed: "no cpufreq", Expected: "no cpufreq (fixed-frequency platform)"}
+	}
 	if !r.RequirePerformanceGovernor {
 		return Check{Name: "bench_cpu_governor", Status: StatusWarn, Detail: "rig does not require performance governor"}
 	}

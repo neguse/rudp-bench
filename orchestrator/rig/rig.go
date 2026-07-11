@@ -28,8 +28,12 @@ type Rig struct {
 	// development rigs remain readable; doctor reports WARN when unspecified.
 	ExpectedClocksource        string `json:"expected_clocksource,omitempty"`
 	RequirePerformanceGovernor bool   `json:"require_performance_governor,omitempty"`
-	RequireIsolation           bool   `json:"require_isolation,omitempty"`
-	MinNoFile                  uint64 `json:"min_nofile,omitempty"`
+	// cpufreq を一切露出しない platform(EC2 Graviton 等)は
+	// require_performance_governor の代わりにこれを宣言する。
+	// cpufreq が見えたら FAIL(前提が崩れた証拠)。
+	ExpectFixedFrequency bool   `json:"expect_fixed_frequency,omitempty"`
+	RequireIsolation     bool   `json:"require_isolation,omitempty"`
+	MinNoFile            uint64 `json:"min_nofile,omitempty"`
 }
 
 func Load(path string) (Rig, error) {
@@ -86,6 +90,9 @@ func (r Rig) Validate() error {
 	}
 	if !sameSet(union(sets["client_cpus"], sets["server_cpus"]), sets["bench_cpus"]) {
 		return fmt.Errorf("client_cpus union server_cpus must equal bench_cpus")
+	}
+	if r.RequirePerformanceGovernor && r.ExpectFixedFrequency {
+		return fmt.Errorf("require_performance_governor and expect_fixed_frequency are mutually exclusive")
 	}
 	return nil
 }

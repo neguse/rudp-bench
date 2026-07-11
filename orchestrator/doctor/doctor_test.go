@@ -41,6 +41,18 @@ func TestGovernorCheckTargetsBenchCPUs(t *testing.T) {
 	}
 }
 
+func TestGovernorCheckFixedFrequencyPlatform(t *testing.T) {
+	r := rig.Rig{BenchCPUs: "3-4", ExpectFixedFrequency: true}
+	check := governorCheck(r, map[string]string{})
+	if check.Status != StatusPass {
+		t.Fatalf("check = %+v", check)
+	}
+	check = governorCheck(r, map[string]string{"3": "performance"})
+	if check.Status != StatusFail {
+		t.Fatalf("cpufreq present on a declared fixed-frequency platform: %+v", check)
+	}
+}
+
 func TestIRQAffinityConflictsUsesEffectiveMask(t *testing.T) {
 	root := t.TempDir()
 	writeIRQ := func(number, requested string, effective *string) {

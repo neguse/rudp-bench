@@ -27,6 +27,16 @@ func TestRigRejectsOverlappingRoles(t *testing.T) {
 	}
 }
 
+func TestRigRejectsGovernorAndFixedFrequencyTogether(t *testing.T) {
+	r := Rig{
+		Name: "bad", OSCPUs: "0", BenchCPUs: "1-2", ClientCPUs: "1", ServerCPUs: "2",
+		AllCPUs: "0-2", RequirePerformanceGovernor: true, ExpectFixedFrequency: true,
+	}
+	if err := r.Validate(); err == nil {
+		t.Fatal("mutually exclusive frequency expectations accepted")
+	}
+}
+
 func TestParseCPUSetAndSubset(t *testing.T) {
 	cpus, err := ParseCPUSet("3, 4,11-12")
 	if err != nil || len(cpus) != 4 {
