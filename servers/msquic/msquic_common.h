@@ -62,7 +62,9 @@ void handle_stream_send_complete(QUIC_STREAM_EVENT *event);
 
 class FrameDecoder {
  public:
-  void append(const QUIC_BUFFER *buffers, uint32_t buffer_count,
+  // false means an impossible frame length was observed and buffered stream
+  // bytes were discarded; callers count it as invalid_payload.
+  bool append(const QUIC_BUFFER *buffers, uint32_t buffer_count,
               const std::function<void(const uint8_t *, size_t)> &on_frame);
 
  private:

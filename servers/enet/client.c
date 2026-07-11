@@ -1,4 +1,5 @@
 #include "benchkit.h"
+#include "../scenario_cli.h"
 
 #include <enet/enet.h>
 
@@ -12,7 +13,10 @@
 #include <string.h>
 #include <unistd.h>
 
-#define ENET_BENCH_MAX_PAYLOAD_BYTES 65536u
+// ENet promotes oversized UNSEQUENCED packets to reliable fragmentation.
+// Keep the advertised common-class limit below the negotiated MTU so LT never
+// changes transport semantics behind the benchmark's back.
+#define ENET_BENCH_MAX_PAYLOAD_BYTES 1000u
 #define ENET_BENCH_MAX_CONNS 4095u
 #define ENET_CHANNEL_RELIABLE 0u
 #define ENET_CHANNEL_UNRELIABLE 1u
@@ -41,6 +45,9 @@ typedef struct {
   size_t payload_md;
   uint64_t deadline_ns;
   uint64_t staleness_period_ns;
+  bk_scenario_cli scenario;
+  uint8_t traffic_id;
+  bk_direction direction;
 } client_config;
 
 typedef struct {
@@ -49,7 +56,16 @@ typedef struct {
   uint32_t origin_id;
   uint32_t local_index;  // 自 proc 内 0 起点(重複判定の受信側キー)
   bool connected;
+  uint64_t last_input_seq;
+  uint64_t last_applied_input_seq;
+  uint64_t input_last_sent_measured;
+  uint64_t state_header_seq_recv_measured;
+  uint64_t state_applied_input_seq_recv_measured;
 } client_conn;
+
+typedef struct {
+  uint64_t invalid_payload;
+} client_stats;
 
 static void print_describe(void) {
   puts("{\"transport\":\"enet\","
@@ -59,10 +75,24 @@ static void print_describe(void) {
        "\"cc_algo\":\"enet-packet-throttle(scale=32,default=32,accel=32,decel=0,interval=5000ms)\","
        "\"thread_model\":\"single\","
        "\"encryption\":false,"
-       "\"max_payload_bytes\":65536,"
-       "\"tuning\":[\"throttle_configure(accel=32,decel=0)\","
-       "\"peer_timeout(min=10s,max=60s)\","
-       "\"sockbuf=4MB\",\"packet-direct-write\",\"check-events-drain\"]}");
+       "\"max_payload_bytes\":1000,"
+       "\"scenarios\":[\"environment_baseline\","
+       "\"authoritative_state\",\"room_relay\"],"
+       "\"tuning\":["
+       "{\"knob\":\"enet_peer_throttle_configure\","
+       "\"value\":\"acceleration=32,deceleration=0\","
+       "\"upstream_ref\":\"https://github.com/lsalzman/enet/blob/master/include/enet/enet.h\"},"
+       "{\"knob\":\"enet_peer_timeout\","
+       "\"value\":\"minimum=10s,maximum=60s\","
+       "\"upstream_ref\":\"https://github.com/lsalzman/enet/blob/master/include/enet/enet.h\"},"
+       "{\"knob\":\"socket_buffers\",\"value\":\"4MiB\","
+       "\"upstream_ref\":\"https://man7.org/linux/man-pages/man7/socket.7.html\"},"
+       "{\"knob\":\"packet_construction\","
+       "\"value\":\"direct-write\","
+       "\"upstream_ref\":\"https://github.com/lsalzman/enet/blob/master/include/enet/enet.h\"},"
+       "{\"knob\":\"event_drain\","
+       "\"value\":\"enet_host_check_events\","
+       "\"upstream_ref\":\"https://github.com/lsalzman/enet/blob/master/include/enet/enet.h\"}]}");
 }
 
 static void usage(const char *argv0) {
@@ -145,6 +175,7 @@ static int parse_rate(const char *s, double *out) {
 
 static int parse_args(int argc, char **argv, client_config *cfg) {
   memset(cfg, 0, sizeof(*cfg));
+  cfg->staleness_period_ns = 10000000ull;
   bool have_host = false;
   bool have_port = false;
   bool have_conns = false;
@@ -160,6 +191,14 @@ static int parse_args(int argc, char **argv, client_config *cfg) {
     if (strcmp(argv[i], "--describe") == 0) {
       print_describe();
       exit(EXIT_SUCCESS);
+    }
+    const int scenario_arg = bk_scenario_cli_parse(argc, argv, &i,
+                                                   &cfg->scenario);
+    if (scenario_arg < 0) {
+      return -1;
+    }
+    if (scenario_arg > 0) {
+      continue;
     }
     if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
       cfg->host = argv[++i];
@@ -230,8 +269,35 @@ static int parse_args(int argc, char **argv, client_config *cfg) {
   }
 
   if (!have_host || !have_port || !have_conns || !have_proc_index ||
-      !have_origin_base || !have_rate_lt || !have_rate_md || !have_payload ||
-      !have_deadline || !have_staleness) {
+      !have_origin_base) {
+    return -1;
+  }
+  if (cfg->scenario.present) {
+    if (bk_scenario_cli_validate(&cfg->scenario, ENET_BENCH_MAX_CONNS,
+                                 ENET_BENCH_MAX_PAYLOAD_BYTES) != 0 ||
+        (uint64_t)cfg->origin_base + (uint64_t)cfg->conns >
+            cfg->scenario.total_conns) {
+      return -1;
+    }
+    int broadcast = 0;
+    const bk_scenario_traffic *traffic = bk_scenario_client_traffic(
+        &cfg->scenario, &cfg->direction, &broadcast);
+    if (traffic == NULL) {
+      return -1;
+    }
+    cfg->traffic_id = traffic->traffic_id;
+    cfg->rate_lt = traffic->rate_lt;
+    cfg->rate_md = traffic->rate_md;
+    cfg->payload_lt = traffic->payload_lt;
+    cfg->payload_md = traffic->payload_md;
+    cfg->deadline_ns = traffic->deadline_ns;
+    cfg->broadcast_lt = broadcast != 0;
+    cfg->broadcast_md = broadcast != 0;
+    return 0;
+  }
+  cfg->direction = BK_DIRECTION_ROOM_RELAY;
+  if (!have_rate_lt || !have_rate_md || !have_payload || !have_deadline ||
+      !have_staleness) {
     return -1;
   }
   if (cfg->rate_lt == 0.0 && cfg->rate_md == 0.0) {
@@ -283,6 +349,8 @@ static int build_streams(const client_config *cfg, bk_stream *streams,
     streams[n++] = (bk_stream){
         .must_deliver = false,
         .broadcast = cfg->broadcast_lt,
+        .traffic_id = cfg->traffic_id,
+        .direction = cfg->direction,
         .interval_ns = interval_ns,
     };
   }
@@ -293,6 +361,8 @@ static int build_streams(const client_config *cfg, bk_stream *streams,
     streams[n++] = (bk_stream){
         .must_deliver = true,
         .broadcast = cfg->broadcast_md,
+        .traffic_id = cfg->traffic_id,
+        .direction = cfg->direction,
         .interval_ns = interval_ns,
     };
   }
@@ -300,13 +370,29 @@ static int build_streams(const client_config *cfg, bk_stream *streams,
   return n > 0 ? 0 : -1;
 }
 
+static enet_uint8 channel_from_flags(uint8_t flags) {
+  return (flags & BK_FLAG_MUST_DELIVER) != 0 ? ENET_CHANNEL_RELIABLE
+                                             : ENET_CHANNEL_UNRELIABLE;
+}
+
+static bool route_matches_header(const ENetEvent *event,
+                                 const bk_header *header) {
+  const enet_uint32 class_mask =
+      ENET_PACKET_FLAG_RELIABLE | ENET_PACKET_FLAG_UNSEQUENCED;
+  const enet_uint32 expected =
+      (header->flags & BK_FLAG_MUST_DELIVER) != 0
+          ? ENET_PACKET_FLAG_RELIABLE
+          : ENET_PACKET_FLAG_UNSEQUENCED;
+  return event->channelID == channel_from_flags(header->flags) &&
+         (event->packet->flags & class_mask) == expected;
+}
+
 static void enet_class_route(uint8_t flags, enet_uint8 *channel,
                              enet_uint32 *packet_flags) {
+  *channel = channel_from_flags(flags);
   if ((flags & BK_FLAG_MUST_DELIVER) != 0) {
-    *channel = ENET_CHANNEL_RELIABLE;
     *packet_flags = ENET_PACKET_FLAG_RELIABLE;
   } else {
-    *channel = ENET_CHANNEL_UNRELIABLE;
     *packet_flags = ENET_PACKET_FLAG_UNSEQUENCED;
   }
 }
@@ -322,8 +408,9 @@ static void tune_peer(ENetPeer *peer) {
   enet_peer_timeout(peer, ENET_PEER_TIMEOUT_LIMIT, 10000, 60000);
 }
 
-static int handle_event(const ENetEvent *event, bk_metrics *metrics,
-                        int *connected_count) {
+static int handle_event(const ENetEvent *event, const client_config *cfg,
+                        bk_metrics *metrics, int *connected_count,
+                        client_stats *stats) {
   switch (event->type) {
     case ENET_EVENT_TYPE_CONNECT: {
       client_conn *conn = (client_conn *)event->peer->data;
@@ -337,10 +424,53 @@ static int handle_event(const ENetEvent *event, bk_metrics *metrics,
     case ENET_EVENT_TYPE_RECEIVE: {
       bk_header header;
       client_conn *conn = (client_conn *)event->peer->data;
-      if (conn != NULL &&
-          bk_payload_read(event->packet->data, event->packet->dataLength,
-                          &header) == 0) {
+      bool accept = conn != NULL &&
+                    bk_payload_read(event->packet->data,
+                                    event->packet->dataLength, &header) == 0;
+      if (accept) {
+        accept = route_matches_header(event, &header);
+      }
+      if (accept &&
+          cfg->scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+        const bool must_deliver =
+            (header.flags & BK_FLAG_MUST_DELIVER) != 0;
+        uint64_t applied = 0;
+        accept = bk_scenario_state_payload_valid(
+                     &cfg->scenario, &header, event->packet->dataLength) &&
+                 bk_authoritative_state_read_applied_input_seq(
+                     event->packet->data, event->packet->dataLength,
+                     &applied) == 0 &&
+                 applied <= conn->last_input_seq &&
+                 bk_authoritative_state_validate_target_pad(
+                     event->packet->data, event->packet->dataLength,
+                     conn->origin_id) == 0;
+        if (accept && applied > conn->last_applied_input_seq) {
+          conn->last_applied_input_seq = applied;
+        }
+        if (accept && !must_deliver &&
+            (header.flags & BK_FLAG_MEASURE) != 0) {
+          if (header.seq > conn->state_header_seq_recv_measured) {
+            conn->state_header_seq_recv_measured = header.seq;
+          }
+          if (applied > conn->state_applied_input_seq_recv_measured) {
+            conn->state_applied_input_seq_recv_measured = applied;
+          }
+        }
+      } else if (accept) {
+        if (cfg->scenario.present) {
+          accept = bk_scenario_client_payload_valid(
+              &cfg->scenario, &header, event->packet->dataLength);
+        }
+        if (accept) {
+          accept = bk_payload_validate_body(event->packet->data,
+                                            event->packet->dataLength,
+                                            &header) == 0;
+        }
+      }
+      if (accept) {
         bk_metrics_on_recv(metrics, conn->local_index, &header, bk_now_ns());
+      } else {
+        stats->invalid_payload++;
       }
       enet_packet_destroy(event->packet);
       break;
@@ -357,8 +487,9 @@ static int handle_event(const ENetEvent *event, bk_metrics *metrics,
 // enet_host_service は 1 呼び出しで最大 1 event しか返さず、毎回全 peer 走査の
 // 送信パス×2 + 受信を回すため(protocol.c:1830,1846,1862)、event ごとに
 // service(0) を呼ぶ旧構成は多 peer で O(events×peers) だった。
-static int drain_events(ENetHost *host, bk_metrics *metrics,
-                        int *connected_count) {
+static int drain_events(ENetHost *host, const client_config *cfg,
+                        bk_metrics *metrics,
+                        int *connected_count, client_stats *stats) {
   ENetEvent event;
   int rc = enet_host_service(host, &event, 0);
   if (rc < 0) {
@@ -366,7 +497,7 @@ static int drain_events(ENetHost *host, bk_metrics *metrics,
   }
   int handled = 0;
   while (rc > 0) {
-    if (handle_event(&event, metrics, connected_count) != 0) {
+    if (handle_event(&event, cfg, metrics, connected_count, stats) != 0) {
       return -1;
     }
     if (++handled >= ENET_DRAIN_EVENT_BUDGET) {
@@ -384,7 +515,9 @@ static int drain_events(ENetHost *host, bk_metrics *metrics,
   return 0;
 }
 
-static int wait_for_connects(ENetHost *host, int conns, bk_metrics *metrics) {
+static int wait_for_connects(ENetHost *host, const client_config *cfg,
+                             int conns, bk_metrics *metrics,
+                             client_stats *stats) {
   int connected_count = 0;
   const uint64_t deadline = add_ns(bk_now_ns(), CONNECT_TIMEOUT_NS);
   while (connected_count < conns) {
@@ -399,10 +532,36 @@ static int wait_for_connects(ENetHost *host, int conns, bk_metrics *metrics) {
     if (rc == 0) {
       continue;
     }
-    if (handle_event(&event, metrics, &connected_count) != 0) {
+    if (handle_event(&event, cfg, metrics, &connected_count, stats) != 0) {
       return -1;
     }
   }
+  return 0;
+}
+
+static int send_registrations(ENetHost *host, client_conn *conns,
+                              int n_conns) {
+  for (int i = 0; i < n_conns; ++i) {
+    const bk_header registration = {
+        .seq = 0,
+        .sched_ts_ns = 0,
+        .send_ts_ns = bk_now_ns(),
+        .flags = 0,
+        .origin_id = conns[i].origin_id,
+        .traffic_id = 0,
+    };
+    ENetPacket *packet = enet_packet_create(
+        NULL, BK_MIN_PAYLOAD, ENET_PACKET_FLAG_UNSEQUENCED);
+    if (packet == NULL ||
+        bk_payload_write(packet->data, packet->dataLength, &registration) != 0 ||
+        enet_peer_send(conns[i].peer, ENET_CHANNEL_UNRELIABLE, packet) != 0) {
+      if (packet != NULL && packet->referenceCount == 0) {
+        enet_packet_destroy(packet);
+      }
+      return -1;
+    }
+  }
+  enet_host_flush(host);
   return 0;
 }
 
@@ -413,6 +572,7 @@ static void make_header_from_slot(const bk_slot *slot, uint32_t origin_id,
   header->send_ts_ns = send_ts_ns;
   header->flags = slot->flags;
   header->origin_id = origin_id;
+  header->traffic_id = slot->traffic_id;
 }
 
 static int send_slot(client_conn *conn, const bk_slot *slot,
@@ -422,13 +582,12 @@ static int send_slot(client_conn *conn, const bk_slot *slot,
   enet_uint8 channel = 0;
   enet_uint32 packet_flags = 0;
   enet_class_route(header.flags, &channel, &packet_flags);
-  // data=NULL で無初期化 packet を確保し、header を packet バッファへ直接書く
-  // (中間バッファ経由だと enet_packet_create が全 payload を memcpy する、
-  // packet.c:33-41)。header 32B 以降のバイトは受信側で読まれない契約
-  // (bk_payload_read はヘッダのみ検証)なので未初期化のまま送る。
+  // data=NULL で packet を確保し、header と deterministic body pattern を
+  // packet バッファへ直接書く。中間バッファ経由の payload 全体 memcpy を避ける。
   ENetPacket *packet = enet_packet_create(NULL, payload_size, packet_flags);
   if (packet == NULL ||
-      bk_payload_write(packet->data, payload_size, &header) != 0) {
+      bk_payload_write(packet->data, payload_size, &header) != 0 ||
+      bk_payload_fill_body(packet->data, payload_size, &header) != 0) {
     if (packet != NULL) {
       enet_packet_destroy(packet);
     }
@@ -440,7 +599,69 @@ static int send_slot(client_conn *conn, const bk_slot *slot,
     enet_packet_destroy(packet);
   }
   bk_metrics_on_slot(metrics, &header, submitted);
+  if (submitted && BK_FLAGS_DIRECTION(header.flags) ==
+                       BK_DIRECTION_CLIENT_TO_SERVER &&
+      (header.flags & BK_FLAG_MUST_DELIVER) == 0 &&
+      header.seq > conn->last_input_seq) {
+    conn->last_input_seq = header.seq;
+  }
+  if (submitted && BK_FLAGS_DIRECTION(header.flags) ==
+                       BK_DIRECTION_CLIENT_TO_SERVER &&
+      (header.flags & (BK_FLAG_MUST_DELIVER | BK_FLAG_MEASURE)) ==
+          BK_FLAG_MEASURE &&
+      header.seq > conn->input_last_sent_measured) {
+    conn->input_last_sent_measured = header.seq;
+  }
   return submitted ? 0 : -1;
+}
+
+static int format_client_stats_json(const client_config *cfg,
+                                    const client_conn *conns,
+                                    const client_stats *stats, char *buf,
+                                    size_t cap) {
+  bk_authoritative_progress progress = {0};
+  if (cfg->scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+    progress.local_conns = (uint32_t)cfg->conns;
+    progress.roster_conns = cfg->scenario.total_conns;
+    for (int i = 0; i < cfg->conns; ++i) {
+      const client_conn *conn = &conns[i];
+      if (i == 0 || conn->input_last_sent_measured <
+                        progress.input_last_sent_min) {
+        progress.input_last_sent_min = conn->input_last_sent_measured;
+      }
+      if (conn->input_last_sent_measured > progress.input_last_sent_max) {
+        progress.input_last_sent_max = conn->input_last_sent_measured;
+      }
+      if (i == 0 || conn->state_header_seq_recv_measured <
+                        progress.state_header_seq_recv_min) {
+        progress.state_header_seq_recv_min =
+            conn->state_header_seq_recv_measured;
+      }
+      if (conn->state_header_seq_recv_measured >
+          progress.state_header_seq_recv_max) {
+        progress.state_header_seq_recv_max =
+            conn->state_header_seq_recv_measured;
+      }
+      if (i == 0 || conn->state_applied_input_seq_recv_measured <
+                        progress.state_applied_input_seq_recv_min) {
+        progress.state_applied_input_seq_recv_min =
+            conn->state_applied_input_seq_recv_measured;
+      }
+      if (conn->state_applied_input_seq_recv_measured >
+          progress.state_applied_input_seq_recv_max) {
+        progress.state_applied_input_seq_recv_max =
+            conn->state_applied_input_seq_recv_measured;
+      }
+    }
+  }
+  char progress_json[768];
+  if (bk_authoritative_progress_format("client", &progress, progress_json,
+                                       sizeof(progress_json)) != 0) {
+    return -1;
+  }
+  const int n = snprintf(buf, cap, "{\"invalid_payload\":%" PRIu64 ",%s}",
+                         stats->invalid_payload, progress_json);
+  return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 
 static void mark_unsent_until(client_conn *conn, uint64_t cutoff_ns,
@@ -481,38 +702,6 @@ static enet_uint32 timeout_for_next(uint64_t now_ns, uint64_t next_ns,
   return (enet_uint32)(delta_ns / 1000000ull);
 }
 
-static char *read_file_alloc(const char *path) {
-  FILE *f = fopen(path, "rb");
-  if (f == NULL) {
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  const long size = ftell(f);
-  if (size < 0) {
-    fclose(f);
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  char *buf = (char *)malloc((size_t)size + 1u);
-  if (buf == NULL) {
-    fclose(f);
-    return NULL;
-  }
-  const size_t got = fread(buf, 1, (size_t)size, f);
-  if (got != (size_t)size || fclose(f) != 0) {
-    free(buf);
-    return NULL;
-  }
-  buf[got] = '\0';
-  return buf;
-}
-
 static const char *metrics_path_or_default(char *buf, size_t cap) {
   const char *path = getenv("BENCH_METRICS_OUT");
   if (path != NULL && *path != '\0') {
@@ -526,16 +715,74 @@ static const char *metrics_path_or_default(char *buf, size_t cap) {
   return buf;
 }
 
+static int expect_scenario_flows(const client_config *cfg,
+                                 const client_conn *conns,
+                                 bk_metrics *metrics,
+                                 const bk_schedule *schedule) {
+  if (!cfg->scenario.present) {
+    return 0;
+  }
+  if (cfg->scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+    if (cfg->scenario.state.rate_lt == 0.0) {
+      return 0;
+    }
+    for (int i = 0; i < cfg->conns; ++i) {
+      if (bk_metrics_expect_latest(
+              metrics, conns[i].local_index, cfg->scenario.total_conns,
+              cfg->scenario.state.traffic_id,
+              BK_DIRECTION_SERVER_TO_CLIENT, schedule->start_at_ns) != 0) {
+        return -1;
+      }
+    }
+    return 0;
+  }
+  if (cfg->rate_lt == 0.0) {
+    return 0;
+  }
+  for (int i = 0; i < cfg->conns; ++i) {
+    const uint32_t first_origin =
+        cfg->scenario.kind == BK_SCENARIO_ROOM_RELAY ? 0u
+                                                     : conns[i].origin_id;
+    const uint32_t end_origin =
+        cfg->scenario.kind == BK_SCENARIO_ROOM_RELAY
+            ? cfg->scenario.total_conns
+            : first_origin + 1u;
+    for (uint32_t origin = first_origin; origin < end_origin; ++origin) {
+      if (bk_metrics_expect_latest(metrics, conns[i].local_index, origin,
+                                   cfg->traffic_id,
+                                   BK_DIRECTION_ROOM_RELAY,
+                                   schedule->start_at_ns) != 0) {
+        return -1;
+      }
+    }
+  }
+  return 0;
+}
+
 static int run_client(const client_config *cfg) {
-  const uint32_t max_origin_id = cfg->origin_base + (uint32_t)cfg->conns;
+  const bool authoritative =
+      cfg->scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE;
+  const uint32_t max_origin_id =
+      cfg->scenario.present ? cfg->scenario.total_conns + 1u
+                            : cfg->origin_base + (uint32_t)cfg->conns;
   const bk_metrics_config metrics_cfg = {
       .max_origin_id = max_origin_id == 0 ? 1u : max_origin_id,
       .deadline_ns = cfg->deadline_ns,
       .staleness_period_ns = cfg->staleness_period_ns,
+      .max_local_index = cfg->scenario.present ? (uint32_t)cfg->conns : 0,
   };
   bk_metrics *metrics = bk_metrics_new(&metrics_cfg);
+  client_stats stats = {0};
   if (metrics == NULL) {
     fprintf(stderr, "bk_metrics_new failed\n");
+    return -1;
+  }
+  if (authoritative &&
+      bk_metrics_set_traffic_deadline(
+          metrics, cfg->scenario.state.traffic_id,
+          BK_DIRECTION_SERVER_TO_CLIENT,
+          cfg->scenario.state.deadline_ns) != 0) {
+    bk_metrics_free(metrics);
     return -1;
   }
 
@@ -611,8 +858,18 @@ static int run_client(const client_config *cfg) {
     conns[i].peer->data = &conns[i];
   }
 
-  if (wait_for_connects(host, cfg->conns, metrics) != 0) {
+  if (wait_for_connects(host, cfg, cfg->conns, metrics, &stats) != 0) {
     fprintf(stderr, "timed out waiting for ENet connects\n");
+    if (control != NULL) {
+      bk_control_close(control);
+    }
+    free(conns);
+    enet_host_destroy(host);
+    bk_metrics_free(metrics);
+    return -1;
+  }
+  if (send_registrations(host, conns, cfg->conns) != 0) {
+    fprintf(stderr, "ENet registration send failed\n");
     if (control != NULL) {
       bk_control_close(control);
     }
@@ -672,6 +929,19 @@ static int run_client(const client_config *cfg) {
       return -1;
     }
   }
+  if (expect_scenario_flows(cfg, conns, metrics, &schedule) != 0) {
+    fprintf(stderr, "bk_metrics_expect_latest failed\n");
+    if (control != NULL) {
+      bk_control_close(control);
+    }
+    for (int j = 0; j < cfg->conns; ++j) {
+      bk_plan_free(conns[j].plan);
+    }
+    free(conns);
+    enet_host_destroy(host);
+    bk_metrics_free(metrics);
+    return -1;
+  }
 
   bool marked_unsent = false;
   int connected_count = cfg->conns;
@@ -679,7 +949,7 @@ static int run_client(const client_config *cfg) {
   bk_steady steady = {0, false};
   while (bk_now_ns() < schedule.drain_until_ns) {
     uint64_t now = bk_now_ns();
-    if (drain_events(host, metrics, &connected_count) != 0) {
+    if (drain_events(host, cfg, metrics, &connected_count, &stats) != 0) {
       fprintf(stderr, "enet event handling failed\n");
       run_rc = -1;
       break;
@@ -754,7 +1024,8 @@ static int run_client(const client_config *cfg) {
       run_rc = -1;
       break;
     }
-    if (rc > 0 && handle_event(&event, metrics, &connected_count) != 0) {
+    if (rc > 0 &&
+        handle_event(&event, cfg, metrics, &connected_count, &stats) != 0) {
       fprintf(stderr, "enet peer disconnected\n");
       run_rc = -1;
       break;
@@ -778,16 +1049,20 @@ static int run_client(const client_config *cfg) {
     rc = -1;
   }
 
-  char *stats_json = metrics_path == NULL ? NULL : read_file_alloc(metrics_path);
+  char stats_json[1024];
+  if (format_client_stats_json(cfg, conns, &stats, stats_json,
+                               sizeof(stats_json)) != 0) {
+    fprintf(stderr, "client stats JSON overflow\n");
+    rc = -1;
+  }
   if (control != NULL) {
-    if (bk_control_done(control, stats_json != NULL ? stats_json : "{}") != 0) {
+    if (rc == 0 && bk_control_done(control, stats_json) != 0) {
       fprintf(stderr, "benchkit done failed\n");
       rc = -1;
     }
     bk_control_close(control);
   }
 
-  free(stats_json);
   for (int i = 0; i < cfg->conns; ++i) {
     bk_plan_free(conns[i].plan);
   }

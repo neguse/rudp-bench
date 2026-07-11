@@ -1,8 +1,10 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Collections.Concurrent;
 using BenchKit.CS;
 using LiteNetLib;
+using LiteNetLib.Utils;
 using LiteNetLibBench;
 
 var config = ServerConfig.Parse(args);
@@ -36,23 +38,76 @@ using var sigInt = PosixSignalRegistration.Create(PosixSignal.SIGINT, ctx =>
 
 var stats = new LnlServerStats();
 var connectedPeers = new List<NetPeer>();
+var peerStates = new ConcurrentDictionary<NetPeer, PeerState>();
+var peersByOrigin = new ConcurrentDictionary<uint, PeerState>();
+var rosterFrozen = false;
+var metricsGate = new object();
+BenchMetrics? scenarioMetrics = null;
+var progress = config.Scenario?.Kind == BenchScenarioKind.AuthoritativeState
+    ? new BenchAuthoritativeProgressTracker(0, config.Scenario.TotalConns)
+    : null;
+if (config.Scenario is { } scenario)
+{
+    scenarioMetrics = new BenchMetrics(new BenchMetricsConfig(
+        checked((uint)scenario.TotalConns + 1U),
+        0,
+        config.StalenessPeriodNs,
+        (uint)scenario.TotalConns));
+    scenario.ConfigureMetrics(scenarioMetrics);
+}
 // UnsyncedReceiveEvent により受信ハンドラは受信スレッドから走る一方、
 // connect/disconnect イベントは main ループの PollEvents から来る。
 // fanout の読み手(受信スレッド)には copy-on-write の snapshot を渡す。
 var peersBox = new PeersBox();
 
 var listener = new EventBasedNetListener();
-listener.ConnectionRequestEvent += req => req.AcceptIfKey(LnlConstants.ConnectKey);
+listener.ConnectionRequestEvent += req =>
+{
+    if (config.Scenario is null)
+    {
+        req.AcceptIfKey(LnlConstants.ConnectKey);
+        return;
+    }
+
+    try
+    {
+        var key = req.Data.GetString();
+        var originId = req.Data.GetUInt();
+        if (key != LnlConstants.ConnectKey ||
+            originId >= (uint)config.Scenario.TotalConns ||
+            peersByOrigin.ContainsKey(originId))
+        {
+            Console.Error.WriteLine($"reject connection key={key} origin_id={originId}");
+            req.Reject();
+            return;
+        }
+        var peer = req.Accept();
+        var state = new PeerState(peer, originId, (uint)config.Scenario.TotalConns);
+        if (!peerStates.TryAdd(peer, state) || !peersByOrigin.TryAdd(originId, state))
+        {
+            req.Reject();
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"reject malformed connection metadata: {ex.Message}");
+        req.Reject();
+    }
+};
 listener.PeerConnectedEvent += peer =>
 {
     connectedPeers.Add(peer);
     peersBox.Set(connectedPeers.ToArray());
     stats.Connected();
 };
-listener.PeerDisconnectedEvent += (peer, _) =>
+listener.PeerDisconnectedEvent += (peer, disconnectInfo) =>
 {
     connectedPeers.Remove(peer);
     peersBox.Set(connectedPeers.ToArray());
+    if (!rosterFrozen && peerStates.TryRemove(peer, out var state))
+    {
+        peersByOrigin.TryRemove(state.OriginId, out _);
+    }
     stats.Disconnected();
 };
 // broadcast fanout(1 受信 → 全 peer 送信)は受信スレッドで inline に行うと
@@ -62,7 +117,15 @@ var fanout = new FanoutWorker(peersBox, stats);
 
 listener.NetworkReceiveEvent += (peer, reader, _, _) =>
 {
-    HandleReceive(peer, reader, fanout, stats);
+    HandleReceive(
+        peer,
+        reader,
+        fanout,
+        stats,
+        config.Scenario,
+        peerStates,
+        scenarioMetrics,
+        metricsGate);
     reader.Recycle();
 };
 
@@ -105,6 +168,7 @@ manager.Start(config.Port);
 await using var control = await BenchControl.ConnectFromEnvironmentAsync(stopCts.Token).ConfigureAwait(false);
 try
 {
+    BenchSchedule? schedule = null;
     if (control is not null)
     {
         await control.HelloAsync("server", "litenetlib", 0, stopCts.Token).ConfigureAwait(false);
@@ -113,29 +177,59 @@ try
         // Poll while awaiting the schedule so client handshakes/pings are
         // serviced instead of stalling until start_at (see Shared/LnlPump.cs).
         var scheduleTask = control.WaitScheduleAsync(stopCts.Token);
-        var schedule = await LnlPump.PumpWhileAwaitingAsync(
+        schedule = await LnlPump.PumpWhileAwaitingAsync(
             scheduleTask,
             _ => manager.PollEvents(),
             15,
             stopCts.Token).ConfigureAwait(false);
+    }
 
-        // 定常判定つき warmup(benchspec v2): 確定窓(window)を受けたら
-        // schedule を差し替える(drain 終端の前倒しに効く)。窓確定
-        //(window 受信 or 暫定 start_at 到達)まで pump しながら poll する
-        while (!stopCts.IsCancellationRequested && BenchClock.NowNs() < schedule.StartAtNs)
+    if (config.Scenario?.Kind == BenchScenarioKind.AuthoritativeState)
+    {
+        var rosterDeadline = schedule?.StartAtNs ??
+            BenchClock.AddSaturating(BenchClock.NowNs(), ServerConfig.DevConnectTimeoutNs);
+        var roster = await FreezeRosterAsync(
+            peersByOrigin,
+            config.Scenario.TotalConns,
+            rosterDeadline,
+            manager,
+            stopCts.Token).ConfigureAwait(false);
+        rosterFrozen = true;
+        if (schedule is null)
         {
-            if (await control.PollWindowAsync(stopCts.Token).ConfigureAwait(false) is { } window)
+            var now = BenchClock.NowNs();
+            schedule = new BenchSchedule(
+                BenchClock.AddSaturating(now, ServerConfig.DevWarmupNs),
+                BenchClock.AddSaturating(BenchClock.AddSaturating(now, ServerConfig.DevWarmupNs), ServerConfig.DevDurationNs),
+                BenchClock.AddSaturating(
+                    BenchClock.AddSaturating(BenchClock.AddSaturating(now, ServerConfig.DevWarmupNs), ServerConfig.DevDurationNs),
+                    ServerConfig.DevDrainNs));
+        }
+        await RunAuthoritativeAsync(
+            config.Scenario,
+            schedule.Value,
+            roster,
+            manager,
+            scenarioMetrics!,
+            metricsGate,
+            progress!,
+            control,
+            stopCts.Token).ConfigureAwait(false);
+    }
+    else if (schedule is { } activeSchedule)
+    {
+        while (!stopCts.IsCancellationRequested && BenchClock.NowNs() < activeSchedule.StartAtNs)
+        {
+            if (await control!.PollWindowAsync(stopCts.Token).ConfigureAwait(false) is { } window)
             {
-                schedule = window;
+                activeSchedule = window;
                 break;
             }
-
             manager.PollEvents();
             await Task.Delay(15, stopCts.Token).ConfigureAwait(false);
         }
-
         await LnlPump.DrainUntilAsync(
-            schedule.DrainUntilNs,
+            activeSchedule.DrainUntilNs,
             _ => manager.PollEvents(),
             stopCts.Token).ConfigureAwait(false);
     }
@@ -161,23 +255,236 @@ catch (OperationCanceledException)
 {
 }
 
-var statsJson = stats.ToJson();
+string reportJson;
+if (scenarioMetrics is not null)
+{
+    lock (metricsGate)
+    {
+        reportJson = scenarioMetrics.ToJson();
+    }
+}
+else
+{
+    reportJson = stats.ToJson();
+}
 var metricsOut = Environment.GetEnvironmentVariable("BENCH_METRICS_OUT");
 if (!string.IsNullOrWhiteSpace(metricsOut))
 {
-    await File.WriteAllTextAsync(metricsOut, statsJson + "\n", new UTF8Encoding(false), CancellationToken.None)
+    await File.WriteAllTextAsync(metricsOut, reportJson + "\n", new UTF8Encoding(false), CancellationToken.None)
         .ConfigureAwait(false);
+}
+
+var doneJson = reportJson;
+if (progress is not null)
+{
+    var snapshot = progress.ServerSnapshot();
+    BenchProgress.WriteDiagnostics(snapshot, stats.InvalidPayloadCount);
+    doneJson = BenchProgress.AttachToDoneStats(reportJson, snapshot, stats.InvalidPayloadCount);
+}
+else if (config.Scenario is not null)
+{
+    doneJson = BenchProgress.AttachValidationToDoneStats(reportJson, stats.InvalidPayloadCount);
 }
 
 if (control is not null)
 {
-    await control.DoneAsync(statsJson, CancellationToken.None).ConfigureAwait(false);
+    await control.DoneAsync(doneJson, CancellationToken.None).ConfigureAwait(false);
 }
 
 manager.Stop();
 return 0;
 
-static void HandleReceive(NetPeer origin, NetPacketReader reader, FanoutWorker fanout, LnlServerStats stats)
+static async Task<PeerState[]> FreezeRosterAsync(
+    ConcurrentDictionary<uint, PeerState> peersByOrigin,
+    int totalConns,
+    ulong deadlineNs,
+    NetManager manager,
+    CancellationToken cancellationToken)
+{
+    while (!cancellationToken.IsCancellationRequested && BenchClock.NowNs() < deadlineNs)
+    {
+        manager.PollEvents();
+        if (peersByOrigin.Count == totalConns)
+        {
+            var roster = new PeerState[totalConns];
+            var complete = true;
+            for (var i = 0; i < totalConns; i++)
+            {
+                if (!peersByOrigin.TryGetValue((uint)i, out roster[i]!))
+                {
+                    complete = false;
+                    break;
+                }
+            }
+            if (complete)
+            {
+                return roster;
+            }
+        }
+        await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+    }
+    throw new InvalidOperationException(
+        $"connection roster incomplete: got {peersByOrigin.Count}, want {totalConns}");
+}
+
+static async Task RunAuthoritativeAsync(
+    BenchScenarioConfig scenario,
+    BenchSchedule initialSchedule,
+    PeerState[] roster,
+    NetManager manager,
+    BenchMetrics metrics,
+    object metricsGate,
+    BenchAuthoritativeProgressTracker progress,
+    BenchControl? control,
+    CancellationToken cancellationToken)
+{
+    var input = scenario.ClientInput!.Value;
+    var state = scenario.ServerState!.Value;
+    var schedule = initialSchedule;
+    var plan = new BenchPlan(
+        state.Streams(BenchDirection.ServerToClient),
+        BenchClock.NowNs(),
+        schedule.StartAtNs,
+        schedule.StopAtNs);
+    if (input.RateLt > 0)
+    {
+        lock (metricsGate)
+        {
+            foreach (var peer in roster)
+            {
+                metrics.ExpectLatest(
+                    peer.OriginId,
+                    peer.OriginId,
+                    input.TrafficId,
+                    BenchDirection.ClientToServer,
+                    schedule.StartAtNs);
+            }
+        }
+    }
+
+    var markedUnsent = false;
+    while (!cancellationToken.IsCancellationRequested && BenchClock.NowNs() < schedule.DrainUntilNs)
+    {
+        manager.PollEvents();
+        var now = BenchClock.NowNs();
+        if (control is not null &&
+            await control.PollWindowAsync(cancellationToken).ConfigureAwait(false) is { } window)
+        {
+            schedule = window;
+            plan.SetWindow(window.StartAtNs, window.StopAtNs);
+        }
+        if (now >= schedule.StartAtNs && now < schedule.StopAtNs)
+        {
+            lock (metricsGate)
+            {
+                metrics.Tick(now);
+            }
+        }
+        if (now < schedule.StopAtNs)
+        {
+            while (plan.TryNext(now, out var slot))
+            {
+                progress.RecordServerStateTick(slot);
+                foreach (var target in roster)
+                {
+                    SubmitState(target, state, slot, scenario.TotalConns, metrics, metricsGate);
+                }
+                manager.TriggerUpdate();
+            }
+        }
+        else if (!markedUnsent)
+        {
+            MarkStateUnsent(plan, roster.Length, scenario.TotalConns, schedule.StopAtNs, metrics, metricsGate);
+            markedUnsent = true;
+        }
+
+        await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+    }
+    if (!markedUnsent)
+    {
+        MarkStateUnsent(plan, roster.Length, scenario.TotalConns, schedule.StopAtNs, metrics, metricsGate);
+    }
+    manager.PollEvents();
+}
+
+static void SubmitState(
+    PeerState target,
+    BenchTrafficConfig state,
+    BenchSlot slot,
+    int totalConns,
+    BenchMetrics metrics,
+    object metricsGate)
+{
+    var header = new BenchHeader(
+        slot.Seq,
+        slot.SchedTsNs,
+        BenchClock.NowNs(),
+        slot.Flags,
+        (uint)totalConns,
+        slot.TrafficId);
+    var mustDeliver = (slot.Flags & BenchConstants.FlagMustDeliver) != 0;
+    var payload = new byte[state.PayloadSize(mustDeliver)];
+    var submitted = false;
+    if (target.Peer.ConnectionState == ConnectionState.Connected &&
+        BenchPayload.TryWrite(payload, header) &&
+        BenchPayload.TryWriteAppliedInputSeq(payload, target.ReadAppliedInputSeq()) &&
+        BenchPayload.TryFillTargetPad(payload, target.OriginId))
+    {
+        try
+        {
+            target.Peer.Send(
+                payload,
+                mustDeliver ? DeliveryMethod.ReliableOrdered : DeliveryMethod.Unreliable);
+            submitted = target.Peer.ConnectionState == ConnectionState.Connected;
+        }
+        catch
+        {
+            submitted = false;
+        }
+    }
+    lock (metricsGate)
+    {
+        metrics.OnSlot(header, submitted);
+    }
+}
+
+static void MarkStateUnsent(
+    BenchPlan plan,
+    int rosterSize,
+    int totalConns,
+    ulong stopAtNs,
+    BenchMetrics metrics,
+    object metricsGate)
+{
+    var cutoff = stopAtNs == 0 ? 0 : stopAtNs - 1;
+    while (plan.TryNext(cutoff, out var slot))
+    {
+        var header = new BenchHeader(
+            slot.Seq,
+            slot.SchedTsNs,
+            0,
+            slot.Flags,
+            (uint)totalConns,
+            slot.TrafficId);
+        lock (metricsGate)
+        {
+            for (var i = 0; i < rosterSize; i++)
+            {
+                metrics.OnSlot(header, false);
+            }
+        }
+    }
+}
+
+static void HandleReceive(
+    NetPeer origin,
+    NetPacketReader reader,
+    FanoutWorker fanout,
+    LnlServerStats stats,
+    BenchScenarioConfig? scenario,
+    ConcurrentDictionary<NetPeer, PeerState> peerStates,
+    BenchMetrics? metrics,
+    object metricsGate)
 {
     var len = reader.UserDataSize;
     if (len < BenchConstants.HeaderSize)
@@ -192,8 +499,37 @@ static void HandleReceive(NetPeer origin, NetPacketReader reader, FanoutWorker f
         stats.InvalidPayload();
         return;
     }
+    if (!BenchPayload.ValidateBody(span, header))
+    {
+        stats.InvalidPayload();
+        return;
+    }
 
     stats.CountRecv(header.Flags);
+
+    if (scenario?.Kind == BenchScenarioKind.AuthoritativeState)
+    {
+        var input = scenario.ClientInput!.Value;
+        if (!peerStates.TryGetValue(origin, out var state) ||
+            header.OriginId != state.OriginId ||
+            header.TrafficId != input.TrafficId ||
+            (header.Flags & BenchConstants.FlagBroadcast) != 0 ||
+            BenchConstants.DirectionFromFlags(header.Flags) != BenchDirection.ClientToServer ||
+            !input.Accepts(header.Flags, len))
+        {
+            stats.InvalidPayload();
+            return;
+        }
+        if ((header.Flags & BenchConstants.FlagMustDeliver) == 0)
+        {
+            state.ApplyInputSeq(header.Seq);
+        }
+        lock (metricsGate)
+        {
+            metrics!.OnRecv(state.OriginId, header, BenchClock.NowNs());
+        }
+        return;
+    }
 
     // class -> transport mapping (declared in --describe): must-deliver goes
     // out ReliableOrdered, loss-tolerant goes out Unreliable. Payload bytes
@@ -240,30 +576,72 @@ static bool TrySend(NetPeer peer, ReadOnlySpan<byte> payload, DeliveryMethod met
     }
 }
 
-internal readonly record struct ServerConfig(bool Valid, bool Describe, int Port)
+internal sealed class PeerState(NetPeer peer, uint originId, uint serverOriginId)
 {
+    private ulong appliedInputSeq;
+
+    public NetPeer Peer { get; } = peer;
+    public uint OriginId { get; } = originId;
+    public uint ServerOriginId { get; } = serverOriginId;
+
+    public void ApplyInputSeq(ulong seq)
+    {
+        BenchProgress.UpdateMax(ref appliedInputSeq, seq);
+    }
+
+    public ulong ReadAppliedInputSeq() => Volatile.Read(ref appliedInputSeq);
+}
+
+internal readonly record struct ServerConfig(
+    bool Valid,
+    bool Describe,
+    int Port,
+    BenchScenarioConfig? Scenario,
+    ulong StalenessPeriodNs)
+{
+    public const ulong DevWarmupNs = 200_000_000UL;
+    public const ulong DevDurationNs = 2_000_000_000UL;
+    public const ulong DevDrainNs = 500_000_000UL;
+    public const ulong DevConnectTimeoutNs = 10_000_000_000UL;
+
     public static ServerConfig Parse(string[] args)
     {
+        if (!BenchScenarioConfig.TryParseArguments(args, out var scenario, out var remaining))
+        {
+            return new ServerConfig(false, false, 0, null, 0);
+        }
         var port = 0;
         var havePort = false;
-        for (var i = 0; i < args.Length; i++)
+        var stalenessPeriodNs = BenchConstants.DefaultStalenessPeriodNs;
+        for (var i = 0; i < remaining.Length; i++)
         {
-            if (args[i] == "--describe")
+            if (remaining[i] == "--describe")
             {
-                return new ServerConfig(true, true, 0);
+                return new ServerConfig(true, true, 0, scenario, stalenessPeriodNs);
             }
-            if (args[i] == "--port" && i + 1 < args.Length &&
-                int.TryParse(args[++i], NumberStyles.None, CultureInfo.InvariantCulture, out port) &&
+            if (remaining[i] == "--port" && i + 1 < remaining.Length &&
+                int.TryParse(remaining[++i], NumberStyles.None, CultureInfo.InvariantCulture, out port) &&
                 port is > 0 and <= ushort.MaxValue)
             {
                 havePort = true;
                 continue;
             }
+            if (remaining[i] == "--staleness-period-ns" && i + 1 < remaining.Length &&
+                ulong.TryParse(remaining[++i], NumberStyles.None, CultureInfo.InvariantCulture, out stalenessPeriodNs) &&
+                stalenessPeriodNs > 0)
+            {
+                continue;
+            }
 
-            return new ServerConfig(false, false, 0);
+            return new ServerConfig(false, false, 0, null, 0);
         }
 
-        return new ServerConfig(havePort, false, port);
+        if (scenario?.ServerState is { RateLt: > 0 } state &&
+            state.PayloadLt > NetConstants.MaxUnreliableDataSize)
+        {
+            return new ServerConfig(false, false, 0, null, 0);
+        }
+        return new ServerConfig(havePort, false, port, scenario, stalenessPeriodNs);
     }
 }
 
@@ -295,6 +673,8 @@ public sealed class LnlServerStats
     public void Disconnected() => connections--;
 
     public void InvalidPayload() => invalidPayload++;
+
+    public ulong InvalidPayloadCount => Volatile.Read(ref invalidPayload);
 
     public void CountRecv(byte flags)
     {

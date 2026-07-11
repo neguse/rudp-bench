@@ -27,24 +27,27 @@ const (
 
 // Judgment は 1 run(1 点)の capacity 判定。
 type Judgment struct {
-	OK       bool   `json:"ok"`
-	Censored bool   `json:"censored"` // farm 律速 — break ではなく打ち切り
-	Cause    string `json:"cause,omitempty"`
+	Outcome  run.Outcome `json:"outcome"`
+	OK       bool        `json:"ok"`
+	Censored bool        `json:"censored"` // farm 律速 — break ではなく打ち切り
+	Cause    string      `json:"cause,omitempty"`
 
-	DeliveryLT    float64 `json:"delivery_lt,omitempty"`
-	DeliveryMD    float64 `json:"delivery_md,omitempty"`
-	StalenessP99  uint64  `json:"staleness_p99_ns,omitempty"`
-	SchedP99      uint64  `json:"sched_p99_ns,omitempty"` // client 送信スケジュール遅延(farm 診断)
-	FloorDelivery float64 `json:"floor_delivery,omitempty"`
-	FloorStaleNS  uint64  `json:"floor_staleness_ns,omitempty"`
+	DeliveryLT    float64                 `json:"delivery_lt,omitempty"`
+	DeliveryMD    float64                 `json:"delivery_md,omitempty"`
+	StalenessP99  uint64                  `json:"staleness_p99_ns,omitempty"`
+	SchedP99      uint64                  `json:"sched_p99_ns,omitempty"` // client 送信スケジュール遅延(farm 診断)
+	FloorDelivery float64                 `json:"floor_delivery,omitempty"`
+	FloorStaleNS  uint64                  `json:"floor_staleness_ns,omitempty"`
+	Traffic       []run.TrafficEvaluation `json:"traffic,omitempty"`
 }
 
 // invalid reason の分類。
-// - 受信側 drop(UDP drop delta): farm の受信不足。delivery を過小に見せる
-//   計測器起因の欠測なので censored(design spec: farm 律速は打ち切り)
-// - attempted_ratio: 送信 slot の未 submit。TCP 系では transport backpressure
-//   そのもの(= 測定対象の挙動)であり、未送信 slot は delivery の分母に
-//   入っているので metric gate で正直に判定できる → censored にしない
+//   - client受信側drop: farm の受信不足。delivery を過小に見せる
+//     計測器起因の欠測なので censored(design spec: farm 律速は打ち切り)
+//   - server受信側drop: SUT側の処理飽和であり、run gateがFAILへ分類する
+//   - attempted_ratio: 送信 slot の未 submit。TCP 系では transport backpressure
+//     そのもの(= 測定対象の挙動)であり、未送信 slot は delivery の分母に
+//     入っているので metric gate で正直に判定できる → censored にしない
 type reasonKind int
 
 const (
@@ -57,7 +60,7 @@ func classifyReason(reason string) reasonKind {
 	switch {
 	case strings.Contains(reason, "attempted_ratio"):
 		return reasonAttempted
-	case strings.Contains(reason, "UDP drop delta"):
+	case strings.Contains(reason, "client netns UDP drop delta"):
 		return reasonRecvDrop
 	default:
 		return reasonOther
@@ -105,7 +108,14 @@ func burstGapNS(egress netops.Netem, linkPPS float64) uint64 {
 
 // Judge は run 結果を平面 gate(archetype 非依存)で判定する。
 func Judge(result *run.Result, w run.Workload, totalConns int, netem *run.NetemRegime, samplePeriodNS uint64) Judgment {
-	j := Judgment{}
+	j := Judgment{Outcome: result.Outcome}
+	if result.Outcome == run.OutcomeFail {
+		j.Cause = strings.Join(result.OutcomeReasons, "; ")
+		if j.Cause == "" {
+			j.Cause = "SUT failed"
+		}
+		return j
+	}
 
 	var causes []string
 	backpressureNote := ""
@@ -219,6 +229,77 @@ func Judge(result *run.Result, w run.Workload, totalConns int, netem *run.NetemR
 		return j
 	}
 	j.OK = true
+	return j
+}
+
+// JudgeScenario evaluates the absolute SLOs embedded in a v3 scenario. Unlike
+// the legacy workload judge it never relaxes an application SLO relative to a
+// network floor; an infeasible network/scenario pair fails explicitly.
+func JudgeScenario(result *run.Result, scenario run.ScenarioSpec) Judgment {
+	j := Judgment{Outcome: result.Outcome}
+	switch result.Outcome {
+	case run.OutcomeUnsupported, run.OutcomeInconclusive:
+		j.Cause = strings.Join(result.OutcomeReasons, "; ")
+		return j
+	case run.OutcomeFail:
+		evaluationIsSLOFailure := result.ScenarioEvaluation != nil && !result.ScenarioEvaluation.OK &&
+			len(result.OutcomeReasons) == 1 && result.OutcomeReasons[0] == result.ScenarioEvaluation.Cause
+		if !evaluationIsSLOFailure {
+			j.Cause = strings.Join(result.OutcomeReasons, "; ")
+			if j.Cause == "" {
+				j.Cause = "SUT semantic or process failure"
+			}
+			if result.ScenarioEvaluation != nil {
+				j.Traffic = result.ScenarioEvaluation.Traffic
+			}
+			return j
+		}
+	}
+	if result.Verdict != run.VerdictValid {
+		hasDrop, hasOther := false, false
+		for _, reason := range result.InvalidReasons {
+			switch classifyReason(reason) {
+			case reasonRecvDrop:
+				hasDrop = true
+			case reasonOther:
+				hasOther = true
+			}
+		}
+		if hasDrop && !hasOther {
+			j.Outcome = run.OutcomeCensored
+			j.Censored = true
+			j.Cause = "farm_limited: " + strings.Join(result.InvalidReasons, "; ")
+			return j
+		}
+		// attempted-only validity failures are represented in the delivery
+		// denominator and can proceed to the SLO evaluation.
+		if hasOther || len(result.InvalidReasons) == 0 {
+			j.Outcome = run.OutcomeInvalid
+			j.Cause = "invalid: " + strings.Join(result.InvalidReasons, "; ")
+			return j
+		}
+	}
+	if result.Metrics == nil {
+		j.Outcome = run.OutcomeInvalid
+		j.Cause = "invalid: metrics missing"
+		return j
+	}
+	evaluation := run.EvaluateScenarioMetrics(result.Metrics, scenario)
+	j.OK = evaluation.OK
+	j.Cause = evaluation.Cause
+	j.Traffic = evaluation.Traffic
+	if !j.OK && !result.Config.SchedIsMeasurand {
+		if util, known := clientCPUUtilization(result); known && util >= farmCPUSaturation {
+			j.Outcome = run.OutcomeCensored
+			j.Censored = true
+			j.Cause = fmt.Sprintf("farm_limited: client farm cpu=%.0f%% of allotted CPUs (saturated); %s", util*100, j.Cause)
+		}
+	}
+	if j.OK {
+		j.Outcome = run.OutcomePass
+	} else if j.Outcome == "" || j.Outcome == run.OutcomePass {
+		j.Outcome = run.OutcomeFail
+	}
 	return j
 }
 

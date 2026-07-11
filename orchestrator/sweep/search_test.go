@@ -1,6 +1,10 @@
 package sweep
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/neguse/rudp-bench/orchestrator/run"
+)
 
 func monotone(k int) func(int) (PointOutcome, error) {
 	return func(conns int) (PointOutcome, error) {
@@ -41,8 +45,18 @@ func TestFindCapacityFailAtMin(t *testing.T) {
 	}
 }
 
+func TestFindCapacityFailAtMinAboveOneIsLeftCensored(t *testing.T) {
+	cell, err := FindCapacity(monotone(0), 4, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cell.BelowRange || cell.BreakConns != 4 {
+		t.Fatalf("expected capacity <4, got %+v", cell)
+	}
+}
+
 func TestFindCapacityRangeLimited(t *testing.T) {
-	cell, err := FindCapacity(monotone(1 << 20), 1, 512)
+	cell, err := FindCapacity(monotone(1<<20), 1, 512)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +85,18 @@ func TestFindCapacityCensored(t *testing.T) {
 	}
 }
 
+func TestFindCapacityPreservesMeasurementInvalidCensor(t *testing.T) {
+	cell, err := FindCapacity(func(int) (PointOutcome, error) {
+		return PointOutcome{Censored: true, MeasurementInvalid: true, Cause: "measurement_invalid: control failed"}, nil
+	}, 1, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cell.Censored || !cell.MeasurementInvalid || cell.Capacity != 0 || cell.BreakConns != 0 {
+		t.Fatalf("measurement invalid cell = %+v", cell)
+	}
+}
+
 func TestFindCapacityMinEqualsMax(t *testing.T) {
 	cell, err := FindCapacity(monotone(10), 4, 4)
 	if err != nil {
@@ -78,5 +104,26 @@ func TestFindCapacityMinEqualsMax(t *testing.T) {
 	}
 	if cell.Capacity != 4 || !cell.RangeLimited {
 		t.Fatalf("capacity=%d range_limited=%v, want 4/true", cell.Capacity, cell.RangeLimited)
+	}
+}
+
+func TestFindCapacityPreservesTerminalOutcome(t *testing.T) {
+	for _, outcome := range []run.Outcome{run.OutcomeUnsupported, run.OutcomeInconclusive} {
+		t.Run(string(outcome), func(t *testing.T) {
+			calls := 0
+			cell, err := FindCapacity(func(int) (PointOutcome, error) {
+				calls++
+				return PointOutcome{Outcome: outcome, Cause: "terminal reason"}, nil
+			}, 4, 512)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cell.Outcome != outcome || cell.BreakCause != "terminal reason" || cell.Evaluated != 1 || calls != 1 {
+				t.Fatalf("terminal cell = %+v, calls=%d", cell, calls)
+			}
+			if cell.Capacity != 0 || cell.BreakConns != 0 || cell.Censored || cell.RangeLimited || cell.BelowRange {
+				t.Fatalf("terminal outcome became a numeric boundary: %+v", cell)
+			}
+		})
 	}
 }

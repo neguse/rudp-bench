@@ -47,13 +47,21 @@ using var sigInt = PosixSignalRegistration.Create(PosixSignal.SIGINT, ctx =>
     stopCts.Cancel();
 });
 
-var maxOriginId = checked(config.OriginBase + (uint)config.Conns);
+var maxOriginId = config.Scenario is { } configuredScenario
+    ? checked((uint)configuredScenario.TotalConns + 1U)
+    : checked(config.OriginBase + (uint)config.Conns);
 var metrics = new BenchMetrics(new BenchMetricsConfig(
     maxOriginId == 0 ? 1 : maxOriginId,
     config.DeadlineNs,
-    config.StalenessPeriodNs));
+    config.StalenessPeriodNs,
+    config.Scenario is null ? 0U : (uint)config.Conns));
+config.Scenario?.ConfigureMetrics(metrics);
 var metricsGate = new object();
 var connections = new List<ClientConnection>(config.Conns);
+var payloadValidation = new BenchPayloadValidation();
+var progress = config.Scenario?.Kind == BenchScenarioKind.AuthoritativeState
+    ? new BenchAuthoritativeProgressTracker(config.Conns, config.Scenario.TotalConns)
+    : null;
 BenchControl? control = null;
 
 try
@@ -67,7 +75,14 @@ try
     for (var i = 0; i < config.Conns; i++)
     {
         var originId = config.OriginBase + (uint)i;
-        var receiver = new BenchReceiver(metrics, metricsGate, (uint)i);
+        var receiver = new BenchReceiver(
+            metrics,
+            metricsGate,
+            (uint)i,
+            originId,
+            config.Scenario,
+            payloadValidation,
+            progress);
         var handler = new SocketsHttpHandler
         {
             EnableMultipleHttp2Connections = true,
@@ -82,8 +97,8 @@ try
         var hub = await StreamingHubClient
             .ConnectAsync<IBenchHub, IBenchHubReceiver>(channel, receiver)
             .ConfigureAwait(false);
-        await hub.JoinAsync().ConfigureAwait(false);
-        connections.Add(new ClientConnection(originId, hub, channel, handler));
+        await hub.JoinAsync(originId).ConfigureAwait(false);
+        connections.Add(new ClientConnection(originId, receiver, hub, channel, handler));
     }
 
     BenchSchedule schedule;
@@ -104,11 +119,29 @@ try
     }
 
     var streams = BuildStreams(config);
+    if (config.Scenario is { } activeScenario)
+    {
+        lock (metricsGate)
+        {
+            activeScenario.RegisterExpectedLatestFlows(
+                metrics,
+                (uint)connections.Count,
+                config.OriginBase,
+                schedule.StartAtNs);
+        }
+    }
     var planStartNs = BenchClock.NowNs();
     foreach (var connection in connections)
     {
         connection.Plan = new BenchPlan(streams, planStartNs, schedule.StartAtNs, schedule.StopAtNs);
-        connection.SendPipe = new SendPipe(connection.Hub, connection.OriginId, config.PayloadLt, config.PayloadMd, metrics, metricsGate);
+        connection.SendPipe = new SendPipe(
+            connection,
+            config.PayloadLt,
+            config.PayloadMd,
+            metrics,
+            metricsGate,
+            payloadValidation,
+            progress);
     }
 
     var markedUnsent = false;
@@ -131,6 +164,17 @@ try
                 .ConfigureAwait(false);
             if (window is { } w)
             {
+                if (config.Scenario is { } windowScenario)
+                {
+                    lock (metricsGate)
+                    {
+                        windowScenario.RegisterExpectedLatestFlows(
+                            metrics,
+                            (uint)connections.Count,
+                            config.OriginBase,
+                            w.StartAtNs);
+                    }
+                }
                 schedule = w;
                 foreach (var connection in connections)
                 {
@@ -199,9 +243,21 @@ try
     await File.WriteAllTextAsync(metricsPath, metricsJson + "\n", new UTF8Encoding(false), CancellationToken.None)
         .ConfigureAwait(false);
 
+    var doneJson = metricsJson;
+    if (progress is not null)
+    {
+        var snapshot = progress.ClientSnapshot();
+        BenchProgress.WriteDiagnostics(snapshot, payloadValidation.Count);
+        doneJson = BenchProgress.AttachToDoneStats(metricsJson, snapshot, payloadValidation.Count);
+    }
+    else if (config.Scenario is not null)
+    {
+        doneJson = BenchProgress.AttachValidationToDoneStats(metricsJson, payloadValidation.Count);
+    }
+
     if (control is not null)
     {
-        await control.DoneAsync(metricsJson, CancellationToken.None).ConfigureAwait(false);
+        await control.DoneAsync(doneJson, CancellationToken.None).ConfigureAwait(false);
     }
 
     return 0;
@@ -230,6 +286,19 @@ finally
 
 static IReadOnlyList<BenchStream> BuildStreams(ClientConfig config)
 {
+    if (config.Scenario is { Kind: BenchScenarioKind.AuthoritativeState, ClientInput: { } input })
+    {
+        return input.Streams(BenchDirection.ClientToServer);
+    }
+    if (config.Scenario is { Kind: BenchScenarioKind.EnvironmentBaseline, ClientInput: { } baseline })
+    {
+        return baseline.Streams(BenchDirection.RoomRelay);
+    }
+    if (config.Scenario?.RoomPublish is { } publish)
+    {
+        return publish.Streams(BenchDirection.RoomRelay, true);
+    }
+
     var streams = new List<BenchStream>(2);
     if (config.RateLt > 0)
     {
@@ -336,12 +405,71 @@ static string MetricsPathOrDefault()
            Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".json";
 }
 
-internal sealed class BenchReceiver(BenchMetrics metrics, object metricsGate, uint localIndex) : IBenchHubReceiver
+internal sealed class BenchReceiver : IBenchHubReceiver
 {
+    private readonly BenchMetrics metrics;
+    private readonly object metricsGate;
+    private readonly uint localIndex;
+    private readonly uint originId;
+    private readonly BenchScenarioConfig? scenario;
+    private readonly BenchPayloadValidation payloadValidation;
+    private readonly BenchAuthoritativeProgressTracker? progress;
+    private ulong lastInputSeq;
+    private ulong lastAppliedInputSeq;
+
+    public uint LocalIndex => localIndex;
+
+    public BenchReceiver(
+        BenchMetrics metrics,
+        object metricsGate,
+        uint localIndex,
+        uint originId,
+        BenchScenarioConfig? scenario,
+        BenchPayloadValidation payloadValidation,
+        BenchAuthoritativeProgressTracker? progress)
+    {
+        this.metrics = metrics;
+        this.metricsGate = metricsGate;
+        this.localIndex = localIndex;
+        this.originId = originId;
+        this.scenario = scenario;
+        this.payloadValidation = payloadValidation;
+        this.progress = progress;
+    }
+
+    public void RecordInputSeq(ulong seq)
+    {
+        BenchProgress.UpdateMax(ref lastInputSeq, seq);
+    }
+
     public void OnPayload(byte[] payload)
     {
         if (!BenchPayload.TryRead(payload, out var header))
         {
+            payloadValidation.Invalid();
+            return;
+        }
+        if (scenario?.Kind == BenchScenarioKind.AuthoritativeState)
+        {
+            var state = scenario.ServerState!.Value;
+            if (header.OriginId != (uint)scenario.TotalConns ||
+                header.TrafficId != state.TrafficId ||
+                (header.Flags & BenchConstants.FlagBroadcast) != 0 ||
+                BenchConstants.DirectionFromFlags(header.Flags) != BenchDirection.ServerToClient ||
+                !state.Accepts(header.Flags, payload.Length) ||
+                !BenchPayload.TryReadAppliedInputSeq(payload, out var appliedInputSeq) ||
+                appliedInputSeq > Volatile.Read(ref lastInputSeq) ||
+                !BenchPayload.ValidateTargetPad(payload, originId))
+            {
+                payloadValidation.Invalid();
+                return;
+            }
+            BenchProgress.UpdateMax(ref lastAppliedInputSeq, appliedInputSeq);
+            progress?.RecordStateReceived((int)localIndex, header, appliedInputSeq);
+        }
+        else if (!BenchPayload.ValidateBody(payload, header))
+        {
+            payloadValidation.Invalid();
             return;
         }
 
@@ -355,11 +483,13 @@ internal sealed class BenchReceiver(BenchMetrics metrics, object metricsGate, ui
 
 internal sealed class ClientConnection(
     uint originId,
+    BenchReceiver receiver,
     IBenchHub hub,
     GrpcChannel channel,
     SocketsHttpHandler handler) : IAsyncDisposable
 {
     public uint OriginId { get; } = originId;
+    public BenchReceiver Receiver { get; } = receiver;
     public IBenchHub Hub { get; } = hub;
     public BenchPlan? Plan { get; set; }
     public SendPipe? SendPipe { get; set; }
@@ -388,29 +518,42 @@ internal sealed class ClientConnection(
 
 internal sealed class SendPipe
 {
+    private readonly BenchReceiver receiver;
     private readonly IBenchHub hub;
     private readonly uint originId;
     private readonly int payloadSizeLt;
     private readonly int payloadSizeMd;
     private readonly BenchMetrics metrics;
     private readonly object metricsGate;
+    private readonly BenchPayloadValidation payloadValidation;
+    private readonly BenchAuthoritativeProgressTracker? progress;
     private readonly object gate = new();
     private readonly Queue<BenchSlot> mustDeliver = new();
     private BenchSlot? lossTolerantLatest;
     private bool accepting = true;
 
-    public SendPipe(IBenchHub hub, uint originId, int payloadSizeLt, int payloadSizeMd, BenchMetrics metrics, object metricsGate)
+    public SendPipe(
+        ClientConnection connection,
+        int payloadSizeLt,
+        int payloadSizeMd,
+        BenchMetrics metrics,
+        object metricsGate,
+        BenchPayloadValidation payloadValidation,
+        BenchAuthoritativeProgressTracker? progress)
     {
         // 送信は fire-and-forget proxy 経由にする。素の hub proxy はサーバ応答まで
         // ValueTask が完了せず、送信ループが RTT に律速されて loss-tolerant が
         // ほぼ全部 coalesce される(wired 10ms RTT で attempted 0.47 の実測)。
         // latest-value 送信で応答を待たないのが idiomatic な使い方。
-        this.hub = hub.FireAndForget();
-        this.originId = originId;
+        hub = connection.Hub.FireAndForget();
+        originId = connection.OriginId;
+        receiver = connection.Receiver;
         this.payloadSizeLt = payloadSizeLt;
         this.payloadSizeMd = payloadSizeMd;
         this.metrics = metrics;
         this.metricsGate = metricsGate;
+        this.payloadValidation = payloadValidation;
+        this.progress = progress;
         Completion = Task.Run(RunAsync);
     }
 
@@ -484,7 +627,7 @@ internal sealed class SendPipe
         ulong sendTsNs,
         bool submitted)
     {
-        var header = new BenchHeader(slot.Seq, slot.SchedTsNs, sendTsNs, slot.Flags, originId);
+        var header = new BenchHeader(slot.Seq, slot.SchedTsNs, sendTsNs, slot.Flags, originId, slot.TrafficId);
         lock (metricsGate)
         {
             metrics.OnSlot(header, submitted);
@@ -525,13 +668,20 @@ internal sealed class SendPipe
     private async Task SendSlotAsync(BenchSlot slot)
     {
         var sendTsNs = BenchClock.NowNs();
-        var header = new BenchHeader(slot.Seq, slot.SchedTsNs, sendTsNs, slot.Flags, originId);
+        var header = new BenchHeader(slot.Seq, slot.SchedTsNs, sendTsNs, slot.Flags, originId, slot.TrafficId);
         var payloadSize = (slot.Flags & BenchConstants.FlagMustDeliver) != 0 ? payloadSizeMd : payloadSizeLt;
         var payload = new byte[payloadSize];
-        if (!BenchPayload.TryWrite(payload, header))
+        if (!BenchPayload.TryWrite(payload, header) || !BenchPayload.TryFillBody(payload, header))
         {
+            payloadValidation.Invalid();
             RecordSlot(metrics, metricsGate, originId, slot, 0, false);
             return;
+        }
+
+        if ((header.Flags & BenchConstants.FlagMustDeliver) == 0 &&
+            BenchConstants.DirectionFromFlags(header.Flags) == BenchDirection.ClientToServer)
+        {
+            receiver.RecordInputSeq(header.Seq);
         }
 
         var submitted = false;
@@ -549,6 +699,7 @@ internal sealed class SendPipe
         {
             metrics.OnSlot(header, submitted);
         }
+        progress?.RecordInputLastSent((int)receiver.LocalIndex, header, submitted);
     }
 }
 
@@ -567,7 +718,8 @@ internal readonly record struct ClientConfig(
     int PayloadLt,
     int PayloadMd,
     ulong DeadlineNs,
-    ulong StalenessPeriodNs)
+    ulong StalenessPeriodNs,
+    BenchScenarioConfig? Scenario = null)
 {
     public const ulong DevWarmupNs = 200_000_000UL;
     public const ulong DevDurationNs = 2_000_000_000UL;
@@ -575,6 +727,11 @@ internal readonly record struct ClientConfig(
 
     public static ClientConfig Parse(string[] args)
     {
+        if (!BenchScenarioConfig.TryParseArguments(args, out var scenario, out var remaining))
+        {
+            return Invalid();
+        }
+        args = remaining;
         var cfg = new MutableConfig();
         for (var i = 0; i < args.Length; i++)
         {
@@ -676,7 +833,33 @@ internal readonly record struct ClientConfig(
             return Invalid();
         }
 
-        if (!cfg.Complete || (cfg.RateLt == 0 && cfg.RateMd == 0))
+        if (scenario is { } activeScenario)
+        {
+            if (!cfg.BaseComplete)
+            {
+                return Invalid();
+            }
+            var activeTraffic = activeScenario.ClientInput ?? activeScenario.RoomPublish;
+            if (activeTraffic is not { } source)
+            {
+                return Invalid();
+            }
+            cfg.RateLt = source.RateLt;
+            cfg.RateMd = source.RateMd;
+            cfg.PayloadLt = source.PayloadLt;
+            cfg.PayloadMd = source.PayloadMd;
+            cfg.BroadcastLt = activeScenario.Kind == BenchScenarioKind.RoomRelay;
+            cfg.BroadcastMd = activeScenario.Kind == BenchScenarioKind.RoomRelay;
+            if (!cfg.HaveDeadline)
+            {
+                cfg.DeadlineNs = source.DeadlineNs;
+            }
+            if (!cfg.HaveStaleness)
+            {
+                cfg.StalenessPeriodNs = BenchConstants.DefaultStalenessPeriodNs;
+            }
+        }
+        else if (!cfg.Complete || (cfg.RateLt == 0 && cfg.RateMd == 0))
         {
             return Invalid();
         }
@@ -691,7 +874,9 @@ internal readonly record struct ClientConfig(
         {
             return Invalid();
         }
-        if ((ulong)cfg.OriginBase + (ulong)cfg.Conns > uint.MaxValue)
+        var endOrigin = (ulong)cfg.OriginBase + (ulong)cfg.Conns;
+        if (endOrigin > uint.MaxValue ||
+            (scenario is not null && endOrigin > (ulong)scenario.TotalConns))
         {
             return Invalid();
         }
@@ -711,7 +896,8 @@ internal readonly record struct ClientConfig(
             cfg.PayloadLt,
             cfg.PayloadMd,
             cfg.DeadlineNs,
-            cfg.StalenessPeriodNs);
+            cfg.StalenessPeriodNs,
+            scenario);
     }
 
     private static ClientConfig Invalid() => new(false, false, "", 0, 0, 0, 0, 0, 0, false, false, 0, 0, 0, 0);
@@ -743,7 +929,9 @@ internal readonly record struct ClientConfig(
         public bool HaveStaleness;
 
         public bool Complete =>
-            HaveHost && HavePort && HaveConns && HaveProcIndex && HaveOriginBase &&
+            BaseComplete &&
             HaveRateLt && HaveRateMd && HavePayload && HaveDeadline && HaveStaleness;
+
+        public bool BaseComplete => HaveHost && HavePort && HaveConns && HaveProcIndex && HaveOriginBase;
     }
 }

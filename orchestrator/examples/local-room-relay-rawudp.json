@@ -1,0 +1,49 @@
+{
+  "transport": "raw_udp",
+  "server_command": [
+    "build-v2-rawudp/raw_udp_server",
+    "--port",
+    "42918"
+  ],
+  "client_command": [
+    "build-v2-rawudp/raw_udp_client",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "42918",
+    "--conns",
+    "{conns}",
+    "--proc-index",
+    "{proc_index}",
+    "--origin-base",
+    "{origin_id_start}"
+  ],
+  "client_procs": 1,
+  "total_conns": 3,
+  "scenario": {
+    "name": "room-relay-smoke",
+    "kind": "room_relay",
+    "room_publish": {
+      "traffic_id": 3,
+      "loss_tolerant": {
+        "rate_hz": 20,
+        "payload_bytes": 128,
+        "staleness_p99_ns": 200000000,
+        "min_delivery_ratio": 1
+      },
+      "must_deliver": {
+        "rate_hz": 1,
+        "payload_bytes": 64,
+        "deadline_ns": 200000000,
+        "min_deadline_hit_ratio": 1,
+        "min_eventual_delivery_ratio": 1
+      }
+    }
+  },
+  "warmup": "2s",
+  "steady_warmup": true,
+  "duration": "2s",
+  "drain": "500ms",
+  "staleness_period_ns": 10000000,
+  "output_dir": "results-v2/local-room-relay-rawudp"
+}

@@ -64,11 +64,17 @@ func TestRunIntegrationLocalFakeProcesses(t *testing.T) {
 	if result.Verdict != VerdictValid {
 		t.Fatalf("verdict = %s, reasons=%v", result.Verdict, result.InvalidReasons)
 	}
+	if result.Outcome != OutcomePass {
+		t.Fatalf("outcome = %s, reasons=%v", result.Outcome, result.OutcomeReasons)
+	}
 	if len(result.Processes) != 3 {
 		t.Fatalf("processes = %d, want 3", len(result.Processes))
 	}
 	if result.Metrics == nil {
 		t.Fatal("metrics = nil")
+	}
+	if result.Treatment == nil || len(result.Treatment.Server.Description) == 0 || len(result.Treatment.Client.Description) == 0 {
+		t.Fatalf("treatment = %+v", result.Treatment)
 	}
 	loss := result.Metrics.Classes[ClassLossTolerant]
 	if loss.Slots != 15 || loss.SlotsBroadcast != 3 || loss.ExpectedReceives != 21 || loss.DeliveredUnique != 21 {
@@ -87,6 +93,12 @@ func TestRunIntegrationLocalFakeProcesses(t *testing.T) {
 func TestFakeProcessHelper(t *testing.T) {
 	if os.Getenv("RUDP_BENCH_FAKE_PROCESS") != "1" {
 		return
+	}
+	for _, arg := range os.Args {
+		if arg == "--describe" {
+			fmt.Print(`{"transport":"fake","class_mapping":{"loss_tolerant":"fake","must_deliver":"fake"},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":65536,"scenarios":["environment_baseline","authoritative_state","room_relay"],"tuning":[]}`)
+			os.Exit(0)
+		}
 	}
 	if err := fakeProcessMain(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -181,6 +181,15 @@ func TestLoadConfigUnknownWorkload(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsUnknownCommandField(t *testing.T) {
+	path := writeConfig(t, `{
+ "workload": "echo",
+ "client_command": {"path":"cli","envv":["X=1"]},`+configCommon+`}`)
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unknown command field error = %v", err)
+	}
+}
+
 func TestPrepareClampsClientProcs(t *testing.T) {
 	cfg := RunConfig{
 		Transport:     "enet",

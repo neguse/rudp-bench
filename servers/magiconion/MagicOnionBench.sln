@@ -8,6 +8,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MagicOnionBench.Server", "M
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MagicOnionBench.Client", "MagicOnionBench.Client\MagicOnionBench.Client.csproj", "{FF22B374-F2F5-493C-8565-CC8FE4456755}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BenchKit.CS.Tests", "BenchKit.CS.Tests\BenchKit.CS.Tests.csproj", "{2E823C60-2CF3-4D65-80E6-863EF947E6D8}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -54,6 +56,18 @@ Global
 		{FF22B374-F2F5-493C-8565-CC8FE4456755}.Release|x64.Build.0 = Release|Any CPU
 		{FF22B374-F2F5-493C-8565-CC8FE4456755}.Release|x86.ActiveCfg = Release|Any CPU
 		{FF22B374-F2F5-493C-8565-CC8FE4456755}.Release|x86.Build.0 = Release|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Debug|x64.Build.0 = Debug|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Debug|x86.Build.0 = Debug|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Release|x64.ActiveCfg = Release|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Release|x64.Build.0 = Release|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Release|x86.ActiveCfg = Release|Any CPU
+		{2E823C60-2CF3-4D65-80E6-863EF947E6D8}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

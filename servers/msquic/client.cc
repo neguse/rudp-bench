@@ -1,9 +1,11 @@
 #include "benchkit.h"
+#include "../scenario_cli.h"
 #include "msquic_common.h"
 
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cinttypes>
 #include <climits>
 #include <cstdint>
 #include <cstdio>
@@ -41,6 +43,9 @@ struct ClientConfig {
   size_t payload_md = 0;
   uint64_t deadline_ns = 0;
   uint64_t staleness_period_ns = 0;
+  bk_scenario_cli scenario = {};
+  uint8_t traffic_id = 0;
+  bk_direction direction = BK_DIRECTION_ROOM_RELAY;
 };
 
 class ClientApp;
@@ -57,6 +62,11 @@ struct ClientConn {
   FrameDecoder decoder;
   std::mutex mu;
   std::mutex decoder_mu;
+  std::atomic<uint64_t> last_input_seq{0};
+  std::atomic<uint64_t> last_applied_input_seq{0};
+  std::atomic<uint64_t> input_last_sent_measured{0};
+  std::atomic<uint64_t> state_header_seq_recv_measured{0};
+  std::atomic<uint64_t> state_applied_input_seq_recv_measured{0};
 };
 
 void usage(const char *argv0) {
@@ -138,6 +148,7 @@ int parse_rate(const char *s, double *out) {
 }
 
 int parse_args(int argc, char **argv, ClientConfig *cfg) {
+  cfg->staleness_period_ns = 10000000ull;
   bool have_host = false;
   bool have_port = false;
   bool have_conns = false;
@@ -153,6 +164,14 @@ int parse_args(int argc, char **argv, ClientConfig *cfg) {
     if (std::strcmp(argv[i], "--describe") == 0) {
       rudp_bench_msquic::print_describe();
       std::exit(EXIT_SUCCESS);
+    }
+    const int scenario_arg =
+        bk_scenario_cli_parse(argc, argv, &i, &cfg->scenario);
+    if (scenario_arg < 0) {
+      return -1;
+    }
+    if (scenario_arg > 0) {
+      continue;
     }
     if (std::strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
       cfg->host = argv[++i];
@@ -223,8 +242,35 @@ int parse_args(int argc, char **argv, ClientConfig *cfg) {
   }
 
   if (!have_host || !have_port || !have_conns || !have_proc_index ||
-      !have_origin_base || !have_rate_lt || !have_rate_md || !have_payload ||
-      !have_deadline || !have_staleness) {
+      !have_origin_base) {
+    return -1;
+  }
+  if (cfg->scenario.present) {
+    if (bk_scenario_cli_validate(&cfg->scenario, kMaxConns,
+                                 rudp_bench_msquic::kMaxPayloadBytes) != 0 ||
+        static_cast<uint64_t>(cfg->origin_base) +
+                static_cast<uint64_t>(cfg->conns) >
+            cfg->scenario.total_conns) {
+      return -1;
+    }
+    int broadcast = 0;
+    const bk_scenario_traffic *traffic = bk_scenario_client_traffic(
+        &cfg->scenario, &cfg->direction, &broadcast);
+    if (traffic == nullptr) {
+      return -1;
+    }
+    cfg->traffic_id = traffic->traffic_id;
+    cfg->rate_lt = traffic->rate_lt;
+    cfg->rate_md = traffic->rate_md;
+    cfg->payload_lt = traffic->payload_lt;
+    cfg->payload_md = traffic->payload_md;
+    cfg->deadline_ns = traffic->deadline_ns;
+    cfg->broadcast_lt = broadcast != 0;
+    cfg->broadcast_md = broadcast != 0;
+    return 0;
+  }
+  if (!have_rate_lt || !have_rate_md || !have_payload || !have_deadline ||
+      !have_staleness) {
     return -1;
   }
   if (cfg->rate_lt == 0.0 && cfg->rate_md == 0.0) {
@@ -273,21 +319,23 @@ int build_streams(const ClientConfig *cfg, bk_stream *streams,
     if (interval_from_rate(cfg->rate_lt, &interval_ns) != 0) {
       return -1;
     }
-    streams[n++] = {
-        false,
-        cfg->broadcast_lt,
-        interval_ns,
-    };
+    streams[n].must_deliver = false;
+    streams[n].broadcast = cfg->broadcast_lt;
+    streams[n].traffic_id = cfg->traffic_id;
+    streams[n].direction = cfg->direction;
+    streams[n].interval_ns = interval_ns;
+    ++n;
   }
   if (cfg->rate_md > 0.0) {
     if (interval_from_rate(cfg->rate_md, &interval_ns) != 0) {
       return -1;
     }
-    streams[n++] = {
-        true,
-        cfg->broadcast_md,
-        interval_ns,
-    };
+    streams[n].must_deliver = true;
+    streams[n].broadcast = cfg->broadcast_md;
+    streams[n].traffic_id = cfg->traffic_id;
+    streams[n].direction = cfg->direction;
+    streams[n].interval_ns = interval_ns;
+    ++n;
   }
   *n_streams = n;
   return n > 0 ? 0 : -1;
@@ -300,38 +348,7 @@ void make_header_from_slot(const bk_slot *slot, uint32_t origin_id,
   header->send_ts_ns = send_ts_ns;
   header->flags = slot->flags;
   header->origin_id = origin_id;
-}
-
-char *read_file_alloc(const char *path) {
-  FILE *f = std::fopen(path, "rb");
-  if (f == nullptr) {
-    return nullptr;
-  }
-  if (std::fseek(f, 0, SEEK_END) != 0) {
-    std::fclose(f);
-    return nullptr;
-  }
-  const long size = std::ftell(f);
-  if (size < 0) {
-    std::fclose(f);
-    return nullptr;
-  }
-  if (std::fseek(f, 0, SEEK_SET) != 0) {
-    std::fclose(f);
-    return nullptr;
-  }
-  char *buf = static_cast<char *>(std::malloc(static_cast<size_t>(size) + 1u));
-  if (buf == nullptr) {
-    std::fclose(f);
-    return nullptr;
-  }
-  const size_t got = std::fread(buf, 1, static_cast<size_t>(size), f);
-  if (got != static_cast<size_t>(size) || std::fclose(f) != 0) {
-    std::free(buf);
-    return nullptr;
-  }
-  buf[got] = '\0';
-  return buf;
+  header->traffic_id = slot->traffic_id;
 }
 
 const char *metrics_path_or_default(char *buf, size_t cap) {
@@ -380,16 +397,28 @@ class ClientApp {
   explicit ClientApp(const ClientConfig &cfg) : cfg_(cfg) {}
 
   int run() {
+    const bool authoritative =
+        cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE;
     const uint32_t max_origin_id =
-        cfg_.origin_base + static_cast<uint32_t>(cfg_.conns);
-    const bk_metrics_config metrics_cfg = {
-        max_origin_id == 0 ? 1u : max_origin_id,
-        cfg_.deadline_ns,
-        cfg_.staleness_period_ns,
-    };
+        cfg_.scenario.present
+            ? cfg_.scenario.total_conns + 1u
+            : cfg_.origin_base + static_cast<uint32_t>(cfg_.conns);
+    bk_metrics_config metrics_cfg = {};
+    metrics_cfg.max_origin_id = max_origin_id == 0 ? 1u : max_origin_id;
+    metrics_cfg.deadline_ns = cfg_.deadline_ns;
+    metrics_cfg.staleness_period_ns = cfg_.staleness_period_ns;
+    metrics_cfg.max_local_index =
+        cfg_.scenario.present ? static_cast<uint32_t>(cfg_.conns) : 0;
     metrics_ = bk_metrics_new(&metrics_cfg);
     if (metrics_ == nullptr) {
       std::fprintf(stderr, "bk_metrics_new failed\n");
+      return -1;
+    }
+    if (authoritative &&
+        bk_metrics_set_traffic_deadline(
+            metrics_, cfg_.scenario.state.traffic_id,
+            BK_DIRECTION_SERVER_TO_CLIENT,
+            cfg_.scenario.state.deadline_ns) != 0) {
       return -1;
     }
 
@@ -415,6 +444,13 @@ class ClientApp {
     }
     if (!wait_for_ready()) {
       std::fprintf(stderr, "timed out waiting for MsQuic connections\n");
+      if (control != nullptr) {
+        bk_control_close(control);
+      }
+      return -1;
+    }
+    if (!send_registrations()) {
+      std::fprintf(stderr, "MsQuic registration send failed\n");
       if (control != nullptr) {
         bk_control_close(control);
       }
@@ -461,6 +497,13 @@ class ClientApp {
         return -1;
       }
     }
+    if (!expect_scenario_flows(schedule)) {
+      std::fprintf(stderr, "bk_metrics_expect_latest failed\n");
+      if (control != nullptr) {
+        bk_control_close(control);
+      }
+      return -1;
+    }
 
     int rc = run_schedule(control, schedule);
 
@@ -472,16 +515,18 @@ class ClientApp {
       rc = -1;
     }
 
-    char *stats_json = metrics_path == nullptr ? nullptr : read_file_alloc(metrics_path);
+    char stats_json[1024];
+    if (format_stats_json(stats_json, sizeof(stats_json)) != 0) {
+      std::fprintf(stderr, "client stats JSON overflow\n");
+      rc = -1;
+    }
     if (control != nullptr) {
-      if (bk_control_done(control, stats_json != nullptr ? stats_json : "{}") !=
-          0) {
+      if (rc == 0 && bk_control_done(control, stats_json) != 0) {
         std::fprintf(stderr, "benchkit done failed\n");
         rc = -1;
       }
       bk_control_close(control);
     }
-    std::free(stats_json);
 
     for (ClientConn *conn : conns_) {
       if (conn->plan != nullptr) {
@@ -501,7 +546,7 @@ class ClientApp {
 
       case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED:
         record_recv(conn->local_index, event->DATAGRAM_RECEIVED.Buffer->Buffer,
-                    event->DATAGRAM_RECEIVED.Buffer->Length);
+                    event->DATAGRAM_RECEIVED.Buffer->Length, false);
         break;
 
       case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED:
@@ -547,11 +592,13 @@ class ClientApp {
       case QUIC_STREAM_EVENT_RECEIVE:
         {
           std::lock_guard<std::mutex> lock(conn->decoder_mu);
-          conn->decoder.append(
-              event->RECEIVE.Buffers, event->RECEIVE.BufferCount,
-              [&](const uint8_t *data, size_t len) {
-                record_recv(conn->local_index, data, len);
-              });
+          if (!conn->decoder.append(
+                  event->RECEIVE.Buffers, event->RECEIVE.BufferCount,
+                  [&](const uint8_t *data, size_t len) {
+                    record_recv(conn->local_index, data, len, true);
+                  })) {
+            invalid_payload_.fetch_add(1, std::memory_order_relaxed);
+          }
         }
         break;
 
@@ -671,6 +718,79 @@ class ClientApp {
     return connected_count_.load(std::memory_order_relaxed) == cfg_.conns;
   }
 
+  bool send_registrations() {
+    for (ClientConn *conn : conns_) {
+      const size_t payload_size = BK_MIN_PAYLOAD;
+      rudp_bench_msquic::SendBuf *buf = rudp_bench_msquic::send_buf_new(
+          sizeof(uint32_t) + payload_size, 1);
+      if (buf == nullptr) {
+        return false;
+      }
+      const uint32_t nlen = htonl(static_cast<uint32_t>(payload_size));
+      std::memcpy(buf->data(), &nlen, sizeof(nlen));
+      bk_header header = {};
+      header.send_ts_ns = bk_now_ns();
+      header.origin_id = conn->origin_id;
+      if (bk_payload_write(buf->data() + sizeof(nlen), payload_size, &header) !=
+          0) {
+        rudp_bench_msquic::send_buf_unref(buf);
+        return false;
+      }
+      std::lock_guard<std::mutex> lock(conn->mu);
+      const HQUIC stream = conn->stream_ready ? conn->stream : nullptr;
+      if (stream == nullptr) {
+        rudp_bench_msquic::send_buf_unref(buf);
+        return false;
+      }
+      if (rudp_bench_msquic::send_stream_buf(stream, buf) != 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool expect_scenario_flows(const bk_schedule &schedule) {
+    if (!cfg_.scenario.present) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(metrics_mu_);
+    if (cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+      if (cfg_.scenario.state.rate_lt == 0.0) {
+        return true;
+      }
+      for (const ClientConn *conn : conns_) {
+        if (bk_metrics_expect_latest(
+                metrics_, conn->local_index, cfg_.scenario.total_conns,
+                cfg_.scenario.state.traffic_id,
+                BK_DIRECTION_SERVER_TO_CLIENT, schedule.start_at_ns) != 0) {
+          return false;
+        }
+      }
+      return true;
+    }
+    if (cfg_.rate_lt == 0.0) {
+      return true;
+    }
+    for (const ClientConn *conn : conns_) {
+      const uint32_t first_origin =
+          cfg_.scenario.kind == BK_SCENARIO_ROOM_RELAY ? 0u
+                                                       : conn->origin_id;
+      const uint32_t end_origin =
+          cfg_.scenario.kind == BK_SCENARIO_ROOM_RELAY
+              ? cfg_.scenario.total_conns
+              : first_origin + 1u;
+      for (uint32_t origin = first_origin; origin < end_origin; ++origin) {
+        if (bk_metrics_expect_latest(metrics_, conn->local_index, origin,
+                                     cfg_.traffic_id,
+                                     BK_DIRECTION_ROOM_RELAY,
+                                     schedule.start_at_ns) != 0) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   int run_schedule(bk_control *control, bk_schedule schedule) {
     bool marked_unsent = false;
     int rc = 0;
@@ -760,9 +880,8 @@ class ClientApp {
     return rc;
   }
 
-  // frame を SendBuf に直接構築する(中間バッファ経由の memcpy を削減)。
-  // header 32B 以降は受信側で読まれない契約(bk_payload_read はヘッダのみ
-  // 検証)なので未初期化のまま送る。
+  // frame を SendBuf に直接構築し、header と deterministic body pattern を
+  // 書く。中間バッファ経由の payload 全体 memcpy を避ける。
   void send_slot(ClientConn *conn, const bk_slot *slot, size_t payload_size) {
     bk_header header;
     make_header_from_slot(slot, conn->origin_id, bk_now_ns(), &header);
@@ -771,7 +890,8 @@ class ClientApp {
       rudp_bench_msquic::SendBuf *buf =
           rudp_bench_msquic::send_buf_new(payload_size, 1);
       if (buf != nullptr) {
-        if (bk_payload_write(buf->data(), payload_size, &header) == 0) {
+        if (bk_payload_write(buf->data(), payload_size, &header) == 0 &&
+            bk_payload_fill_body(buf->data(), payload_size, &header) == 0) {
           submitted =
               rudp_bench_msquic::send_datagram_buf(conn->conn, buf) == 0;
         } else {
@@ -779,26 +899,37 @@ class ClientApp {
         }
       }
     } else {
-      HQUIC stream = nullptr;
-      bool ready = false;
-      {
-        std::lock_guard<std::mutex> lock(conn->mu);
-        stream = conn->stream;
-        ready = conn->stream_ready;
-      }
-      if (stream != nullptr && ready) {
-        rudp_bench_msquic::SendBuf *buf = rudp_bench_msquic::send_buf_new(
-            sizeof(uint32_t) + payload_size, 1);
-        if (buf != nullptr) {
-          const uint32_t nlen = htonl(static_cast<uint32_t>(payload_size));
-          std::memcpy(buf->data(), &nlen, sizeof(nlen));
-          if (bk_payload_write(buf->data() + sizeof(nlen), payload_size,
-                               &header) == 0) {
+      rudp_bench_msquic::SendBuf *buf = rudp_bench_msquic::send_buf_new(
+          sizeof(uint32_t) + payload_size, 1);
+      if (buf != nullptr) {
+        const uint32_t nlen = htonl(static_cast<uint32_t>(payload_size));
+        std::memcpy(buf->data(), &nlen, sizeof(nlen));
+        if (bk_payload_write(buf->data() + sizeof(nlen), payload_size,
+                             &header) == 0 &&
+            bk_payload_fill_body(buf->data() + sizeof(nlen), payload_size,
+                                 &header) == 0) {
+          std::lock_guard<std::mutex> lock(conn->mu);
+          const HQUIC stream = conn->stream_ready ? conn->stream : nullptr;
+          if (stream != nullptr) {
             submitted = rudp_bench_msquic::send_stream_buf(stream, buf) == 0;
-          } else {
-            rudp_bench_msquic::send_buf_unref(buf);
+            buf = nullptr;
           }
         }
+        if (buf != nullptr) {
+          rudp_bench_msquic::send_buf_unref(buf);
+        }
+      }
+    }
+    if (submitted && BK_FLAGS_DIRECTION(header.flags) ==
+                         BK_DIRECTION_CLIENT_TO_SERVER &&
+        (header.flags & BK_FLAG_MUST_DELIVER) == 0) {
+      uint64_t previous = conn->last_input_seq.load(std::memory_order_relaxed);
+      while (header.seq > previous &&
+             !conn->last_input_seq.compare_exchange_weak(
+                 previous, header.seq, std::memory_order_relaxed)) {
+      }
+      if ((header.flags & BK_FLAG_MEASURE) != 0) {
+        atomic_update_max(&conn->input_last_sent_measured, header.seq);
       }
     }
     metrics_on_slot(&header, submitted);
@@ -813,14 +944,112 @@ class ClientApp {
     }
   }
 
-  void record_recv(uint32_t local_index, const uint8_t *data, size_t len) {
+  void record_recv(uint32_t local_index, const uint8_t *data, size_t len,
+                   bool reliable_path) {
     bk_header header;
     if (bk_payload_read(data, len, &header) != 0) {
+      invalid_payload_.fetch_add(1, std::memory_order_relaxed);
       return;
+    }
+    if (local_index >= conns_.size()) {
+      invalid_payload_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    if (reliable_path !=
+        ((header.flags & BK_FLAG_MUST_DELIVER) != 0)) {
+      invalid_payload_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    ClientConn *conn = conns_[local_index];
+    if (cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+      const bool must_deliver =
+          (header.flags & BK_FLAG_MUST_DELIVER) != 0;
+      uint64_t applied = 0;
+      if (!bk_scenario_state_payload_valid(&cfg_.scenario, &header, len) ||
+          bk_authoritative_state_read_applied_input_seq(data, len, &applied) !=
+              0 ||
+          applied > conn->last_input_seq.load(std::memory_order_relaxed) ||
+          bk_authoritative_state_validate_target_pad(data, len,
+                                                     conn->origin_id) != 0) {
+        invalid_payload_.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+      uint64_t previous =
+          conn->last_applied_input_seq.load(std::memory_order_relaxed);
+      while (applied > previous &&
+             !conn->last_applied_input_seq.compare_exchange_weak(
+                 previous, applied, std::memory_order_relaxed)) {
+      }
+      if (!must_deliver && (header.flags & BK_FLAG_MEASURE) != 0) {
+        atomic_update_max(&conn->state_header_seq_recv_measured, header.seq);
+        atomic_update_max(&conn->state_applied_input_seq_recv_measured,
+                          applied);
+      }
+    } else {
+      if ((cfg_.scenario.present &&
+           !bk_scenario_client_payload_valid(&cfg_.scenario, &header, len)) ||
+          bk_payload_validate_body(data, len, &header) != 0) {
+        invalid_payload_.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
     }
     const uint64_t now = bk_now_ns();
     std::lock_guard<std::mutex> lock(metrics_mu_);
     bk_metrics_on_recv(metrics_, local_index, &header, now);
+  }
+
+  int format_stats_json(char *buf, size_t cap) const {
+    bk_authoritative_progress progress = {};
+    if (cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+      progress.local_conns = static_cast<uint32_t>(cfg_.conns);
+      progress.roster_conns = cfg_.scenario.total_conns;
+      for (size_t i = 0; i < conns_.size(); ++i) {
+        const ClientConn *conn = conns_[i];
+        const uint64_t input =
+            conn->input_last_sent_measured.load(std::memory_order_relaxed);
+        const uint64_t state_header =
+            conn->state_header_seq_recv_measured.load(std::memory_order_relaxed);
+        const uint64_t state_applied = conn->state_applied_input_seq_recv_measured
+                                           .load(std::memory_order_relaxed);
+        if (i == 0 || input < progress.input_last_sent_min) {
+          progress.input_last_sent_min = input;
+        }
+        if (input > progress.input_last_sent_max) {
+          progress.input_last_sent_max = input;
+        }
+        if (i == 0 || state_header < progress.state_header_seq_recv_min) {
+          progress.state_header_seq_recv_min = state_header;
+        }
+        if (state_header > progress.state_header_seq_recv_max) {
+          progress.state_header_seq_recv_max = state_header;
+        }
+        if (i == 0 ||
+            state_applied < progress.state_applied_input_seq_recv_min) {
+          progress.state_applied_input_seq_recv_min = state_applied;
+        }
+        if (state_applied > progress.state_applied_input_seq_recv_max) {
+          progress.state_applied_input_seq_recv_max = state_applied;
+        }
+      }
+    }
+    char progress_json[768];
+    if (bk_authoritative_progress_format("client", &progress, progress_json,
+                                         sizeof(progress_json)) != 0) {
+      return -1;
+    }
+    const int n = std::snprintf(
+        buf, cap, "{\"invalid_payload\":%" PRIu64 ",%s}",
+        invalid_payload_.load(std::memory_order_relaxed), progress_json);
+    return n > 0 && static_cast<size_t>(n) < cap ? 0 : -1;
+  }
+
+  static void atomic_update_max(std::atomic<uint64_t> *target,
+                                uint64_t value) {
+    uint64_t previous = target->load(std::memory_order_relaxed);
+    while (value > previous &&
+           !target->compare_exchange_weak(previous, value,
+                                          std::memory_order_relaxed)) {
+    }
   }
 
   void metrics_on_slot(const bk_header *header, bool submitted) {
@@ -859,6 +1088,7 @@ class ClientApp {
   std::atomic<int> connected_count_{0};
   std::atomic<int> stream_ready_count_{0};
   std::atomic<bool> failed_{false};
+  std::atomic<uint64_t> invalid_payload_{0};
 };
 
 }  // namespace

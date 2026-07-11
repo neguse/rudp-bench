@@ -1,17 +1,20 @@
 # calibration — 校正スイート
 
 計測器(benchkit / orchestrator)を「答えの分かっている系」で校正してから
-未知の transport を測る。項目の定義は
-[v2 design spec](../docs/superpowers/specs/2026-07-02-rudp-bench-v2-design.md)
-の「校正スイート」節。
+未知の solution treatment を測る。公開測定での位置付けは
+[ADR-0002](../docs/adr/0002-benchmark-methodology.md)、wire/metricsの真値は
+[benchspec](../benchspec/README.md)に従う。
 
 | # | 項目 | 実体 | 実行 |
 |---|---|---|---|
-| 1 | 会計零点(null) | `benchkit/tests/test_metrics_zero.c` | ctest(CI 常設) |
-| 2 | 既知故障注入(fault_inject) | `benchkit/tests/test_fault_inject.c` | ctest(CI 常設) |
-| 3 | netem 実効値検証(ping/iperf3) | `orchestrator/netops/gate.go`(netem 付き run で自動実施。`netem_gate_off` で無効化可) | pre-run gate、要 sudo |
-| 4 | 必達会計(TCP 系参加者) | magiconion の must-deliver が loss 下で delivery 1.000(loss 平面で実測) | canonical 内で兼務 |
-| 5 | duration 不変性 | [`duration_invariance.sh`](duration_invariance.sh) | CI 常設(loopback) |
+| 0 | rig preflight | `orchestrator doctor` | campaign前後、qdisc確認に権限が必要 |
+| 1 | 会計零点 | `benchkit/tests/test_metrics_zero.c` | ctest(CI常設) |
+| 2 | authoritative会計 | `benchkit/tests/test_authoritative_metrics.c` | ctest(CI常設) |
+| 3 | 既知故障注入 | `benchkit/tests/test_fault_inject.c` | ctest(CI常設) |
+| 4 | netem実効値 | `orchestrator/netops/gate.go` | netem付きrunのpre-run gate、要sudo |
+| 5 | duration不変性 | [`duration_invariance.sh`](duration_invariance.sh) | CI常設(loopback)、`CALIBRATION_DIR`指定時は生runを保存 |
+| 6 | scenario conformance | raw UDPの3 scenario smoke | CI常設(loopback) |
 
-CI は [`.github/workflows/v2.yml`](../.github/workflows/v2.yml)。
-sudo が要るのは 3 のみで、それ以外は常設。
+CI は [`.github/workflows/v2.yml`](../.github/workflows/v2.yml)。Doctorのqdisc検査と
+netem実効値以外はroot権限なしで常設する。校正FAILの結果はtransportの性能FAILへ
+読み替えず、campaign/blockを`INVALID`にする。

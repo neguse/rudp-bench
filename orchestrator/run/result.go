@@ -1,6 +1,8 @@
 package run
 
 import (
+	"encoding/json"
+
 	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/netops"
 	"github.com/neguse/rudp-bench/orchestrator/sampler"
@@ -11,18 +13,49 @@ const (
 	VerdictInvalid = "INVALID"
 )
 
+type Outcome string
+
+const (
+	OutcomePass         Outcome = "PASS"
+	OutcomeFail         Outcome = "FAIL"
+	OutcomeInvalid      Outcome = "INVALID"
+	OutcomeCensored     Outcome = "CENSORED"
+	OutcomeUnsupported  Outcome = "UNSUPPORTED"
+	OutcomeInconclusive Outcome = "INCONCLUSIVE"
+)
+
 type Result struct {
-	Version        int               `json:"version"`
-	Transport      string            `json:"transport"`
-	Verdict        string            `json:"verdict"`
-	InvalidReasons []string          `json:"invalid_reasons,omitempty"`
-	Config         RunConfig         `json:"config"`
-	Control        *control.Result   `json:"control,omitempty"`
-	Processes      []ProcessResult   `json:"processes"`
-	Metrics        *MergedMetrics    `json:"metrics,omitempty"`
-	Samples        []sampler.Series  `json:"samples,omitempty"`
-	Netem          *NetemResult      `json:"netem,omitempty"`
-	Artifacts      map[string]string `json:"artifacts,omitempty"`
+	Version            int                 `json:"version"`
+	Transport          string              `json:"transport"`
+	Outcome            Outcome             `json:"outcome"`
+	OutcomeReasons     []string            `json:"outcome_reasons,omitempty"`
+	Verdict            string              `json:"verdict"`
+	InvalidReasons     []string            `json:"invalid_reasons,omitempty"`
+	Config             RunConfig           `json:"config"`
+	Control            *control.Result     `json:"control,omitempty"`
+	Processes          []ProcessResult     `json:"processes"`
+	Metrics            *MergedMetrics      `json:"metrics,omitempty"`
+	ScenarioEvaluation *ScenarioEvaluation `json:"scenario_evaluation,omitempty"`
+	Treatment          *TreatmentRecord    `json:"treatment,omitempty"`
+	Samples            []sampler.Series    `json:"samples,omitempty"`
+	Netem              *NetemResult        `json:"netem,omitempty"`
+	Artifacts          map[string]string   `json:"artifacts,omitempty"`
+}
+
+type TreatmentRecord struct {
+	OrchestratorSHA256 string             `json:"orchestrator_sha256,omitempty"`
+	EnvironmentSHA256  string             `json:"environment_sha256"`
+	Environment        map[string]string  `json:"environment,omitempty"`
+	Host               HostEnvironment    `json:"host"`
+	Server             CommandDescription `json:"server"`
+	Client             CommandDescription `json:"client"`
+}
+
+type CommandDescription struct {
+	SHA256       string          `json:"sha256,omitempty"`
+	ResolvedPath string          `json:"resolved_path,omitempty"`
+	Description  json.RawMessage `json:"description,omitempty"`
+	Error        string          `json:"error,omitempty"`
 }
 
 type ProcessResult struct {
@@ -49,6 +82,9 @@ type NetemResult struct {
 	UDPBefore        netops.UDPStats  `json:"udp_before,omitempty"`
 	UDPAfter         netops.UDPStats  `json:"udp_after,omitempty"`
 	UDPDelta         netops.UDPStats  `json:"udp_delta,omitempty"`
+	ServerUDPBefore  netops.UDPStats  `json:"server_udp_before,omitempty"`
+	ServerUDPAfter   netops.UDPStats  `json:"server_udp_after,omitempty"`
+	ServerUDPDelta   netops.UDPStats  `json:"server_udp_delta,omitempty"`
 
 	Gate *netops.NetemGateReport `json:"gate,omitempty"`
 }

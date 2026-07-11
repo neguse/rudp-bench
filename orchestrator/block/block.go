@@ -4,9 +4,11 @@
 package block
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/neguse/rudp-bench/orchestrator/boundary"
 	"github.com/neguse/rudp-bench/orchestrator/rig"
+	orun "github.com/neguse/rudp-bench/orchestrator/run"
 	"github.com/neguse/rudp-bench/orchestrator/sweep"
 )
 
@@ -32,11 +35,12 @@ type BoundaryEntry struct {
 }
 
 type Config struct {
-	Rig        string          `json:"rig"` // rig 記述ファイル(metadata として保存)
-	Seed       int64           `json:"seed"`
-	Sweeps     []SweepEntry    `json:"sweeps"`
-	Boundaries []BoundaryEntry `json:"boundaries"`
-	OutputDir  string          `json:"output_dir"`
+	MeasurementMode string          `json:"measurement_mode,omitempty"`
+	Rig             string          `json:"rig"` // rig 記述ファイル(metadata として保存)
+	Seed            int64           `json:"seed"`
+	Sweeps          []SweepEntry    `json:"sweeps"`
+	Boundaries      []BoundaryEntry `json:"boundaries"`
+	OutputDir       string          `json:"output_dir"`
 	// Tar: 完了時に <output_dir>.tar.gz を作る(回収用)
 	Tar bool `json:"tar,omitempty"`
 }
@@ -47,14 +51,41 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
 		return cfg, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return cfg, fmt.Errorf("%s: expected exactly one JSON object", path)
 	}
 	if cfg.OutputDir == "" || cfg.Rig == "" {
 		return cfg, fmt.Errorf("output_dir and rig are required")
 	}
 	if len(cfg.Sweeps) == 0 {
 		return cfg, fmt.Errorf("at least one sweep is required")
+	}
+	seenNames := map[string]bool{}
+	for _, entry := range cfg.Sweeps {
+		if !orun.IsSafeName(entry.Name) || entry.Config == "" || seenNames[entry.Name] {
+			return cfg, fmt.Errorf("each sweep needs a unique path-safe name and config")
+		}
+		seenNames[entry.Name] = true
+	}
+	for _, entry := range cfg.Boundaries {
+		if !orun.IsSafeName(entry.Name) || entry.Config == "" || seenNames[entry.Name] {
+			return cfg, fmt.Errorf("each boundary needs a unique path-safe name and config")
+		}
+		seenNames[entry.Name] = true
+	}
+	if cfg.MeasurementMode == "" {
+		cfg.MeasurementMode = "screening"
+	}
+	if cfg.MeasurementMode == "reference" {
+		return cfg, fmt.Errorf("reference block execution is disabled until doctor plus pre/post baseline drift gates are integrated")
+	}
+	if cfg.MeasurementMode != "screening" && cfg.MeasurementMode != "pilot" {
+		return cfg, fmt.Errorf("measurement_mode must be screening or pilot")
 	}
 	return cfg, nil
 }
@@ -158,12 +189,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.Tar {
 		tarPath := strings.TrimSuffix(cfg.OutputDir, "/") + ".tar.gz"
 		cmd := exec.CommandContext(ctx, "tar", "czf", tarPath,
-			"--exclude=runs", "-C", filepath.Dir(cfg.OutputDir), filepath.Base(cfg.OutputDir))
+			"-C", filepath.Dir(cfg.OutputDir), filepath.Base(cfg.OutputDir))
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("tar: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "[block] packaged: %s(runs/ は除外 — 集約に必要な jsonl/json のみ)\n", tarPath)
+		fmt.Fprintf(os.Stderr, "[block] packaged immutable run evidence: %s\n", tarPath)
 	}
 	return nil
 }

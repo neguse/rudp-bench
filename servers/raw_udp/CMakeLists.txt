@@ -29,5 +29,5 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/smoke_test.py"
             "$<TARGET_FILE:raw_udp_server>" "$<TARGET_FILE:raw_udp_client>"
   )
-  set_tests_properties(raw_udp_loopback_smoke PROPERTIES TIMEOUT 45)
+  set_tests_properties(raw_udp_loopback_smoke PROPERTIES TIMEOUT 90)
 endif()

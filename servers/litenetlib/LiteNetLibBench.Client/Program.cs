@@ -4,6 +4,7 @@ using System.Text;
 using BenchKit.CS;
 using LiteNetLib;
 using LiteNetLibBench;
+using LiteNetLib.Utils;
 
 var config = ClientConfig.Parse(args);
 
@@ -44,11 +45,15 @@ using var sigInt = PosixSignalRegistration.Create(PosixSignal.SIGINT, ctx =>
     stopCts.Cancel();
 });
 
-var maxOriginId = checked(config.OriginBase + (uint)config.Conns);
+var maxOriginId = config.Scenario is { } configuredScenario
+    ? checked((uint)configuredScenario.TotalConns + 1U)
+    : checked(config.OriginBase + (uint)config.Conns);
 var metrics = new BenchMetrics(new BenchMetricsConfig(
     maxOriginId == 0 ? 1 : maxOriginId,
     config.DeadlineNs,
-    config.StalenessPeriodNs));
+    config.StalenessPeriodNs,
+    config.Scenario is null ? 0U : (uint)config.Conns));
+config.Scenario?.ConfigureMetrics(metrics);
 
 // One NetManager per conn, each StartInManualMode (no internal threads).
 //
@@ -73,6 +78,12 @@ var peers = new NetPeer[config.Conns];
 var connected = new bool[config.Conns];
 var plans = new BenchPlan?[config.Conns];
 var originIds = new uint[config.Conns];
+var lastInputSeq = new ulong[config.Conns];
+var lastAppliedInputSeq = new ulong[config.Conns];
+var payloadValidation = new BenchPayloadValidation();
+var progress = config.Scenario?.Kind == BenchScenarioKind.AuthoritativeState
+    ? new BenchAuthoritativeProgressTracker(config.Conns, config.Scenario.TotalConns)
+    : null;
 
 BenchControl? control = null;
 try
@@ -96,10 +107,39 @@ try
             var span = new ReadOnlySpan<byte>(reader.RawData, reader.UserDataOffset, reader.UserDataSize);
             if (BenchPayload.TryRead(span, out var header))
             {
+                if (config.Scenario?.Kind == BenchScenarioKind.AuthoritativeState)
+                {
+                    var state = config.Scenario.ServerState!.Value;
+                    if (header.OriginId != (uint)config.Scenario.TotalConns ||
+                        header.TrafficId != state.TrafficId ||
+                        (header.Flags & BenchConstants.FlagBroadcast) != 0 ||
+                        BenchConstants.DirectionFromFlags(header.Flags) != BenchDirection.ServerToClient ||
+                        !state.Accepts(header.Flags, span.Length) ||
+                        !BenchPayload.TryReadAppliedInputSeq(span, out var appliedInputSeq) ||
+                        appliedInputSeq > lastInputSeq[localIndex] ||
+                        !BenchPayload.ValidateTargetPad(span, originIds[localIndex]))
+                    {
+                        payloadValidation.Invalid();
+                        reader.Recycle();
+                        return;
+                    }
+                    BenchProgress.UpdateMax(ref lastAppliedInputSeq[localIndex], appliedInputSeq);
+                    progress?.RecordStateReceived((int)localIndex, header, appliedInputSeq);
+                }
+                else if (!BenchPayload.ValidateBody(span, header))
+                {
+                    payloadValidation.Invalid();
+                    reader.Recycle();
+                    return;
+                }
                 // benchspec dedup key includes the receiving local conn
                 // (broadcast fanout legitimately re-delivers the same
                 // (origin, class, seq) to every local conn).
                 metrics.OnRecv(localIndex, header, recvTsNs);
+            }
+            else
+            {
+                payloadValidation.Invalid();
             }
 
             reader.Recycle();
@@ -127,7 +167,18 @@ try
         // 手段。計測器(farm)の十分性の話であり SUT 側は不変。
         SetReceiveBuffer(manager, 4 * 1024 * 1024);
 
-        var peer = manager.Connect(config.Host, config.Port, LnlConstants.ConnectKey);
+        NetPeer? peer;
+        if (config.Scenario is null)
+        {
+            peer = manager.Connect(config.Host, config.Port, LnlConstants.ConnectKey);
+        }
+        else
+        {
+            var connectData = new NetDataWriter();
+            connectData.Put(LnlConstants.ConnectKey);
+            connectData.Put(originIds[i]);
+            peer = manager.Connect(config.Host, config.Port, connectData);
+        }
         if (peer is null)
         {
             throw new InvalidOperationException($"NetManager.Connect returned null for conn {i}");
@@ -180,6 +231,14 @@ try
     }
 
     var streams = BuildStreams(config);
+    if (config.Scenario is { } activeScenario)
+    {
+        activeScenario.RegisterExpectedLatestFlows(
+            metrics,
+            (uint)config.Conns,
+            config.OriginBase,
+            schedule.StartAtNs);
+    }
     var planStartNs = BenchClock.NowNs();
     for (var i = 0; i < config.Conns; i++)
     {
@@ -203,6 +262,14 @@ try
                 .ConfigureAwait(false);
             if (window is { } w)
             {
+                if (config.Scenario is { } windowScenario)
+                {
+                    windowScenario.RegisterExpectedLatestFlows(
+                        metrics,
+                        (uint)config.Conns,
+                        config.OriginBase,
+                        w.StartAtNs);
+                }
                 schedule = w;
                 foreach (var plan in plans)
                 {
@@ -222,7 +289,16 @@ try
             {
                 while (plans[i]!.TryNext(now, out var slot))
                 {
-                    SendSlot(peers[i], originIds[i], slot, config, metrics);
+                    SendSlot(
+                        peers[i],
+                        originIds[i],
+                        i,
+                        slot,
+                        config,
+                        metrics,
+                        ref lastInputSeq[i],
+                        progress,
+                        payloadValidation);
                 }
             }
         }
@@ -280,9 +356,21 @@ try
     await File.WriteAllTextAsync(metricsPath, metricsJson + "\n", new UTF8Encoding(false), CancellationToken.None)
         .ConfigureAwait(false);
 
+    var doneJson = metricsJson;
+    if (progress is not null)
+    {
+        var snapshot = progress.ClientSnapshot();
+        BenchProgress.WriteDiagnostics(snapshot, payloadValidation.Count);
+        doneJson = BenchProgress.AttachToDoneStats(metricsJson, snapshot, payloadValidation.Count);
+    }
+    else if (config.Scenario is not null)
+    {
+        doneJson = BenchProgress.AttachValidationToDoneStats(metricsJson, payloadValidation.Count);
+    }
+
     if (control is not null)
     {
-        await control.DoneAsync(metricsJson, CancellationToken.None).ConfigureAwait(false);
+        await control.DoneAsync(doneJson, CancellationToken.None).ConfigureAwait(false);
     }
 
     return 0;
@@ -330,6 +418,19 @@ static void SetReceiveBuffer(NetManager manager, int bytes)
 
 static IReadOnlyList<BenchStream> BuildStreams(ClientConfig config)
 {
+    if (config.Scenario is { Kind: BenchScenarioKind.AuthoritativeState, ClientInput: { } input })
+    {
+        return input.Streams(BenchDirection.ClientToServer);
+    }
+    if (config.Scenario is { Kind: BenchScenarioKind.EnvironmentBaseline, ClientInput: { } baseline })
+    {
+        return baseline.Streams(BenchDirection.RoomRelay);
+    }
+    if (config.Scenario?.RoomPublish is { } publish)
+    {
+        return publish.Streams(BenchDirection.RoomRelay, true);
+    }
+
     var streams = new List<BenchStream>(2);
     if (config.RateLt > 0)
     {
@@ -361,10 +462,19 @@ static ulong IntervalFromRate(double rateHz)
 // matches --describe's "coalescing":"none". A slot that cannot be sent right
 // now (peer not connected, or the header fails to encode) is recorded as
 // unsent rather than retried, per benchspec.
-static void SendSlot(NetPeer peer, uint originId, BenchSlot slot, ClientConfig config, BenchMetrics metrics)
+static void SendSlot(
+    NetPeer peer,
+    uint originId,
+    int localIndex,
+    BenchSlot slot,
+    ClientConfig config,
+    BenchMetrics metrics,
+    ref ulong lastInputSeq,
+    BenchAuthoritativeProgressTracker? progress,
+    BenchPayloadValidation payloadValidation)
 {
     var sendTsNs = BenchClock.NowNs();
-    var header = new BenchHeader(slot.Seq, slot.SchedTsNs, sendTsNs, slot.Flags, originId);
+    var header = new BenchHeader(slot.Seq, slot.SchedTsNs, sendTsNs, slot.Flags, originId, slot.TrafficId);
     var mustDeliver = (slot.Flags & BenchConstants.FlagMustDeliver) != 0;
     var payloadSize = mustDeliver ? config.PayloadMd : config.PayloadLt;
     var submitted = false;
@@ -372,6 +482,11 @@ static void SendSlot(NetPeer peer, uint originId, BenchSlot slot, ClientConfig c
     if (peer.ConnectionState == ConnectionState.Connected)
     {
         var method = mustDeliver ? DeliveryMethod.ReliableOrdered : DeliveryMethod.Unreliable;
+        if (!mustDeliver &&
+            BenchConstants.DirectionFromFlags(header.Flags) == BenchDirection.ClientToServer)
+        {
+            BenchProgress.UpdateMax(ref lastInputSeq, header.Seq);
+        }
         try
         {
             // CreatePacketFromPool + 直書き = per-send の managed alloc 0・
@@ -382,14 +497,22 @@ static void SendSlot(NetPeer peer, uint originId, BenchSlot slot, ClientConfig c
             var pooled = peer.CreatePacketFromPool(method);
             if (payloadSize <= pooled.MaxUserDataSize)
             {
-                BenchPayload.TryWrite(
-                    pooled.Data.AsSpan(pooled.UserDataOffset, payloadSize), header);
+                var span = pooled.Data.AsSpan(pooled.UserDataOffset, payloadSize);
+                if (!BenchPayload.TryWrite(span, header) || !BenchPayload.TryFillBody(span, header))
+                {
+                    payloadValidation.Invalid();
+                    throw new InvalidOperationException("failed to encode benchmark payload");
+                }
                 peer.SendPooledPacket(pooled, payloadSize);
             }
             else
             {
                 var payload = new byte[payloadSize];
-                BenchPayload.TryWrite(payload, header);
+                if (!BenchPayload.TryWrite(payload, header) || !BenchPayload.TryFillBody(payload, header))
+                {
+                    payloadValidation.Invalid();
+                    throw new InvalidOperationException("failed to encode benchmark payload");
+                }
                 peer.Send(payload, method);
             }
             submitted = peer.ConnectionState == ConnectionState.Connected;
@@ -401,6 +524,7 @@ static void SendSlot(NetPeer peer, uint originId, BenchSlot slot, ClientConfig c
     }
 
     metrics.OnSlot(header, submitted);
+    progress?.RecordInputLastSent(localIndex, header, submitted);
 }
 
 static void MarkUnsent(BenchPlan?[] plans, uint[] originIds, ulong stopAtNs, BenchMetrics metrics)
@@ -410,7 +534,7 @@ static void MarkUnsent(BenchPlan?[] plans, uint[] originIds, ulong stopAtNs, Ben
     {
         while (plans[i]!.TryNext(cutoff, out var slot))
         {
-            var header = new BenchHeader(slot.Seq, slot.SchedTsNs, 0, slot.Flags, originIds[i]);
+            var header = new BenchHeader(slot.Seq, slot.SchedTsNs, 0, slot.Flags, originIds[i], slot.TrafficId);
             metrics.OnSlot(header, false);
         }
     }
@@ -458,7 +582,8 @@ internal readonly record struct ClientConfig(
     int PayloadLt,
     int PayloadMd,
     ulong DeadlineNs,
-    ulong StalenessPeriodNs)
+    ulong StalenessPeriodNs,
+    BenchScenarioConfig? Scenario = null)
 {
     public const ulong DevWarmupNs = 200_000_000UL;
     public const ulong DevDurationNs = 2_000_000_000UL;
@@ -473,6 +598,11 @@ internal readonly record struct ClientConfig(
 
     public static ClientConfig Parse(string[] args)
     {
+        if (!BenchScenarioConfig.TryParseArguments(args, out var scenario, out var remaining))
+        {
+            return Invalid();
+        }
+        args = remaining;
         var cfg = new MutableConfig();
         for (var i = 0; i < args.Length; i++)
         {
@@ -574,7 +704,33 @@ internal readonly record struct ClientConfig(
             return Invalid();
         }
 
-        if (!cfg.Complete || (cfg.RateLt == 0 && cfg.RateMd == 0))
+        if (scenario is { } activeScenario)
+        {
+            if (!cfg.BaseComplete)
+            {
+                return Invalid();
+            }
+            var activeTraffic = activeScenario.ClientInput ?? activeScenario.RoomPublish;
+            if (activeTraffic is not { } source)
+            {
+                return Invalid();
+            }
+            cfg.RateLt = source.RateLt;
+            cfg.RateMd = source.RateMd;
+            cfg.PayloadLt = source.PayloadLt;
+            cfg.PayloadMd = source.PayloadMd;
+            cfg.BroadcastLt = activeScenario.Kind == BenchScenarioKind.RoomRelay;
+            cfg.BroadcastMd = activeScenario.Kind == BenchScenarioKind.RoomRelay;
+            if (!cfg.HaveDeadline)
+            {
+                cfg.DeadlineNs = source.DeadlineNs;
+            }
+            if (!cfg.HaveStaleness)
+            {
+                cfg.StalenessPeriodNs = BenchConstants.DefaultStalenessPeriodNs;
+            }
+        }
+        else if (!cfg.Complete || (cfg.RateLt == 0 && cfg.RateMd == 0))
         {
             return Invalid();
         }
@@ -591,7 +747,9 @@ internal readonly record struct ClientConfig(
         {
             return Invalid();
         }
-        if ((ulong)cfg.OriginBase + (ulong)cfg.Conns > uint.MaxValue)
+        var endOrigin = (ulong)cfg.OriginBase + (ulong)cfg.Conns;
+        if (endOrigin > uint.MaxValue ||
+            (scenario is not null && endOrigin > (ulong)scenario.TotalConns))
         {
             return Invalid();
         }
@@ -611,7 +769,8 @@ internal readonly record struct ClientConfig(
             cfg.PayloadLt,
             cfg.PayloadMd,
             cfg.DeadlineNs,
-            cfg.StalenessPeriodNs);
+            cfg.StalenessPeriodNs,
+            scenario);
     }
 
     private static ClientConfig Invalid() => new(false, false, "", 0, 0, 0, 0, 0, 0, false, false, 0, 0, 0, 0);
@@ -643,7 +802,9 @@ internal readonly record struct ClientConfig(
         public bool HaveStaleness;
 
         public bool Complete =>
-            HaveHost && HavePort && HaveConns && HaveProcIndex && HaveOriginBase &&
+            BaseComplete &&
             HaveRateLt && HaveRateMd && HavePayload && HaveDeadline && HaveStaleness;
+
+        public bool BaseComplete => HaveHost && HavePort && HaveConns && HaveProcIndex && HaveOriginBase;
     }
 }

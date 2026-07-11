@@ -10,6 +10,7 @@ public static class BenchDescribe
         "\"thread_model\":\"internal_worker\"," +
         "\"encryption\":false," +
         "\"max_payload_bytes\":65536," +
+        "\"scenarios\":[\"environment_baseline\",\"authoritative_state\",\"room_relay\"]," +
         "\"tuning\":[" +
         "{\"knob\":\"Kestrel.ListenAnyIP.protocols\",\"value\":\"HttpProtocols.Http2 (h2c)\",\"upstream_ref\":\"https://learn.microsoft.com/aspnet/core/grpc/aspnetcore#kestrel\"}," +
         "{\"knob\":\"GrpcChannelOptions.HttpHandler\",\"value\":\"one SocketsHttpHandler per benchmark connection; EnableMultipleHttp2Connections=true\",\"upstream_ref\":\"https://learn.microsoft.com/aspnet/core/grpc/performance#connection-concurrency\"}," +

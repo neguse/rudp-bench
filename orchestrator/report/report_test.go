@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/neguse/rudp-bench/orchestrator/run"
+	"github.com/neguse/rudp-bench/orchestrator/sweep"
 )
 
 func writeSweepDir(t *testing.T) string {
@@ -20,7 +23,10 @@ func writeSweepDir(t *testing.T) string {
  ]
 }`
 	results := `{"transport":"enet","workload":"r20p128","regime":"wired","conns":48,"verdict":"VALID","judgment":{"ok":true,"staleness_p99_ns":80000000},"run_dir":"x"}
+{"transport":"enet","workload":"r20p128","regime":"wired","conns":64,"verdict":"VALID","judgment":{"ok":false,"cause":"staleness"},"run_dir":"x"}
 {"transport":"enet","workload":"echo","regime":"wired","conns":1024,"verdict":"VALID","judgment":{"ok":true,"staleness_p99_ns":40000000},"run_dir":"x"}
+{"transport":"gns","workload":"r20p128","regime":"wired","conns":32,"verdict":"INVALID","judgment":{"ok":false,"censored":true},"run_dir":"x"}
+{"transport":"websocket","workload":"r20p128","regime":"wired","conns":1,"verdict":"VALID","judgment":{"ok":false,"cause":"delivery_md"},"run_dir":"x"}
 `
 	if err := os.WriteFile(filepath.Join(dir, "capacity.json"), []byte(capacity), 0o644); err != nil {
 		t.Fatal(err)
@@ -51,6 +57,74 @@ func TestCapacityTable(t *testing.T) {
 	anchorsOnly := sd.CapacityTable(true)
 	if strings.Contains(anchorsOnly, "echo") || !strings.Contains(anchorsOnly, "r20p128") {
 		t.Fatalf("anchors-only table wrong:\n%s", anchorsOnly)
+	}
+}
+
+func TestCapacityTableIncludesScenarioRows(t *testing.T) {
+	dir := t.TempDir()
+	capacity := `{"seed":1,"cells":[{"transport":"enet","scenario":"authoritative-smoke","regime":"local","capacity":32,"evaluated_points":4}]}`
+	results := `{"transport":"enet","scenario":"authoritative-smoke","regime":"local","conns":32,"verdict":"VALID","judgment":{"ok":true},"run_dir":"x"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "capacity.json"), []byte(capacity), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "results.jsonl"), []byte(results), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := LoadSweep(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table := sd.CapacityTable(false)
+	if !strings.Contains(table, "| scenario / workload |") || !strings.Contains(table, "| authoritative-smoke | 32 |") {
+		t.Fatalf("scenario table wrong:\n%s", table)
+	}
+}
+
+func TestFormatCellShowsTerminalOutcome(t *testing.T) {
+	for _, outcome := range []run.Outcome{run.OutcomeUnsupported, run.OutcomeInconclusive} {
+		got := formatCell(sweep.CellRecord{CellCapacity: sweep.CellCapacity{Outcome: outcome}}, true)
+		if got != string(outcome) {
+			t.Fatalf("formatCell(%s) = %q", outcome, got)
+		}
+	}
+}
+
+func TestLoadSweepFiltersPointsByCampaign(t *testing.T) {
+	dir := t.TempDir()
+	capacity := `{"seed":1,"cells":[{"transport":"enet","scenario":"authoritative-smoke","campaign_identity":"new","regime":"local","capacity":32,"evaluated_points":4}]}`
+	results := `{"transport":"enet","scenario":"authoritative-smoke","campaign_identity":"new","regime":"local","conns":32,"verdict":"VALID","judgment":{"ok":true},"run_dir":"new"}
+{"transport":"enet","scenario":"authoritative-smoke","campaign_identity":"old","regime":"local","conns":32,"verdict":"VALID","judgment":{"ok":false},"run_dir":"old"}
+`
+	if err := os.WriteFile(filepath.Join(dir, "capacity.json"), []byte(capacity), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "results.jsonl"), []byte(results), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := LoadSweep(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	point := sd.Points["enet|authoritative-smoke|c32"]
+	if point.RunDir != "new" {
+		t.Fatalf("point run_dir = %q, want current campaign", point.RunDir)
+	}
+}
+
+func TestLoadSweepRejectsMixedCampaignCapacity(t *testing.T) {
+	dir := t.TempDir()
+	capacity := `{"seed":1,"cells":[
+{"transport":"enet","scenario":"a","campaign_identity":"one","regime":"local","capacity":1},
+{"transport":"enet","scenario":"b","campaign_identity":"two","regime":"local","capacity":1}
+]}`
+	if err := os.WriteFile(filepath.Join(dir, "capacity.json"), []byte(capacity), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "results.jsonl"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSweep(dir); err == nil {
+		t.Fatal("mixed campaign capacity unexpectedly accepted")
 	}
 }
 

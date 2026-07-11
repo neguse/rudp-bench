@@ -18,12 +18,16 @@ import (
 	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/netops"
 	"github.com/neguse/rudp-bench/orchestrator/report"
-	"github.com/neguse/rudp-bench/orchestrator/sentinel"
 	orun "github.com/neguse/rudp-bench/orchestrator/run"
+	"github.com/neguse/rudp-bench/orchestrator/sentinel"
 	"github.com/neguse/rudp-bench/orchestrator/sweep"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		doctorMain(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "run" {
 		runMain(os.Args[2:])
 		return
@@ -210,6 +214,7 @@ func main() {
 func runMain(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	configPath := fs.String("config", "", "run config JSON path")
+	outputDir := fs.String("output-dir", "", "override config output_dir with a fresh run bundle path")
 	exitOnErr(fs.Parse(args))
 	if *configPath == "" {
 		fmt.Fprintln(os.Stderr, "run -config is required")
@@ -218,6 +223,9 @@ func runMain(args []string) {
 
 	cfg, err := orun.LoadConfig(*configPath)
 	exitOnErr(err)
+	if *outputDir != "" {
+		cfg.OutputDir = *outputDir
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -231,7 +239,18 @@ func runMain(args []string) {
 		if path := result.Artifacts["summary"]; path != "" {
 			fmt.Fprintf(os.Stderr, "summary: %s\n", path)
 		}
-		if result.Verdict != orun.VerdictValid {
+		switch result.Outcome {
+		case orun.OutcomePass:
+			return
+		case orun.OutcomeFail:
+			os.Exit(3)
+		case orun.OutcomeInvalid:
+			os.Exit(2)
+		case orun.OutcomeUnsupported:
+			os.Exit(4)
+		case orun.OutcomeInconclusive, orun.OutcomeCensored:
+			os.Exit(5)
+		default:
 			os.Exit(2)
 		}
 	}
@@ -285,6 +304,7 @@ func boundaryMain(args []string) {
 func sweepMain(args []string) {
 	fs := flag.NewFlagSet("sweep", flag.ExitOnError)
 	configPath := fs.String("config", "", "sweep config JSON path")
+	outputDir := fs.String("output-dir", "", "override config output_dir")
 	exitOnErr(fs.Parse(args))
 	if *configPath == "" {
 		fmt.Fprintln(os.Stderr, "sweep -config is required")
@@ -293,6 +313,9 @@ func sweepMain(args []string) {
 
 	cfg, err := sweep.LoadConfig(*configPath)
 	exitOnErr(err)
+	if *outputDir != "" {
+		cfg.OutputDir = *outputDir
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

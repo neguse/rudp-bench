@@ -4,7 +4,7 @@ namespace BenchKit.CS;
 
 public interface IBenchHub : IStreamingHub<IBenchHub, IBenchHubReceiver>
 {
-    ValueTask JoinAsync();
+    ValueTask JoinAsync(uint originId);
     ValueTask SendPayloadAsync(byte[] payload);
 }
 

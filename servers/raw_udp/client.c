@@ -28,6 +28,31 @@
 #define DEV_DRAIN_NS 500000000ull
 #define SERVICE_MAX_SLEEP_NS 10000000ull
 
+typedef enum {
+  SCENARIO_LEGACY = 0,
+  SCENARIO_ENVIRONMENT_BASELINE,
+  SCENARIO_AUTHORITATIVE_STATE,
+  SCENARIO_ROOM_RELAY,
+} scenario_kind;
+
+typedef struct {
+  uint8_t traffic_id;
+  double rate_lt;
+  double rate_md;
+  size_t payload_lt;
+  size_t payload_md;
+  uint64_t deadline_ns;
+  unsigned present;
+} traffic_config;
+
+#define TRAFFIC_HAVE_ID (1u << 0)
+#define TRAFFIC_HAVE_RATE_LT (1u << 1)
+#define TRAFFIC_HAVE_RATE_MD (1u << 2)
+#define TRAFFIC_HAVE_PAYLOAD_LT (1u << 3)
+#define TRAFFIC_HAVE_PAYLOAD_MD (1u << 4)
+#define TRAFFIC_HAVE_DEADLINE (1u << 5)
+#define TRAFFIC_HAVE_ALL ((1u << 6) - 1u)
+
 typedef struct {
   const char *host;
   uint16_t port;
@@ -42,6 +67,13 @@ typedef struct {
   size_t payload_md;
   uint64_t deadline_ns;
   uint64_t staleness_period_ns;
+  scenario_kind scenario;
+  uint32_t total_conns;
+  uint8_t traffic_id;
+  bk_direction direction;
+  traffic_config input;
+  traffic_config state;
+  traffic_config publish;
 } client_config;
 
 typedef struct {
@@ -49,7 +81,16 @@ typedef struct {
   bk_plan *plan;
   uint32_t origin_id;
   uint32_t local_index;   // 自 proc 内 0 起点(重複判定の受信側キー)
+  uint64_t last_input_seq;
+  uint64_t input_last_sent_measured;
+  uint64_t last_applied_input_seq;
+  uint64_t state_header_seq_recv_measured;
+  uint64_t state_applied_input_seq_recv_measured;
 } client_conn;
+
+typedef struct {
+  uint64_t invalid_payload;
+} client_stats;
 
 static void print_describe(void) {
   puts("{\"transport\":\"raw_udp\","
@@ -60,6 +101,8 @@ static void print_describe(void) {
        "\"thread_model\":\"single\","
        "\"encryption\":false,"
        "\"max_payload_bytes\":65507,"
+       "\"scenarios\":[\"environment_baseline\","
+       "\"authoritative_state\",\"room_relay\"],"
        "\"tuning\":[]}");
 }
 
@@ -141,8 +184,95 @@ static int parse_rate(const char *s, double *out) {
   return 0;
 }
 
+static int parse_scenario(const char *s, scenario_kind *out) {
+  if (strcmp(s, "environment_baseline") == 0) {
+    *out = SCENARIO_ENVIRONMENT_BASELINE;
+  } else if (strcmp(s, "authoritative_state") == 0) {
+    *out = SCENARIO_AUTHORITATIVE_STATE;
+  } else if (strcmp(s, "room_relay") == 0) {
+    *out = SCENARIO_ROOM_RELAY;
+  } else {
+    return -1;
+  }
+  return 0;
+}
+
+static int parse_traffic_arg(const char *arg, const char *prefix,
+                             const char *value, traffic_config *traffic) {
+  char name[64];
+#define MATCH_TRAFFIC_ARG(suffix)                                        \
+  (snprintf(name, sizeof(name), "--%s-%s", prefix, suffix) > 0 &&       \
+   strcmp(arg, name) == 0)
+  if (MATCH_TRAFFIC_ARG("traffic-id")) {
+    uint32_t v = 0;
+    if (parse_u32(value, &v) != 0 || v == 0 || v > UINT8_MAX) {
+      return -1;
+    }
+    traffic->traffic_id = (uint8_t)v;
+    traffic->present |= TRAFFIC_HAVE_ID;
+    return 1;
+  }
+  if (MATCH_TRAFFIC_ARG("rate-lt")) {
+    if (parse_rate(value, &traffic->rate_lt) != 0) {
+      return -1;
+    }
+    traffic->present |= TRAFFIC_HAVE_RATE_LT;
+    return 1;
+  }
+  if (MATCH_TRAFFIC_ARG("rate-md")) {
+    if (parse_rate(value, &traffic->rate_md) != 0) {
+      return -1;
+    }
+    traffic->present |= TRAFFIC_HAVE_RATE_MD;
+    return 1;
+  }
+  if (MATCH_TRAFFIC_ARG("payload-lt")) {
+    if (parse_size(value, &traffic->payload_lt) != 0) {
+      return -1;
+    }
+    traffic->present |= TRAFFIC_HAVE_PAYLOAD_LT;
+    return 1;
+  }
+  if (MATCH_TRAFFIC_ARG("payload-md")) {
+    if (parse_size(value, &traffic->payload_md) != 0) {
+      return -1;
+    }
+    traffic->present |= TRAFFIC_HAVE_PAYLOAD_MD;
+    return 1;
+  }
+  if (MATCH_TRAFFIC_ARG("deadline-ns")) {
+    if (parse_u64(value, &traffic->deadline_ns) != 0) {
+      return -1;
+    }
+    traffic->present |= TRAFFIC_HAVE_DEADLINE;
+    return 1;
+  }
+#undef MATCH_TRAFFIC_ARG
+  return 0;
+}
+
+static int validate_traffic(const traffic_config *traffic,
+                            size_t min_payload) {
+  if (traffic->present != TRAFFIC_HAVE_ALL ||
+      (traffic->rate_lt == 0.0 && traffic->rate_md == 0.0)) {
+    return -1;
+  }
+  if (traffic->rate_lt > 0.0 &&
+      (traffic->payload_lt < min_payload ||
+       traffic->payload_lt > RAWUDP_MAX_PAYLOAD_BYTES)) {
+    return -1;
+  }
+  if (traffic->rate_md > 0.0 &&
+      (traffic->payload_md < min_payload ||
+       traffic->payload_md > RAWUDP_MAX_PAYLOAD_BYTES)) {
+    return -1;
+  }
+  return 0;
+}
+
 static int parse_args(int argc, char **argv, client_config *cfg) {
   memset(cfg, 0, sizeof(*cfg));
+  cfg->staleness_period_ns = 10000000ull;
   bool have_host = false;
   bool have_port = false;
   bool have_conns = false;
@@ -153,11 +283,22 @@ static int parse_args(int argc, char **argv, client_config *cfg) {
   bool have_payload = false;
   bool have_deadline = false;
   bool have_staleness = false;
+  bool have_scenario = false;
+  bool have_total_conns = false;
 
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--describe") == 0) {
       print_describe();
       exit(EXIT_SUCCESS);
+    }
+    if (strcmp(argv[i], "--scenario") == 0 && i + 1 < argc) {
+      have_scenario = parse_scenario(argv[++i], &cfg->scenario) == 0;
+      continue;
+    }
+    if (strcmp(argv[i], "--total-conns") == 0 && i + 1 < argc) {
+      have_total_conns = parse_u32(argv[++i], &cfg->total_conns) == 0 &&
+                         cfg->total_conns > 0;
+      continue;
     }
     if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
       cfg->host = argv[++i];
@@ -224,12 +365,77 @@ static int parse_args(int argc, char **argv, client_config *cfg) {
           cfg->staleness_period_ns > 0;
       continue;
     }
+    if (i + 1 < argc) {
+      int parsed = parse_traffic_arg(argv[i], "input", argv[i + 1],
+                                     &cfg->input);
+      if (parsed == 0) {
+        parsed = parse_traffic_arg(argv[i], "state", argv[i + 1],
+                                   &cfg->state);
+      }
+      if (parsed == 0) {
+        parsed = parse_traffic_arg(argv[i], "publish", argv[i + 1],
+                                   &cfg->publish);
+      }
+      if (parsed != 0) {
+        if (parsed < 0) {
+          return -1;
+        }
+        ++i;
+        continue;
+      }
+    }
     return -1;
   }
 
   if (!have_host || !have_port || !have_conns || !have_proc_index ||
-      !have_origin_base || !have_rate_lt || !have_rate_md || !have_payload ||
-      !have_deadline || !have_staleness) {
+      !have_origin_base) {
+    return -1;
+  }
+  if (have_scenario) {
+    const traffic_config *outbound = NULL;
+    if (!have_total_conns || cfg->total_conns > RAWUDP_MAX_CONNS ||
+        (uint64_t)cfg->origin_base + (uint64_t)cfg->conns >
+            cfg->total_conns) {
+      return -1;
+    }
+    switch (cfg->scenario) {
+      case SCENARIO_ENVIRONMENT_BASELINE:
+        outbound = &cfg->input;
+        cfg->direction = BK_DIRECTION_ROOM_RELAY;
+        break;
+      case SCENARIO_AUTHORITATIVE_STATE:
+        outbound = &cfg->input;
+        cfg->direction = BK_DIRECTION_CLIENT_TO_SERVER;
+        if (validate_traffic(&cfg->state,
+                             BK_AUTHORITATIVE_STATE_MIN_PAYLOAD) != 0 ||
+            cfg->input.traffic_id == cfg->state.traffic_id) {
+          return -1;
+        }
+        break;
+      case SCENARIO_ROOM_RELAY:
+        outbound = &cfg->publish;
+        cfg->direction = BK_DIRECTION_ROOM_RELAY;
+        cfg->broadcast_lt = true;
+        cfg->broadcast_md = true;
+        break;
+      case SCENARIO_LEGACY:
+        return -1;
+    }
+    if (validate_traffic(outbound, BK_MIN_PAYLOAD) != 0) {
+      return -1;
+    }
+    cfg->traffic_id = outbound->traffic_id;
+    cfg->rate_lt = outbound->rate_lt;
+    cfg->rate_md = outbound->rate_md;
+    cfg->payload_lt = outbound->payload_lt;
+    cfg->payload_md = outbound->payload_md;
+    cfg->deadline_ns = outbound->deadline_ns;
+    return 0;
+  }
+  cfg->scenario = SCENARIO_LEGACY;
+  cfg->direction = BK_DIRECTION_ROOM_RELAY;
+  if (!have_rate_lt || !have_rate_md || !have_payload || !have_deadline ||
+      !have_staleness) {
     return -1;
   }
   if (cfg->rate_lt == 0.0 && cfg->rate_md == 0.0) {
@@ -281,6 +487,8 @@ static int build_streams(const client_config *cfg, bk_stream *streams,
     streams[n++] = (bk_stream){
         .must_deliver = false,
         .broadcast = cfg->broadcast_lt,
+        .traffic_id = cfg->traffic_id,
+        .direction = cfg->direction,
         .interval_ns = interval_ns,
     };
   }
@@ -291,6 +499,8 @@ static int build_streams(const client_config *cfg, bk_stream *streams,
     streams[n++] = (bk_stream){
         .must_deliver = true,
         .broadcast = cfg->broadcast_md,
+        .traffic_id = cfg->traffic_id,
+        .direction = cfg->direction,
         .interval_ns = interval_ns,
     };
   }
@@ -346,6 +556,7 @@ static void make_header_from_slot(const bk_slot *slot, uint32_t origin_id,
   header->send_ts_ns = send_ts_ns;
   header->flags = slot->flags;
   header->origin_id = origin_id;
+  header->traffic_id = slot->traffic_id;
 }
 
 static int send_slot(client_conn *conn, const bk_slot *slot,
@@ -358,8 +569,25 @@ static int send_slot(client_conn *conn, const bk_slot *slot,
     bk_metrics_on_slot(metrics, &header, false);
     return -1;
   }
+  if (bk_payload_fill_body(payload_buf, payload_size, &header) != 0) {
+    bk_metrics_on_slot(metrics, &header, false);
+    return -1;
+  }
   const bool submitted = conn_send(conn->fd, payload_buf, payload_size) == 0;
   bk_metrics_on_slot(metrics, &header, submitted);
+  if (submitted && BK_FLAGS_DIRECTION(header.flags) ==
+                       BK_DIRECTION_CLIENT_TO_SERVER &&
+      (header.flags & BK_FLAG_MUST_DELIVER) == 0 &&
+      header.seq > conn->last_input_seq) {
+    conn->last_input_seq = header.seq;
+  }
+  if (submitted && BK_FLAGS_DIRECTION(header.flags) ==
+                       BK_DIRECTION_CLIENT_TO_SERVER &&
+      (header.flags & (BK_FLAG_MUST_DELIVER | BK_FLAG_MEASURE)) ==
+          BK_FLAG_MEASURE &&
+      header.seq > conn->input_last_sent_measured) {
+    conn->input_last_sent_measured = header.seq;
+  }
   return submitted ? 0 : -1;
 }
 
@@ -373,13 +601,51 @@ static void mark_unsent_until(client_conn *conn, uint64_t cutoff_ns,
   }
 }
 
+static bool scenario_client_payload_valid(const client_config *cfg,
+                                          const bk_header *header,
+                                          size_t payload_size) {
+  if (cfg->scenario == SCENARIO_LEGACY || header->origin_id >= cfg->total_conns ||
+      header->seq == 0 || header->sched_ts_ns == 0 ||
+      header->send_ts_ns == 0) {
+    return false;
+  }
+  const traffic_config *traffic = NULL;
+  bk_direction direction = BK_DIRECTION_ROOM_RELAY;
+  bool broadcast = false;
+  switch (cfg->scenario) {
+    case SCENARIO_ENVIRONMENT_BASELINE:
+      traffic = &cfg->input;
+      break;
+    case SCENARIO_AUTHORITATIVE_STATE:
+      traffic = &cfg->input;
+      direction = BK_DIRECTION_CLIENT_TO_SERVER;
+      break;
+    case SCENARIO_ROOM_RELAY:
+      traffic = &cfg->publish;
+      broadcast = true;
+      break;
+    case SCENARIO_LEGACY:
+      return false;
+  }
+  const bool must_deliver =
+      (header->flags & BK_FLAG_MUST_DELIVER) != 0;
+  const double rate = must_deliver ? traffic->rate_md : traffic->rate_lt;
+  const size_t expected_size =
+      must_deliver ? traffic->payload_md : traffic->payload_lt;
+  return header->traffic_id == traffic->traffic_id &&
+         BK_FLAGS_DIRECTION(header->flags) == direction &&
+         (((header->flags & BK_FLAG_BROADCAST) != 0) == broadcast) &&
+         rate > 0.0 && payload_size == expected_size;
+}
+
 // 1 conn の受信 socket を最大 budget パケットまで drain する。
 // 戻り値 0=ok / -1=err。**上限が必須**: broadcast fanout(受信 conns² スケール)
 // では上限なしだとこのループから抜けられず、main ループの制御チャネル poll
 // (bk_steady_tick)と送信が飢えて window を取りこぼす(negative margin で
 // INVALID)。budget を超えても POLLIN は残るので次イテレーションで続きを引く。
-static int drain_conn(client_conn *conn, bk_metrics *metrics, uint8_t *buf,
-                      size_t cap, int budget) {
+static int drain_conn(client_conn *conn, const client_config *cfg,
+                      bk_metrics *metrics, uint8_t *buf, size_t cap,
+                      int budget, client_stats *stats) {
   for (int drained = 0; drained < budget; ++drained) {
     ssize_t n = recv(conn->fd, buf, cap, 0);
     if (n < 0) {
@@ -392,11 +658,110 @@ static int drain_conn(client_conn *conn, bk_metrics *metrics, uint8_t *buf,
       return -1;
     }
     bk_header header;
-    if (bk_payload_read(buf, (size_t)n, &header) == 0) {
-      bk_metrics_on_recv(metrics, conn->local_index, &header, bk_now_ns());
+    if (bk_payload_read(buf, (size_t)n, &header) != 0) {
+      stats->invalid_payload++;
+      continue;
     }
+    if (cfg->scenario == SCENARIO_AUTHORITATIVE_STATE) {
+        const bool must_deliver =
+            (header.flags & BK_FLAG_MUST_DELIVER) != 0;
+        const bool class_enabled =
+            must_deliver ? cfg->state.rate_md > 0.0
+                         : cfg->state.rate_lt > 0.0;
+        const size_t expected_size =
+            must_deliver ? cfg->state.payload_md : cfg->state.payload_lt;
+        if (BK_FLAGS_DIRECTION(header.flags) !=
+                BK_DIRECTION_SERVER_TO_CLIENT ||
+            header.traffic_id != cfg->state.traffic_id ||
+            header.origin_id != cfg->total_conns ||
+            (header.flags & BK_FLAG_BROADCAST) != 0 || !class_enabled ||
+            (size_t)n != expected_size || header.seq == 0 ||
+            header.sched_ts_ns == 0 || header.send_ts_ns == 0) {
+          stats->invalid_payload++;
+          continue;
+        }
+        uint64_t applied = 0;
+        if (bk_authoritative_state_read_applied_input_seq(
+                buf, (size_t)n, &applied) != 0 ||
+            applied > conn->last_input_seq ||
+            bk_authoritative_state_validate_target_pad(
+                buf, (size_t)n, conn->origin_id) != 0) {
+          stats->invalid_payload++;
+          continue;
+        }
+        if (applied > conn->last_applied_input_seq) {
+          conn->last_applied_input_seq = applied;
+        }
+        if (!must_deliver && (header.flags & BK_FLAG_MEASURE) != 0) {
+          if (header.seq > conn->state_header_seq_recv_measured) {
+            conn->state_header_seq_recv_measured = header.seq;
+          }
+          if (applied > conn->state_applied_input_seq_recv_measured) {
+            conn->state_applied_input_seq_recv_measured = applied;
+          }
+        }
+      } else if ((cfg->scenario != SCENARIO_LEGACY &&
+                  !scenario_client_payload_valid(cfg, &header, (size_t)n)) ||
+                 bk_payload_validate_body(buf, (size_t)n, &header) != 0) {
+        stats->invalid_payload++;
+        continue;
+      }
+      bk_metrics_on_recv(metrics, conn->local_index, &header, bk_now_ns());
   }
   return 0;
+}
+
+static int format_client_stats_json(const client_config *cfg,
+                                    const client_conn *conns,
+                                    const client_stats *stats, char *buf,
+                                    size_t cap) {
+  uint64_t input_min = 0;
+  uint64_t input_max = 0;
+  uint64_t header_min = 0;
+  uint64_t header_max = 0;
+  uint64_t applied_min = 0;
+  uint64_t applied_max = 0;
+  if (cfg->scenario == SCENARIO_AUTHORITATIVE_STATE) {
+    for (int i = 0; i < cfg->conns; ++i) {
+      const client_conn *conn = &conns[i];
+      if (i == 0 || conn->input_last_sent_measured < input_min) {
+        input_min = conn->input_last_sent_measured;
+      }
+      if (conn->input_last_sent_measured > input_max) {
+        input_max = conn->input_last_sent_measured;
+      }
+      if (i == 0 || conn->state_header_seq_recv_measured < header_min) {
+        header_min = conn->state_header_seq_recv_measured;
+      }
+      if (conn->state_header_seq_recv_measured > header_max) {
+        header_max = conn->state_header_seq_recv_measured;
+      }
+      if (i == 0 ||
+          conn->state_applied_input_seq_recv_measured < applied_min) {
+        applied_min = conn->state_applied_input_seq_recv_measured;
+      }
+      if (conn->state_applied_input_seq_recv_measured > applied_max) {
+        applied_max = conn->state_applied_input_seq_recv_measured;
+      }
+    }
+  }
+  const int n = snprintf(
+      buf, cap,
+      "{\"invalid_payload\":%" PRIu64
+      ",\"authoritative_progress\":{\"role\":\"client\","
+      "\"local_conns\":%d,\"roster_conns\":%u,"
+      "\"input_last_sent_min\":%" PRIu64
+      ",\"input_last_sent_max\":%" PRIu64
+      ",\"state_header_seq_recv_min\":%" PRIu64
+      ",\"state_header_seq_recv_max\":%" PRIu64
+      ",\"state_applied_input_seq_recv_min\":%" PRIu64
+      ",\"state_applied_input_seq_recv_max\":%" PRIu64
+      ",\"server_state_ticks\":0}}",
+      stats->invalid_payload,
+      cfg->scenario == SCENARIO_AUTHORITATIVE_STATE ? cfg->conns : 0,
+      cfg->scenario == SCENARIO_AUTHORITATIVE_STATE ? cfg->total_conns : 0u,
+      input_min, input_max, header_min, header_max, applied_min, applied_max);
+  return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 
 static uint64_t next_plan_due(const client_conn *conns, int n_conns) {
@@ -428,38 +793,6 @@ static int timeout_for_next(uint64_t now_ns, uint64_t next_ns,
   return (int)(delta_ns / 1000000ull);
 }
 
-static char *read_file_alloc(const char *path) {
-  FILE *f = fopen(path, "rb");
-  if (f == NULL) {
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  const long size = ftell(f);
-  if (size < 0) {
-    fclose(f);
-    return NULL;
-  }
-  if (fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return NULL;
-  }
-  char *buf = (char *)malloc((size_t)size + 1u);
-  if (buf == NULL) {
-    fclose(f);
-    return NULL;
-  }
-  const size_t got = fread(buf, 1, (size_t)size, f);
-  if (got != (size_t)size || fclose(f) != 0) {
-    free(buf);
-    return NULL;
-  }
-  buf[got] = '\0';
-  return buf;
-}
-
 static const char *metrics_path_or_default(char *buf, size_t cap) {
   const char *path = getenv("BENCH_METRICS_OUT");
   if (path != NULL && *path != '\0') {
@@ -488,16 +821,72 @@ static void free_conns(client_conn *conns, int n) {
   free(conns);
 }
 
+static int expect_scenario_flows(const client_config *cfg,
+                                 const client_conn *conns,
+                                 bk_metrics *metrics,
+                                 const bk_schedule *schedule) {
+  if (cfg->scenario == SCENARIO_LEGACY) {
+    return 0;
+  }
+  if (cfg->scenario == SCENARIO_AUTHORITATIVE_STATE) {
+    if (cfg->state.rate_lt == 0.0) {
+      return 0;
+    }
+    for (int i = 0; i < cfg->conns; ++i) {
+      if (bk_metrics_expect_latest(
+              metrics, conns[i].local_index, cfg->total_conns,
+              cfg->state.traffic_id, BK_DIRECTION_SERVER_TO_CLIENT,
+              schedule->start_at_ns) != 0) {
+        return -1;
+      }
+    }
+    return 0;
+  }
+  if (cfg->rate_lt == 0.0) {
+    return 0;
+  }
+  for (int i = 0; i < cfg->conns; ++i) {
+    const uint32_t first_origin =
+        cfg->scenario == SCENARIO_ROOM_RELAY ? 0u : conns[i].origin_id;
+    const uint32_t end_origin =
+        cfg->scenario == SCENARIO_ROOM_RELAY ? cfg->total_conns
+                                             : first_origin + 1u;
+    for (uint32_t origin = first_origin; origin < end_origin; ++origin) {
+      if (bk_metrics_expect_latest(metrics, conns[i].local_index, origin,
+                                   cfg->traffic_id,
+                                   BK_DIRECTION_ROOM_RELAY,
+                                   schedule->start_at_ns) != 0) {
+        return -1;
+      }
+    }
+  }
+  return 0;
+}
+
 static int run_client(const client_config *cfg) {
-  const uint32_t max_origin_id = cfg->origin_base + (uint32_t)cfg->conns;
+  const uint32_t max_origin_id =
+      cfg->scenario == SCENARIO_LEGACY
+          ? cfg->origin_base + (uint32_t)cfg->conns
+          : cfg->total_conns + 1u;
   const bk_metrics_config metrics_cfg = {
       .max_origin_id = max_origin_id == 0 ? 1u : max_origin_id,
       .deadline_ns = cfg->deadline_ns,
       .staleness_period_ns = cfg->staleness_period_ns,
+      .max_local_index = cfg->scenario != SCENARIO_LEGACY
+                             ? (uint32_t)cfg->conns
+                             : 0,
   };
   bk_metrics *metrics = bk_metrics_new(&metrics_cfg);
   if (metrics == NULL) {
     fprintf(stderr, "bk_metrics_new failed\n");
+    return -1;
+  }
+  if (cfg->scenario == SCENARIO_AUTHORITATIVE_STATE &&
+      bk_metrics_set_traffic_deadline(metrics, cfg->state.traffic_id,
+                                      BK_DIRECTION_SERVER_TO_CLIENT,
+                                      cfg->state.deadline_ns) != 0) {
+    fprintf(stderr, "bk_metrics_set_traffic_deadline failed\n");
+    bk_metrics_free(metrics);
     return -1;
   }
 
@@ -512,6 +901,7 @@ static int run_client(const client_config *cfg) {
   }
 
   client_conn *conns = (client_conn *)calloc((size_t)cfg->conns, sizeof(*conns));
+  client_stats stats = {0};
   const size_t payload_buf_size =
       cfg->payload_lt > cfg->payload_md ? cfg->payload_lt : cfg->payload_md;
   uint8_t *payload_buf = (uint8_t *)calloc(1, payload_buf_size);
@@ -559,7 +949,14 @@ static int run_client(const client_config *cfg) {
       bk_metrics_free(metrics);
       return -1;
     }
-    bk_header reg = {0, 0, bk_now_ns(), 0, conns[i].origin_id};
+    bk_header reg = {
+        .seq = 0,
+        .sched_ts_ns = 0,
+        .send_ts_ns = bk_now_ns(),
+        .flags = 0,
+        .origin_id = conns[i].origin_id,
+        .traffic_id = 0,
+    };
     if (bk_payload_write(recv_buf, BK_MIN_PAYLOAD, &reg) != 0 ||
         conn_send(conns[i].fd, recv_buf, BK_MIN_PAYLOAD) != 0) {
       // 登録の取りこぼしは致命ではない(warmup 初回送信でも学習される)が、
@@ -625,6 +1022,18 @@ static int run_client(const client_config *cfg) {
       bk_metrics_free(metrics);
       return -1;
     }
+  }
+
+  if (expect_scenario_flows(cfg, conns, metrics, &schedule) != 0) {
+    fprintf(stderr, "bk_metrics_expect_latest failed\n");
+    if (control != NULL) {
+      bk_control_close(control);
+    }
+    free(recv_buf);
+    free(payload_buf);
+    free_conns(conns, cfg->conns);
+    bk_metrics_free(metrics);
+    return -1;
   }
 
   // poll セット(全 conn の受信可待ち)。
@@ -724,8 +1133,8 @@ static int run_client(const client_config *cfg) {
         }
         // 1 conn あたりの drain 上限。制御チャネルと送信を飢えさせない範囲で
         // 大きめ(受信のバックログは次イテレーションで続きを引く)。
-        if (drain_conn(&conns[i], metrics, recv_buf,
-                       RAWUDP_MAX_PAYLOAD_BYTES, 256) != 0) {
+        if (drain_conn(&conns[i], cfg, metrics, recv_buf,
+                       RAWUDP_MAX_PAYLOAD_BYTES, 256, &stats) != 0) {
           drain_err = true;
           break;
         }
@@ -755,16 +1164,23 @@ static int run_client(const client_config *cfg) {
     rc = -1;
   }
 
-  char *stats_json = metrics_path == NULL ? NULL : read_file_alloc(metrics_path);
+  char stats_json[1024];
+  if (format_client_stats_json(cfg, conns, &stats, stats_json,
+                               sizeof(stats_json)) != 0) {
+    fprintf(stderr, "stats JSON formatting failed\n");
+    rc = -1;
+    stats_json[0] = '{';
+    stats_json[1] = '}';
+    stats_json[2] = '\0';
+  }
   if (control != NULL) {
-    if (bk_control_done(control, stats_json != NULL ? stats_json : "{}") != 0) {
+    if (bk_control_done(control, stats_json) != 0) {
       fprintf(stderr, "benchkit done failed\n");
       rc = -1;
     }
     bk_control_close(control);
   }
 
-  free(stats_json);
   free(pfds);
   free(recv_buf);
   free(payload_buf);

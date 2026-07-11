@@ -1,60 +1,132 @@
 # rudp-bench
 
-Reliable UDP / RUDP / QUIC implementations を同じ workload で比較する benchmark harness。
+リアルタイム通信の workload を再現し、既存 solution の採用、追加実装、
+自作の判断材料を得るための benchmark harness。
 
-## v2 移行中
+単一の「最速ランキング」は作らない。scenario、品質要求、回線条件、resource、
+solution treatment を固定し、その条件で SLO を満たす範囲と破断理由を測る。
 
-設計: [`docs/superpowers/specs/2026-07-02-rudp-bench-v2-design.md`](docs/superpowers/specs/2026-07-02-rudp-bench-v2-design.md)
+## Scenario
 
-v1(`harness/`, `adapters/`, `cmd/rudp-benchctl`, `scripts/`)は**凍結中** — バグ修正含め手を入れない。
-新規開発は v2 ディレクトリ(`benchspec/`, `benchkit/`, `servers/`, `orchestrator/`, `calibration/`)のみ。
+最初の scope は3種類だけとする。
 
-## Prerequisites
+| kind | 目的 | 主な負荷形状 |
+|---|---|---|
+| `environment_baseline` | rig、負荷生成器、計測器の校正 | 単純な raw echo probe |
+| `authoritative_state` | authoritative server と N client | client input + server独立tick、概ね O(N) |
+| `room_relay` | room内publisher/subscriber | fanout、対称条件では概ね O(N^2) |
 
-Linux-first. `tc netem`, systemd CPU isolation, vendored native libraries を使う。
+`environment_baseline`はsolutionの推薦やproduction capacityの順位には使わない。
+用途名を増やす代わりに、rate、payload、SLO、network、resourceを同じschemaで変更する。
+
+現行schemaのtopologyは意図的に狭い。`authoritative_state`は各client向けの個別state、
+`room_relay`は単一roomの対称all-to-allだけを実装している。非対称publisher/subscriber、
+interest policy、複数room、churnはAcceptedな将来modelには含むが、現時点では再現できない。
+
+目的とscopeは[ADR-0000](docs/adr/0000-project-purpose.md)と
+[ADR-0001](docs/adr/0001-battle-purpose.md)、wire/metrics契約は
+[benchspec](benchspec/README.md)を参照。
+
+## Status
+
+- プロジェクト目的と3 scenarioのscope: **Accepted**
+- 測定方法: [ADR-0002](docs/adr/0002-benchmark-methodology.md)で **Proposed**
+- reference presetの数値とconfirmatory protocol: 未凍結
+- reference blockのdoctor＋前後baseline drift gate: 未実装のため実行を禁止
+- CPU/useful-op、memory/conn、wire amplification、capability/security/license表: 未実装
+- 2026-07-11 no-loss smoke: [現行gateでは9 PASS / 3 INVALID](docs/measurements/2026-07-11-scenario-conformance.md)（完全なconformance/推薦ではない）
+- 旧broadcast battle結果: 過去条件の参考値。新scenarioの推薦データではない
+
+数値が未凍結の間に得た値はsmoke、conformance、またはpilotとして扱い、reference比較表へ
+混ぜない。
+
+## Build
+
+Linux、Go、CMake、C/C++ toolchainが必要。netemを使う測定には`iproute2`、
+netem gateには`ping`と`iperf3`、一括conformanceの最終検査には`jq`も必要になる。
 
 ```sh
-sudo apt-get install -y \
-  build-essential cmake git golang-go iproute2 \
-  libsodium-dev libnuma-dev libssl-dev libprotobuf-dev protobuf-compiler
+# orchestrator
+go build -o build-v2/orchestrator ./orchestrator/cmd/orchestrator
+
+# common C metrics/control library
+cmake -S benchkit -B build-v2
+cmake --build build-v2 -j
+ctest --test-dir build-v2 --output-on-failure
+
+# raw reference adapter（他のnative adapterもservers/<name>を同様にbuild）
+cmake -S servers/raw_udp -B build-v2-rawudp
+cmake --build build-v2-rawudp -j
+ctest --test-dir build-v2-rawudp --output-on-failure
 ```
 
-LiteNetLib は .NET 10 adapter。`litenetlib` を測る場合のみ .NET 10 SDK が必要。
+Managed adapterは.NET 10を使う。
 
 ```sh
-git submodule update --init --recursive
-cmake -S . -B build
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+dotnet build -c Release -m:1 servers/litenetlib/LiteNetLibBench.sln
+dotnet build -c Release -m:1 servers/websocket/WebSocketBench.sln
+dotnet build -c Release -m:1 servers/magiconion/MagicOnionBench.sln
+dotnet run --no-build -c Release --project servers/magiconion/BenchKit.CS.Tests/BenchKit.CS.Tests.csproj
 ```
 
-## Benchmark CLI
+## Measurement Workflow
 
-全ベンチマーク操作は `rudp-benchctl` に統合。Python 依存なし。
+1. **Doctor**: rigのclocksource、bench CPU governor、隔離、nofile、残留qdisc、
+   必要toolを検査し、環境metadataを保存する。
+2. **Calibration**: known-answer accounting、fault injection、duration invariance、
+   netem実効値を確認する。
+3. **No-loss smoke**: 低負荷でscenario semantics、traffic別会計、SLO判定を確認する。
+4. **Loss conformance**: class mappingとmust-deliverの欠落・重複・破損を検査する。
+5. **Pilot**: warmup、duration、境界探索範囲、block分散、停止則を決める。
+6. **Confirmatory blocks**: 凍結したpresetとprotocolをrandomized blockで反復する。
+7. **Report**: `PASS / FAIL / INVALID / CENSORED / UNSUPPORTED / INCONCLUSIVE`を
+   区別し、同じcomparison identityだけを集約する。
+
+DoctorはFAILでもJSONを保存し、終了code 2を返す。
 
 ```sh
-go build -o rudp-benchctl ./cmd/rudp-benchctl
-
-# canonical sweep (locked scenario — override不可)
-./rudp-benchctl run scenarios/canonical.json
-
-# quick smoke test
-./rudp-benchctl run scenarios/quick.json
-
-# 単発実行
-./rudp-benchctl run --lib coop_rudp --profile echo --conns 50 --duration 5
-
-# 実行計画プレビュー
-./rudp-benchctl run scenarios/canonical.json --plan
-
-# dry-run (コマンド出力のみ)
-./rudp-benchctl run --lib enet --profile echo --conns 10 --dry-run
+build-v2/orchestrator doctor \
+  -rig orchestrator/rigs/home.json \
+  -output results-v2/doctor.json
 ```
 
-canonical sweep は `sudo` が必要（`tc netem`, `systemd-run` CPU pinning, cgroup isolation）。
+dirty treeで`-output`を指定した場合は、status、tracked binary patch、untracked source tarと
+file hash manifestもreport横へ保存する。Git stateを読めない場合やdirty submoduleがある場合は
+DoctorをFAILにする。referenceはこれに依存せずclean treeを必須とする。
 
-## Docs
+capacity sweepは`measurement_mode`を`conformance`、`screening`、`pilot`、
+`reference`から明示する。`reference`は予約済みだが、現時点では開始を拒否する。
+将来有効化する際は直近15分のPASS doctor report、同じbinary/host、clean source tree、
+`conns.min=1`に加え、blockの前後baseline drift gateを必須にする。
 
-- Canonical benchmark: [`docs/CANONICAL.md`](docs/CANONICAL.md)
-- Design spec: [`docs/superpowers/specs/2026-04-28-rudp-bench-design.md`](docs/superpowers/specs/2026-04-28-rudp-bench-design.md)
-- Development / measurement notes: [`docs/dev-notes.md`](docs/dev-notes.md)
+低負荷の3 scenarioはraw adapterでそのまま実行できる。
+
+```sh
+build-v2/orchestrator run -config orchestrator/examples/local-baseline-rawudp.json
+build-v2/orchestrator run -config orchestrator/examples/local-authoritative-rawudp.json
+build-v2/orchestrator run -config orchestrator/examples/local-room-relay-rawudp.json
+```
+
+duration不変性、doctor、raw environment baseline、6 solutionの2 use-case
+no-loss smokeをまとめて実行する場合は、socket確認に必要な権限をこの1コマンドへ
+まとめられる。
+
+```sh
+scripts/run-scenario-conformance-local.sh
+```
+
+各JSONの`scenario`を複製してrate、payload、SLO、接続数、netem、CPU割当を変更すれば、
+利用者自身のworkloadを同じ実行・判定経路で測れる。名前が同じでも定義hashが異なる
+結果はcacheや集約で混合されない。現行の固定topologyで近似できないworkloadは、
+近いと装わずschema拡張後に測る。
+
+## Verification
+
+```sh
+go vet ./orchestrator/...
+go test -count=1 ./orchestrator/...
+./calibration/duration_invariance.sh
+```
+
+公開値に必要な測定方法、outcome、再現性record、推薦規則、自作判断の基準は
+[ADR-0002](docs/adr/0002-benchmark-methodology.md)に定義する。

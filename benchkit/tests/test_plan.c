@@ -6,8 +6,16 @@
 
 int main(void) {
   const bk_stream streams[] = {
-      {.must_deliver = false, .broadcast = false, .interval_ns = 100},
-      {.must_deliver = true, .broadcast = true, .interval_ns = 250},
+      {.must_deliver = false,
+       .broadcast = false,
+       .traffic_id = 1,
+       .direction = BK_DIRECTION_CLIENT_TO_SERVER,
+       .interval_ns = 100},
+      {.must_deliver = true,
+       .broadcast = true,
+       .traffic_id = 2,
+       .direction = BK_DIRECTION_SERVER_TO_CLIENT,
+       .interval_ns = 250},
   };
   bk_plan *p = bk_plan_new(streams, 2, 1000, 1200, 1600);
   CHECK(p != NULL);
@@ -21,6 +29,8 @@ int main(void) {
   CHECK(s.seq == 1);
   CHECK(s.sched_ts_ns == 1000);
   CHECK((s.flags & BK_FLAG_MEASURE) == 0);
+  CHECK(BK_FLAGS_DIRECTION(s.flags) == BK_DIRECTION_CLIENT_TO_SERVER);
+  CHECK(s.traffic_id == 1);
 
   CHECK(bk_plan_next(p, 1000, &s));
   CHECK(s.stream_index == 1);
@@ -29,6 +39,8 @@ int main(void) {
   CHECK((s.flags & BK_FLAG_MUST_DELIVER) != 0);
   CHECK((s.flags & BK_FLAG_BROADCAST) != 0);
   CHECK((s.flags & BK_FLAG_MEASURE) == 0);
+  CHECK(BK_FLAGS_DIRECTION(s.flags) == BK_DIRECTION_SERVER_TO_CLIENT);
+  CHECK(s.traffic_id == 2);
   CHECK(bk_plan_peek_ns(p) == 1100);
 
   CHECK(bk_plan_next(p, 1250, &s));
@@ -67,5 +79,11 @@ int main(void) {
 
   CHECK(bk_plan_peek_ns(p) == 1750);
   bk_plan_free(p);
+
+  const bk_stream invalid = {
+      .direction = (bk_direction)3,
+      .interval_ns = 1,
+  };
+  CHECK(bk_plan_new(&invalid, 1, 0, 0, 1) == NULL);
   return 0;
 }

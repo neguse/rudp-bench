@@ -36,10 +36,15 @@ public static class LnlDescribe
             "all conns pumped from one loop via PollEvents+ManualUpdate)\"," +
             "\"encryption\":false," +
             "\"max_payload_bytes\":" + maxUnreliable + "," +
-            "\"tuning\":[\"use_native_sockets\",\"mtu_discovery\"," +
-            "\"disconnect_timeout=60s\",\"unsynced_receive_event(server)\"," +
-            "\"update_time=1ms+trigger_update(server)\"," +
-            "\"packet_pool_size=16384/4096\"," +
-            "\"pooled-packet-direct-write(client)\"]}";
+            "\"scenarios\":[\"environment_baseline\",\"authoritative_state\",\"room_relay\"]," +
+            "\"tuning\":[" +
+            "{\"knob\":\"NetManager.UseNativeSockets\",\"value\":\"true\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
+            "{\"knob\":\"NetManager.MtuDiscovery\",\"value\":\"true\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
+            "{\"knob\":\"NetManager.DisconnectTimeout\",\"value\":\"60000 ms\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
+            "{\"knob\":\"NetManager.UnsyncedEvents\",\"value\":\"true (server)\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
+            "{\"knob\":\"NetManager.UpdateTime\",\"value\":\"1 ms; TriggerUpdate after enqueue (server)\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
+            "{\"knob\":\"NetManager.PacketPoolSize\",\"value\":\"16384 (server), 4096 (client)\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
+            "{\"knob\":\"NetPeer.CreatePacketFromPool/SendPooledPacket\",\"value\":\"direct pooled-packet write (client)\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib\"}" +
+            "]}";
     }
 }

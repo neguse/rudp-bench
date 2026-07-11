@@ -30,8 +30,8 @@ if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(
     NAME enet_loopback_smoke
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/smoke_test.py"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../raw_udp/smoke_test.py"
             "$<TARGET_FILE:enet_server>" "$<TARGET_FILE:enet_client>"
   )
-  set_tests_properties(enet_loopback_smoke PROPERTIES TIMEOUT 45)
+  set_tests_properties(enet_loopback_smoke PROPERTIES TIMEOUT 90)
 endif()

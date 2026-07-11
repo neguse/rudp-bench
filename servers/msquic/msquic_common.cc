@@ -119,12 +119,31 @@ void print_describe() {
       "\"thread_model\":\"internal_worker\","
       "\"encryption\":true,"
       "\"max_payload_bytes\":1000,"
+      "\"scenarios\":[\"environment_baseline\","
+      "\"authoritative_state\",\"room_relay\"],"
       "\"tuning\":["
-      "\"cc=bbr\",\"datagram_receive=on\","
-      "\"disconnect_timeout=60s\",\"idle_timeout=60s\",\"keep_alive=5s\","
-      "\"send_buffering=off\",\"stream_recv_window=1MB\","
-      "\"shared-sendbuf-broadcast\",\"sendbuf-direct-write\","
-      "\"atomic-stats/cow-conns\""
+      "{\"knob\":\"CongestionControlAlgorithm\",\"value\":\"BBR\","
+      "\"upstream_ref\":\"https://github.com/microsoft/msquic/blob/main/docs/api/QUIC_SETTINGS.md\"},"
+      "{\"knob\":\"DatagramReceiveEnabled\",\"value\":\"true\","
+      "\"upstream_ref\":\"https://github.com/microsoft/msquic/blob/main/docs/api/QUIC_SETTINGS.md\"},"
+      "{\"knob\":\"DisconnectTimeoutMs\",\"value\":\"60000\","
+      "\"upstream_ref\":\"https://github.com/microsoft/msquic/blob/main/docs/api/QUIC_SETTINGS.md\"},"
+      "{\"knob\":\"IdleTimeoutMs\",\"value\":\"60000\","
+      "\"upstream_ref\":\"https://github.com/microsoft/msquic/blob/main/docs/api/QUIC_SETTINGS.md\"},"
+      "{\"knob\":\"KeepAliveIntervalMs\",\"value\":\"5000\","
+      "\"upstream_ref\":\"https://github.com/microsoft/msquic/blob/main/docs/api/QUIC_SETTINGS.md\"},"
+      "{\"knob\":\"SendBufferingEnabled\",\"value\":\"false\","
+      "\"upstream_ref\":\"https://github.com/microsoft/msquic/blob/main/docs/api/QUIC_SETTINGS.md\"},"
+      "{\"knob\":\"StreamRecvWindowDefault\",\"value\":\"1048576\","
+      "\"upstream_ref\":\"https://github.com/microsoft/msquic/blob/main/docs/api/QUIC_SETTINGS.md\"},"
+      "{\"knob\":\"PeerBidiStreamCount\",\"value\":\"16384\","
+      "\"upstream_ref\":\"https://github.com/microsoft/msquic/blob/main/docs/api/QUIC_SETTINGS.md\"},"
+      "{\"knob\":\"send buffers\","
+      "\"value\":\"shared broadcast buffers with completion lifetime\","
+      "\"upstream_ref\":\"https://github.com/microsoft/msquic/blob/main/docs/api/StreamSend.md\"},"
+      "{\"knob\":\"payload construction\","
+      "\"value\":\"direct-write into QUIC_BUFFER storage\","
+      "\"upstream_ref\":\"https://github.com/microsoft/msquic/blob/main/docs/api/DatagramSend.md\"}"
       "]}");
 }
 
@@ -233,7 +252,7 @@ void handle_stream_send_complete(QUIC_STREAM_EVENT *event) {
   event->SEND_COMPLETE.ClientContext = nullptr;
 }
 
-void FrameDecoder::append(
+bool FrameDecoder::append(
     const QUIC_BUFFER *buffers, uint32_t buffer_count,
     const std::function<void(const uint8_t *, size_t)> &on_frame) {
   for (uint32_t i = 0; i < buffer_count; ++i) {
@@ -251,6 +270,13 @@ void FrameDecoder::append(
       std::memcpy(&nlen, bytes_.data() + offset_, sizeof(nlen));
       offset_ += sizeof(nlen);
       frame_len_ = ntohl(nlen);
+      if (frame_len_ > kMaxPayloadBytes) {
+        bytes_.clear();
+        offset_ = 0;
+        frame_len_ = 0;
+        have_len_ = false;
+        return false;
+      }
       have_len_ = true;
     }
     if (available() < frame_len_) {
@@ -269,6 +295,7 @@ void FrameDecoder::append(
                  bytes_.begin() + static_cast<std::ptrdiff_t>(offset_));
     offset_ = 0;
   }
+  return true;
 }
 
 }  // namespace rudp_bench_msquic

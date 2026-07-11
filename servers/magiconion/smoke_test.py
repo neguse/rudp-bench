@@ -35,6 +35,9 @@ def assert_class_shape(metrics, name):
         "delivered_unique",
         "duplicates",
         "deadline_hit",
+        "expected_flows",
+        "observed_flows",
+        "never_received_flows",
         "latency_sched_ns",
         "latency_send_ns",
         "update_gap_ns",
@@ -48,11 +51,11 @@ def assert_class_shape(metrics, name):
 
 
 def assert_metrics_shape(metrics):
-    expected_top = {"version", "histogram", "classes", "staleness_ns", "raw"}
+    expected_top = {"version", "histogram", "classes", "traffic", "staleness_ns", "raw"}
     if set(metrics.keys()) != expected_top:
         raise AssertionError(f"top-level keys {sorted(metrics.keys())}, want {sorted(expected_top)}")
-    if int(metrics["version"]) != 1:
-        raise AssertionError(f"version {metrics['version']}, want 1")
+    if int(metrics["version"]) != 2:
+        raise AssertionError(f"version {metrics['version']}, want 2")
     hist_meta = metrics["histogram"]
     if hist_meta != {"scheme": "log2x16", "subbins": 16, "min_ns": 1000, "max_ns": 100000000000}:
         raise AssertionError(f"histogram metadata mismatch: {hist_meta}")
@@ -63,16 +66,46 @@ def assert_metrics_shape(metrics):
     assert_hist_shape(metrics["staleness_ns"], "staleness_ns")
     if set(metrics["raw"].keys()) != {"slots", "submitted", "recv_measured", "recv_unmeasured"}:
         raise AssertionError(f"raw keys mismatch: {metrics['raw'].keys()}")
+    if not metrics["traffic"]:
+        raise AssertionError("traffic series is empty")
+    for index, traffic in enumerate(metrics["traffic"]):
+        if traffic["direction"] not in {"room_relay", "client_to_server", "server_to_client"}:
+            raise AssertionError(f"traffic[{index}]: invalid direction")
+        for hist_name in ("latency_sched_ns", "latency_send_ns", "update_gap_ns", "staleness_ns"):
+            assert_hist_shape(traffic[hist_name], f"traffic[{index}].{hist_name}")
 
 
-def class_delivery(metrics, name):
-    cls = metrics["classes"][name]
-    slots = int(cls["slots"])
-    delivered = int(cls["delivered_unique"])
-    if slots <= 0:
-        raise AssertionError(f"{name}: no measured slots")
-    if delivered != slots:
-        raise AssertionError(f"{name}: delivery {delivered}/{slots}, want 1.0")
+def traffic_series(metrics, traffic_id, direction, class_name):
+    for traffic in metrics["traffic"]:
+        if (int(traffic["traffic_id"]), traffic["direction"], traffic["class"]) == (
+            traffic_id,
+            direction,
+            class_name,
+        ):
+            return traffic
+    raise AssertionError(f"missing traffic series {(traffic_id, direction, class_name)}")
+
+
+def assert_authoritative(server_metrics, client_metrics):
+    for class_name in ("loss_tolerant", "must_deliver"):
+        server_input = traffic_series(server_metrics, 1, "client_to_server", class_name)
+        server_state = traffic_series(server_metrics, 2, "server_to_client", class_name)
+        client_input = traffic_series(client_metrics, 1, "client_to_server", class_name)
+        client_state = traffic_series(client_metrics, 2, "server_to_client", class_name)
+        if int(server_input["delivered_unique"]) <= 0 or int(server_input["slots"]) != 0:
+            raise AssertionError(f"server input role mismatch: {server_input}")
+        if int(server_state["slots"]) <= 0 or int(server_state["slots"]) % 3 != 0:
+            raise AssertionError(f"server state roster expansion mismatch: {server_state}")
+        if int(client_input["slots"]) <= 0 or int(client_state["delivered_unique"]) <= 0:
+            raise AssertionError(f"client authoritative traffic missing for {class_name}")
+    for metric in (
+        traffic_series(server_metrics, 1, "client_to_server", "loss_tolerant"),
+        traffic_series(client_metrics, 2, "server_to_client", "loss_tolerant"),
+    ):
+        if int(metric["expected_flows"]) != 3 or int(metric["observed_flows"]) != 3:
+            raise AssertionError(f"latest flow coverage mismatch: {metric}")
+        if int(metric["never_received_flows"]) != 0:
+            raise AssertionError(f"unexpected never-received flow: {metric}")
 
 
 def dump_log(path, label):
@@ -86,18 +119,68 @@ def dump_log(path, label):
     print(data if data else "<empty>", file=sys.stderr)
 
 
+def read_diagnostics(path):
+    progress = None
+    invalid_payload = None
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("BENCH_PROGRESS "):
+                progress = dict(item.split("=", 1) for item in line.split()[1:])
+            elif line.startswith("BENCH_INVALID_PAYLOAD "):
+                invalid_payload = int(line.split("=", 1)[1])
+    if progress is None or invalid_payload is None:
+        raise AssertionError(f"missing benchmark diagnostics in {path}")
+    return progress, invalid_payload
+
+
+def assert_progress(server_log_path, client_log_path):
+    server, server_invalid = read_diagnostics(server_log_path)
+    client, client_invalid = read_diagnostics(client_log_path)
+    if server_invalid != 0 or client_invalid != 0:
+        raise AssertionError(f"invalid payloads: server={server_invalid}, client={client_invalid}")
+    if server["role"] != "server" or int(server["local_conns"]) != 0 or int(server["roster_conns"]) != 3:
+        raise AssertionError(f"invalid server progress identity: {server}")
+    if client["role"] != "client" or int(client["local_conns"]) != 3 or int(client["roster_conns"]) != 3:
+        raise AssertionError(f"invalid client progress identity: {client}")
+    required_positive = (
+        "input_last_sent_min",
+        "input_last_sent_max",
+        "state_header_seq_recv_min",
+        "state_header_seq_recv_max",
+        "state_applied_input_seq_recv_min",
+        "state_applied_input_seq_recv_max",
+    )
+    if any(int(client[name]) <= 0 for name in required_positive):
+        raise AssertionError(f"authoritative progress did not advance: {client}")
+    if int(server["server_state_ticks"]) <= 0:
+        raise AssertionError(f"server state tick did not advance: {server}")
+    if int(client["state_header_seq_recv_max"]) <= int(client["input_last_sent_max"]):
+        raise AssertionError(f"state sequence did not advance independently of input: {client}")
+
+
 def run_once(server_bin, client_bin, port):
     with tempfile.TemporaryDirectory(prefix="rudp-bench-magiconion-smoke-") as tmp:
         metrics_path = os.path.join(tmp, "client-metrics.json")
+        server_metrics_path = os.path.join(tmp, "server-metrics.json")
         server_log_path = os.path.join(tmp, "server.log")
         client_log_path = os.path.join(tmp, "client.log")
         server_log = open(server_log_path, "wb")
         client_log = open(client_log_path, "wb")
         server_env = os.environ.copy()
         server_env.pop("BENCH_CONTROL_SOCK", None)
-        server_env.pop("BENCH_METRICS_OUT", None)
+        server_env["BENCH_METRICS_OUT"] = server_metrics_path
+        scenario_args = [
+            "--scenario", "authoritative_state", "--total-conns", "3",
+            "--input-traffic-id", "1", "--input-rate-lt", "13", "--input-rate-md", "5",
+            "--input-payload-lt", "64", "--input-payload-md", "64",
+            "--input-deadline-ns", "1000000000",
+            "--state-traffic-id", "2", "--state-rate-lt", "20", "--state-rate-md", "5",
+            "--state-payload-lt", "64", "--state-payload-md", "64",
+            "--state-deadline-ns", "1000000000",
+        ]
         server = subprocess.Popen(
-            [server_bin, "--port", str(port)],
+            [server_bin, "--port", str(port), *scenario_args, "--staleness-period-ns", "10000000"],
             stdout=server_log,
             stderr=server_log,
             env=server_env,
@@ -115,21 +198,16 @@ def run_once(server_bin, client_bin, port):
                     "--port",
                     str(port),
                     "--conns",
-                    "1",
+                    "3",
                     "--proc-index",
                     "0",
                     "--origin-base",
                     "0",
-                    "--rate-lt",
-                    "10",
-                    "--rate-md",
-                    "10",
-                    "--payload",
-                    "64",
                     "--deadline-ns",
                     "1000000000",
                     "--staleness-period-ns",
                     "10000000",
+                    *scenario_args,
                 ],
                 check=True,
                 stdout=client_log,
@@ -138,10 +216,14 @@ def run_once(server_bin, client_bin, port):
                 timeout=15,
             )
             with open(metrics_path, "r", encoding="utf-8") as f:
-                metrics = json.load(f)
-            assert_metrics_shape(metrics)
-            class_delivery(metrics, "loss_tolerant")
-            class_delivery(metrics, "must_deliver")
+                client_metrics = json.load(f)
+            server.wait(timeout=10)
+            with open(server_metrics_path, "r", encoding="utf-8") as f:
+                server_metrics = json.load(f)
+            assert_metrics_shape(server_metrics)
+            assert_metrics_shape(client_metrics)
+            assert_authoritative(server_metrics, client_metrics)
+            assert_progress(server_log_path, client_log_path)
         except Exception:
             server_log.flush()
             client_log.flush()

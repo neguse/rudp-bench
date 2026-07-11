@@ -33,6 +33,7 @@ if(BUILD_TESTING)
       test_payload
       test_plan
       test_metrics_zero
+      test_authoritative_metrics
       test_fault_inject
       test_control)
     add_executable(${test_name} tests/${test_name}.c)

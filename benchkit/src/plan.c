@@ -26,7 +26,8 @@ bk_plan *bk_plan_new(const bk_stream *streams, int n_streams, uint64_t start_ns,
     return NULL;
   }
   for (int i = 0; i < n_streams; ++i) {
-    if (streams[i].interval_ns == 0) {
+    if (streams[i].interval_ns == 0 || streams[i].direction < 0 ||
+        streams[i].direction > BK_DIRECTION_SERVER_TO_CLIENT) {
       return NULL;
     }
   }
@@ -115,6 +116,7 @@ bool bk_plan_next(bk_plan *p, uint64_t now_ns, bk_slot *out) {
   if (s->broadcast) {
     flags |= BK_FLAG_BROADCAST;
   }
+  flags |= BK_FLAG_DIRECTION(s->direction);
   if (best_sched >= p->measure_start_ns && best_sched < p->measure_stop_ns) {
     flags |= BK_FLAG_MEASURE;
   }
@@ -123,6 +125,7 @@ bool bk_plan_next(bk_plan *p, uint64_t now_ns, bk_slot *out) {
   out->seq = p->next_seq[best_index];
   out->stream_index = best_index;
   out->flags = flags;
+  out->traffic_id = s->traffic_id;
 
   p->next_sched_ns[best_index] =
       add_interval(p->next_sched_ns[best_index], s->interval_ns);

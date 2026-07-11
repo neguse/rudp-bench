@@ -1,8 +1,13 @@
 namespace BenchKit.CS;
 
-public readonly record struct BenchStream(bool MustDeliver, bool Broadcast, ulong IntervalNs);
+public readonly record struct BenchStream(
+    bool MustDeliver,
+    bool Broadcast,
+    ulong IntervalNs,
+    byte TrafficId = 0,
+    BenchDirection Direction = BenchDirection.RoomRelay);
 
-public readonly record struct BenchSlot(ulong SchedTsNs, ulong Seq, int StreamIndex, byte Flags);
+public readonly record struct BenchSlot(ulong SchedTsNs, ulong Seq, int StreamIndex, byte Flags, byte TrafficId = 0);
 
 public sealed class BenchPlan
 {
@@ -25,6 +30,10 @@ public sealed class BenchPlan
             if (stream.IntervalNs == 0)
             {
                 throw new ArgumentException("stream interval must be > 0", nameof(streams));
+            }
+            if (stream.Direction > BenchDirection.ServerToClient)
+            {
+                throw new ArgumentException("invalid stream direction", nameof(streams));
             }
         }
 
@@ -87,12 +96,13 @@ public sealed class BenchPlan
         {
             flags |= BenchConstants.FlagBroadcast;
         }
+        flags |= BenchConstants.DirectionFlags(stream.Direction);
         if (bestSched >= measureStartNs && bestSched < measureStopNs)
         {
             flags |= BenchConstants.FlagMeasure;
         }
 
-        slot = new BenchSlot(bestSched, nextSeq[bestIndex], bestIndex, flags);
+        slot = new BenchSlot(bestSched, nextSeq[bestIndex], bestIndex, flags, stream.TrafficId);
         nextSchedNs[bestIndex] = BenchClock.AddSaturating(nextSchedNs[bestIndex], stream.IntervalNs);
         if (nextSeq[bestIndex] != ulong.MaxValue)
         {

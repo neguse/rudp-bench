@@ -5,6 +5,7 @@
 // し、conn の対応付けは k_ESteamNetworkingConfig_ConnectionUserData に埋めた
 // local_index(受信側 dedup キー)で行う。
 #include "benchkit.h"
+#include "../scenario_cli.h"
 #include "gns_common.h"
 
 #include <cerrno>
@@ -45,6 +46,9 @@ struct ClientConfig {
   size_t payload_md = 0;
   uint64_t deadline_ns = 0;
   uint64_t staleness_period_ns = 0;
+  bk_scenario_cli scenario = {};
+  uint8_t traffic_id = 0;
+  bk_direction direction = BK_DIRECTION_ROOM_RELAY;
 };
 
 struct ClientConn {
@@ -53,6 +57,11 @@ struct ClientConn {
   uint32_t local_index = 0;  // 自 proc 内 0 起点(重複判定の受信側キー)
   bk_plan *plan = nullptr;
   bool connected = false;
+  uint64_t last_input_seq = 0;
+  uint64_t last_applied_input_seq = 0;
+  uint64_t input_last_sent_measured = 0;
+  uint64_t state_header_seq_recv_measured = 0;
+  uint64_t state_applied_input_seq_recv_measured = 0;
 };
 
 void usage(const char *argv0) {
@@ -134,6 +143,7 @@ int parse_rate(const char *s, double *out) {
 }
 
 int parse_args(int argc, char **argv, ClientConfig *cfg) {
+  cfg->staleness_period_ns = 10000000ull;
   bool have_host = false;
   bool have_port = false;
   bool have_conns = false;
@@ -149,6 +159,14 @@ int parse_args(int argc, char **argv, ClientConfig *cfg) {
     if (std::strcmp(argv[i], "--describe") == 0) {
       rudp_bench_gns::print_describe();
       std::exit(EXIT_SUCCESS);
+    }
+    const int scenario_arg =
+        bk_scenario_cli_parse(argc, argv, &i, &cfg->scenario);
+    if (scenario_arg < 0) {
+      return -1;
+    }
+    if (scenario_arg > 0) {
+      continue;
     }
     if (std::strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
       cfg->host = argv[++i];
@@ -217,8 +235,48 @@ int parse_args(int argc, char **argv, ClientConfig *cfg) {
   }
 
   if (!have_host || !have_port || !have_conns || !have_proc_index ||
-      !have_origin_base || !have_rate_lt || !have_rate_md || !have_payload ||
-      !have_deadline || !have_staleness) {
+      !have_origin_base) {
+    return -1;
+  }
+  if (cfg->scenario.present) {
+    if (bk_scenario_cli_validate(
+            &cfg->scenario, kMaxConns,
+            rudp_bench_gns::kMaxPayloadMustDeliver) != 0 ||
+        static_cast<uint64_t>(cfg->origin_base) +
+                static_cast<uint64_t>(cfg->conns) >
+            cfg->scenario.total_conns) {
+      return -1;
+    }
+    int broadcast = 0;
+    const bk_scenario_traffic *traffic = bk_scenario_client_traffic(
+        &cfg->scenario, &cfg->direction, &broadcast);
+    if (traffic == nullptr) {
+      return -1;
+    }
+    auto valid_limits = [](const bk_scenario_traffic &value) {
+      return (value.rate_lt == 0.0 ||
+              value.payload_lt <=
+                  rudp_bench_gns::kMaxPayloadLossTolerant) &&
+             (value.rate_md == 0.0 ||
+              value.payload_md <= rudp_bench_gns::kMaxPayloadMustDeliver);
+    };
+    if (!valid_limits(*traffic) ||
+        (cfg->scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE &&
+         !valid_limits(cfg->scenario.state))) {
+      return -1;
+    }
+    cfg->traffic_id = traffic->traffic_id;
+    cfg->rate_lt = traffic->rate_lt;
+    cfg->rate_md = traffic->rate_md;
+    cfg->payload_lt = traffic->payload_lt;
+    cfg->payload_md = traffic->payload_md;
+    cfg->deadline_ns = traffic->deadline_ns;
+    cfg->broadcast_lt = broadcast != 0;
+    cfg->broadcast_md = broadcast != 0;
+    return 0;
+  }
+  if (!have_rate_lt || !have_rate_md || !have_payload || !have_deadline ||
+      !have_staleness) {
     return -1;
   }
   if (cfg->rate_lt == 0.0 && cfg->rate_md == 0.0) {
@@ -266,21 +324,23 @@ int build_streams(const ClientConfig *cfg, bk_stream *streams, int *n_streams) {
     if (interval_from_rate(cfg->rate_lt, &interval_ns) != 0) {
       return -1;
     }
-    streams[n++] = {
-        false,
-        cfg->broadcast_lt,
-        interval_ns,
-    };
+    streams[n].must_deliver = false;
+    streams[n].broadcast = cfg->broadcast_lt;
+    streams[n].traffic_id = cfg->traffic_id;
+    streams[n].direction = cfg->direction;
+    streams[n].interval_ns = interval_ns;
+    ++n;
   }
   if (cfg->rate_md > 0.0) {
     if (interval_from_rate(cfg->rate_md, &interval_ns) != 0) {
       return -1;
     }
-    streams[n++] = {
-        true,
-        cfg->broadcast_md,
-        interval_ns,
-    };
+    streams[n].must_deliver = true;
+    streams[n].broadcast = cfg->broadcast_md;
+    streams[n].traffic_id = cfg->traffic_id;
+    streams[n].direction = cfg->direction;
+    streams[n].interval_ns = interval_ns;
+    ++n;
   }
   *n_streams = n;
   return n > 0 ? 0 : -1;
@@ -293,38 +353,7 @@ void make_header_from_slot(const bk_slot *slot, uint32_t origin_id,
   header->send_ts_ns = send_ts_ns;
   header->flags = slot->flags;
   header->origin_id = origin_id;
-}
-
-char *read_file_alloc(const char *path) {
-  FILE *f = std::fopen(path, "rb");
-  if (f == nullptr) {
-    return nullptr;
-  }
-  if (std::fseek(f, 0, SEEK_END) != 0) {
-    std::fclose(f);
-    return nullptr;
-  }
-  const long size = std::ftell(f);
-  if (size < 0) {
-    std::fclose(f);
-    return nullptr;
-  }
-  if (std::fseek(f, 0, SEEK_SET) != 0) {
-    std::fclose(f);
-    return nullptr;
-  }
-  char *buf = static_cast<char *>(std::malloc(static_cast<size_t>(size) + 1u));
-  if (buf == nullptr) {
-    std::fclose(f);
-    return nullptr;
-  }
-  const size_t got = std::fread(buf, 1, static_cast<size_t>(size), f);
-  if (got != static_cast<size_t>(size) || std::fclose(f) != 0) {
-    std::free(buf);
-    return nullptr;
-  }
-  buf[got] = '\0';
-  return buf;
+  header->traffic_id = slot->traffic_id;
 }
 
 const char *metrics_path_or_default(char *buf, size_t cap) {
@@ -377,16 +406,28 @@ class ClientApp {
   explicit ClientApp(const ClientConfig &cfg) : cfg_(cfg) {}
 
   int run() {
+    const bool authoritative =
+        cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE;
     const uint32_t max_origin_id =
-        cfg_.origin_base + static_cast<uint32_t>(cfg_.conns);
-    const bk_metrics_config metrics_cfg = {
-        max_origin_id == 0 ? 1u : max_origin_id,
-        cfg_.deadline_ns,
-        cfg_.staleness_period_ns,
-    };
+        cfg_.scenario.present
+            ? cfg_.scenario.total_conns + 1u
+            : cfg_.origin_base + static_cast<uint32_t>(cfg_.conns);
+    bk_metrics_config metrics_cfg = {};
+    metrics_cfg.max_origin_id = max_origin_id == 0 ? 1u : max_origin_id;
+    metrics_cfg.deadline_ns = cfg_.deadline_ns;
+    metrics_cfg.staleness_period_ns = cfg_.staleness_period_ns;
+    metrics_cfg.max_local_index =
+        cfg_.scenario.present ? static_cast<uint32_t>(cfg_.conns) : 0;
     metrics_ = bk_metrics_new(&metrics_cfg);
     if (metrics_ == nullptr) {
       std::fprintf(stderr, "bk_metrics_new failed\n");
+      return -1;
+    }
+    if (authoritative &&
+        bk_metrics_set_traffic_deadline(
+            metrics_, cfg_.scenario.state.traffic_id,
+            BK_DIRECTION_SERVER_TO_CLIENT,
+            cfg_.scenario.state.deadline_ns) != 0) {
       return -1;
     }
 
@@ -406,6 +447,13 @@ class ClientApp {
     }
     if (!wait_for_ready()) {
       std::fprintf(stderr, "timed out waiting for GNS connections\n");
+      if (control != nullptr) {
+        bk_control_close(control);
+      }
+      return -1;
+    }
+    if (!send_registrations()) {
+      std::fprintf(stderr, "GNS registration send failed\n");
       if (control != nullptr) {
         bk_control_close(control);
       }
@@ -451,6 +499,13 @@ class ClientApp {
         return -1;
       }
     }
+    if (!expect_scenario_flows(schedule)) {
+      std::fprintf(stderr, "bk_metrics_expect_latest failed\n");
+      if (control != nullptr) {
+        bk_control_close(control);
+      }
+      return -1;
+    }
 
     int rc = run_schedule(control, schedule);
 
@@ -463,17 +518,18 @@ class ClientApp {
       rc = -1;
     }
 
-    char *stats_json =
-        metrics_path == nullptr ? nullptr : read_file_alloc(metrics_path);
+    char stats_json[1024];
+    if (format_stats_json(stats_json, sizeof(stats_json)) != 0) {
+      std::fprintf(stderr, "client stats JSON overflow\n");
+      rc = -1;
+    }
     if (control != nullptr) {
-      if (bk_control_done(control, stats_json != nullptr ? stats_json : "{}") !=
-          0) {
+      if (rc == 0 && bk_control_done(control, stats_json) != 0) {
         std::fprintf(stderr, "benchkit done failed\n");
         rc = -1;
       }
       bk_control_close(control);
     }
-    std::free(stats_json);
 
     teardown();
     return rc;
@@ -562,6 +618,62 @@ class ClientApp {
       }
       iface_->RunCallbacks();
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+  }
+
+  bool send_registrations() {
+    for (const ClientConn &conn : conns_) {
+      uint8_t payload[BK_MIN_PAYLOAD] = {};
+      const bk_header header = {
+          0, 0, bk_now_ns(), 0, conn.origin_id, 0,
+      };
+      if (bk_payload_write(payload, sizeof(payload), &header) != 0 ||
+          rudp_bench_gns::send_payload(iface_, conn.conn, payload,
+                                       sizeof(payload), 0) != 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool expect_scenario_flows(const bk_schedule &schedule) {
+    if (!cfg_.scenario.present) {
+      return true;
+    }
+    if (cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+      if (cfg_.scenario.state.rate_lt == 0.0) {
+        return true;
+      }
+      for (const ClientConn &conn : conns_) {
+        if (bk_metrics_expect_latest(
+                metrics_, conn.local_index, cfg_.scenario.total_conns,
+                cfg_.scenario.state.traffic_id,
+                BK_DIRECTION_SERVER_TO_CLIENT, schedule.start_at_ns) != 0) {
+          return false;
+        }
+      }
+      return true;
+    }
+    if (cfg_.rate_lt == 0.0) {
+      return true;
+    }
+    for (const ClientConn &conn : conns_) {
+      const uint32_t first_origin =
+          cfg_.scenario.kind == BK_SCENARIO_ROOM_RELAY ? 0u
+                                                       : conn.origin_id;
+      const uint32_t end_origin =
+          cfg_.scenario.kind == BK_SCENARIO_ROOM_RELAY
+              ? cfg_.scenario.total_conns
+              : first_origin + 1u;
+      for (uint32_t origin = first_origin; origin < end_origin; ++origin) {
+        if (bk_metrics_expect_latest(metrics_, conn.local_index, origin,
+                                     cfg_.traffic_id,
+                                     BK_DIRECTION_ROOM_RELAY,
+                                     schedule.start_at_ns) != 0) {
+          return false;
+        }
+      }
     }
     return true;
   }
@@ -672,14 +784,58 @@ class ClientApp {
       for (int i = 0; i < n; ++i) {
         const int64_t user_data = msgs[i]->m_nConnUserData;
         bk_header header;
-        if (user_data >= 0 &&
+        bool accept = user_data >= 0 &&
             user_data < static_cast<int64_t>(conns_.size()) &&
             bk_payload_read(msgs[i]->m_pData,
                             static_cast<size_t>(msgs[i]->m_cbSize),
-                            &header) == 0) {
-          bk_metrics_on_recv(
-              metrics_, conns_[static_cast<size_t>(user_data)].local_index,
-              &header, now);
+                            &header) == 0 &&
+            ((msgs[i]->m_nFlags & k_nSteamNetworkingSend_Reliable) != 0) ==
+                ((header.flags & BK_FLAG_MUST_DELIVER) != 0);
+        if (accept) {
+          ClientConn &conn = conns_[static_cast<size_t>(user_data)];
+          const auto *payload =
+              static_cast<const uint8_t *>(msgs[i]->m_pData);
+          const size_t payload_size =
+              static_cast<size_t>(msgs[i]->m_cbSize);
+          if (cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+            const bool must_deliver =
+                (header.flags & BK_FLAG_MUST_DELIVER) != 0;
+            uint64_t applied = 0;
+            accept = bk_scenario_state_payload_valid(
+                         &cfg_.scenario, &header, payload_size) &&
+                     bk_authoritative_state_read_applied_input_seq(
+                         payload, payload_size, &applied) == 0 &&
+                     applied <= conn.last_input_seq &&
+                     bk_authoritative_state_validate_target_pad(
+                         payload, payload_size, conn.origin_id) == 0;
+            if (accept && applied > conn.last_applied_input_seq) {
+              conn.last_applied_input_seq = applied;
+            }
+            if (accept && !must_deliver &&
+                (header.flags & BK_FLAG_MEASURE) != 0) {
+              if (header.seq > conn.state_header_seq_recv_measured) {
+                conn.state_header_seq_recv_measured = header.seq;
+              }
+              if (applied > conn.state_applied_input_seq_recv_measured) {
+                conn.state_applied_input_seq_recv_measured = applied;
+              }
+            }
+          } else {
+            if (cfg_.scenario.present) {
+              accept = bk_scenario_client_payload_valid(
+                  &cfg_.scenario, &header, payload_size);
+            }
+            if (accept) {
+              accept = bk_payload_validate_body(payload, payload_size,
+                                                &header) == 0;
+            }
+          }
+          if (accept) {
+            bk_metrics_on_recv(metrics_, conn.local_index, &header, now);
+          }
+        }
+        if (!accept) {
+          invalid_payload_++;
         }
         msgs[i]->Release();
       }
@@ -689,11 +845,9 @@ class ClientApp {
     }
   }
 
-  // AllocateMessage で確保した message バッファに header を直接書き、
-  // SendMessages で所有権ごと渡す。SendMessageToConnection は enqueue 時に
-  // malloc+memcpy が入る(connections.cpp:2038,2044)のに対しこちらは copy 0
-  // (isteamnetworkingsockets.h:270-274)。header 32B 以降は受信側で読まれない
-  // 契約(bk_payload_read はヘッダのみ検証)なので未初期化のまま送る。
+  // AllocateMessage のバッファへ header と deterministic body pattern を直接
+  // 書き、SendMessages で所有権ごと渡す。SendMessageToConnection の enqueue
+  // 時 malloc+memcpy を避ける(connections.cpp:2038,2044)。
   void send_slot(ClientConn *conn, const bk_slot *slot, size_t payload_size) {
     bk_header header;
     make_header_from_slot(slot, conn->origin_id, bk_now_ns(), &header);
@@ -701,7 +855,8 @@ class ClientApp {
     SteamNetworkingMessage_t *msg =
         utils_->AllocateMessage(static_cast<int>(payload_size));
     if (msg != nullptr) {
-      if (bk_payload_write(msg->m_pData, payload_size, &header) == 0) {
+      if (bk_payload_write(msg->m_pData, payload_size, &header) == 0 &&
+          bk_payload_fill_body(msg->m_pData, payload_size, &header) == 0) {
         msg->m_conn = conn->conn;
         msg->m_nFlags = rudp_bench_gns::send_flags_for(header.flags);
         int64 result = 0;
@@ -712,6 +867,66 @@ class ClientApp {
       }
     }
     bk_metrics_on_slot(metrics_, &header, submitted);
+    if (submitted && BK_FLAGS_DIRECTION(header.flags) ==
+                         BK_DIRECTION_CLIENT_TO_SERVER &&
+        (header.flags & BK_FLAG_MUST_DELIVER) == 0 &&
+        header.seq > conn->last_input_seq) {
+      conn->last_input_seq = header.seq;
+    }
+    if (submitted && BK_FLAGS_DIRECTION(header.flags) ==
+                         BK_DIRECTION_CLIENT_TO_SERVER &&
+        (header.flags & (BK_FLAG_MUST_DELIVER | BK_FLAG_MEASURE)) ==
+            BK_FLAG_MEASURE &&
+        header.seq > conn->input_last_sent_measured) {
+      conn->input_last_sent_measured = header.seq;
+    }
+  }
+
+  int format_stats_json(char *buf, size_t cap) const {
+    bk_authoritative_progress progress = {};
+    if (cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+      progress.local_conns = static_cast<uint32_t>(cfg_.conns);
+      progress.roster_conns = cfg_.scenario.total_conns;
+      for (size_t i = 0; i < conns_.size(); ++i) {
+        const ClientConn &conn = conns_[i];
+        if (i == 0 || conn.input_last_sent_measured <
+                          progress.input_last_sent_min) {
+          progress.input_last_sent_min = conn.input_last_sent_measured;
+        }
+        if (conn.input_last_sent_measured > progress.input_last_sent_max) {
+          progress.input_last_sent_max = conn.input_last_sent_measured;
+        }
+        if (i == 0 || conn.state_header_seq_recv_measured <
+                          progress.state_header_seq_recv_min) {
+          progress.state_header_seq_recv_min =
+              conn.state_header_seq_recv_measured;
+        }
+        if (conn.state_header_seq_recv_measured >
+            progress.state_header_seq_recv_max) {
+          progress.state_header_seq_recv_max =
+              conn.state_header_seq_recv_measured;
+        }
+        if (i == 0 || conn.state_applied_input_seq_recv_measured <
+                          progress.state_applied_input_seq_recv_min) {
+          progress.state_applied_input_seq_recv_min =
+              conn.state_applied_input_seq_recv_measured;
+        }
+        if (conn.state_applied_input_seq_recv_measured >
+            progress.state_applied_input_seq_recv_max) {
+          progress.state_applied_input_seq_recv_max =
+              conn.state_applied_input_seq_recv_measured;
+        }
+      }
+    }
+    char progress_json[768];
+    if (bk_authoritative_progress_format("client", &progress, progress_json,
+                                         sizeof(progress_json)) != 0) {
+      return -1;
+    }
+    const int n = std::snprintf(buf, cap,
+                                "{\"invalid_payload\":%" PRIu64 ",%s}",
+                                invalid_payload_, progress_json);
+    return n > 0 && static_cast<size_t>(n) < cap ? 0 : -1;
   }
 
   void mark_unsent_until(ClientConn *conn, uint64_t cutoff_ns) {
@@ -748,6 +963,7 @@ class ClientApp {
   bk_metrics *metrics_ = nullptr;
   int connected_count_ = 0;
   bool failed_ = false;
+  uint64_t invalid_payload_ = 0;
 };
 
 void status_callback(SteamNetConnectionStatusChangedCallback_t *info) {

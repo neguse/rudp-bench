@@ -15,6 +15,10 @@ func writeSummary(path string, result *Result) error {
 
 	fmt.Fprintf(f, "rudp-bench run summary\n")
 	fmt.Fprintf(f, "transport: %s\n", result.Transport)
+	fmt.Fprintf(f, "outcome: %s\n", result.Outcome)
+	for _, reason := range result.OutcomeReasons {
+		fmt.Fprintf(f, "- outcome reason: %s\n", reason)
+	}
 	fmt.Fprintf(f, "verdict: %s\n", result.Verdict)
 	if len(result.InvalidReasons) > 0 {
 		fmt.Fprintf(f, "invalid reasons:\n")
@@ -73,10 +77,22 @@ func writeSummary(path string, result *Result) error {
 			}
 		}
 	}
+	if result.ScenarioEvaluation != nil {
+		fmt.Fprintf(f, "scenario_slo: ok=%v cause=%s\n", result.ScenarioEvaluation.OK, result.ScenarioEvaluation.Cause)
+		for _, traffic := range result.ScenarioEvaluation.Traffic {
+			fmt.Fprintf(f, "- traffic=%s/%s/%s ok=%v delivery=%.6f deadline_hit=%.6f staleness_p99_ns=%d never_received_flows=%d cause=%s\n",
+				traffic.Name, traffic.Direction, traffic.Class, traffic.OK,
+				traffic.DeliveryRatio, traffic.DeadlineHitRatio, traffic.StalenessP99NS,
+				traffic.NeverReceivedFlows, traffic.Cause)
+		}
+	}
 	if result.Netem != nil && result.Netem.Enabled {
 		fmt.Fprintf(f, "client_udp_drop_delta: InErrors=%d RcvbufErrors=%d\n",
 			result.Netem.UDPDelta.InErrors,
 			result.Netem.UDPDelta.RcvbufErrors)
+		fmt.Fprintf(f, "server_udp_drop_delta: InErrors=%d RcvbufErrors=%d\n",
+			result.Netem.ServerUDPDelta.InErrors,
+			result.Netem.ServerUDPDelta.RcvbufErrors)
 	}
 	return nil
 }

@@ -1,47 +1,27 @@
-# ADR-0003: バトルの測定マトリクスと実行手順
+# ADR-0003: 旧 battle matrix の撤回
 
-- Status: **Proposed**
+- Status: **Withdrawn before acceptance**
 - Date: 2026-07-10
-- 依存: ADR-0000, ADR-0001, ADR-0002
+- Replaced by: ADR-0001, ADR-0002
+
+## Context
+
+この ADR は、プロジェクト目的が合意される前に、transport、workload、RTT、loss、
+接続数範囲、deadline と実行順を固定しようとした案だった。いずれの値も
+ADR-0000 の目的と利用 workflow から導出されておらず、Status は Proposed のまま
+実験が先行していた。
 
 ## Decision
 
-### マトリクス
+旧 battle matrix は採用しない。そこから得た結果は、当時の条件に対する参考実験と
+してのみ保持する。
 
-| 軸 | 値 |
-|---|---|
-| transport | enet / gns / msquic / litenetlib / magiconion / websocket(+ raw_udp 天井) |
-| shape | echo(Q1)/ broadcast(Q2) |
-| workload | br=r20p128 / vr=r60p200 / video=r20p1000(ADR-0000 のアーキタイプ)。表はアーキタイプ名で提示 |
-| regime | **wired-50**: 片道 25ms・loss 0.1%(RTT 50ms)/ **rough-50**: 片道 25ms・loss 1% |
-| conns 範囲 | broadcast: 4..512 / echo: 4..4096(v1 実績 1500-3000 を覆う) |
-| deadline | 150ms 固定(ゲーム要求として regime 非依存 — 遠い回線ほど capacity が落ちるのは現実の姿) |
+新しい reference campaign は次の順で別 ADR に定める。
 
-- 遅延 25ms は「RTT 20ms は小さすぎる」(2026-07-10 ユーザー指摘)を受けた
-  改定。delay を両 regime で固定し loss だけ振ることで Q3 を純粋比較にする
-- RTT 100ms 級の第 3 regime は当面やらない。必要になったら新 ADR
-- loss は既存の決定的 losstrace 機構(再生計画 Phase 1-2)で注入
+1. ADR-0001 の3 scenarioを実行可能な共通schemaとbenchspecへ実装する
+2. environment baselineとconformanceを通す
+3. pilotで定常性、測定時間、反復間分散、実用的な解像度を観測する
+4. reference preset、SLO、network regime、resource budgetを根拠付きで提案する
+5. project ownerの合意後に固定し、confirmatory campaignを開始する
 
-### 実行順(セッション単位、各セッションは ADR-0002 の運用ルールに従う)
-
-1. 天井 4 本: raw_udp × {echo, broadcast} × {wired-50, rough-50}
-2. broadcast × wired-50 × 6 transport(Q2 主表)
-3. echo × wired-50 × 6 transport(Q1 主表)
-4. broadcast/echo × rough-50 × 6 transport(Q3)
-
-合計 ~28 sweep ≈ 10-12 セッション。途中打ち切っても完了分は表として有効。
-
-### 既存結果の扱い
-
-- 2026-07-10 の RTT20 broadcast 表(ceiling + 6 transport)は
-  「wired-v3(RTT20)参考記録」に降格。docs/battle.md に注記済み
-- gns Nagle A/B、farm censored セルの真値化などの派生実験は、
-  該当セッション内の contract に含める(単発でやらない)
-
-## Consequences
-
-- sweep の workload 語彙に echo variant が必要(現状 r20p128 等は
-  broadcast 展開)。regime 定義 wired-50 / rough-50 の config 追加も必要 —
-  実装はセッション 9(次)の contract に含める
-- 全表完成まで ~10-12 セッション。clocksource 修正(ledger #21)を挟む
-  場合は天井から取り直しになるため、**挟むなら手順 1 の前**が最安
+pilot前の便宜的な数値をreference presetや推薦根拠として固定しない。

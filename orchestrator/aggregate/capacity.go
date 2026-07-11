@@ -36,31 +36,26 @@ type CapacityKey struct {
 //     律速 or 探索上限で打ち切り。値は「真の capacity ≥ v」という下限の
 //     主張であって観測値ではない)のどちらか。
 //
-//   - 全ブロックが censored(CensoredN == N)の場合、集約全体が下限の主張に
-//     なる。各ブロックは capacity_i ≥ v_i を主張しているので、これらを
-//     まとめた最もタイトな(=最も強い)正しい主張は capacity ≥ max(v_i)。
-//     これを LowerBound に入れ、Median/IQLo/IQHi は計算しない(実測が無い)。
+//   - censored blockを1件でも含む場合、それをexact observationとして捨てたり
+//     下限値そのものとして扱ったりしない。各blockのexact/lower endpointから
+//     sample medianの保守的下限を計算し、LowerBoundだけを報告する。
 //
-//   - honest と censored が混在する場合は honest 値が実測なので、それを
-//     母集団として Median/IQLo/IQHi/CI を計算する(HonestValues 上で計算)。
-//     censored 側の下限値は「honest の最大値以下」なら honest 実測に
-//     既に上回られているので無視してよい。逆に censored の下限値が honest
-//     の最大値を上回るなら「本当はもっと高いかもしれない」という食い違いの
-//     シグナルなので握りつぶさず、MaxLowerBound に記録し Conflicted=true と
-//     する(Median 等は honest ベースのまま報告し、注記として併記する)。
+//   - 全blockがuncensoredの場合だけMedian/IQR/bootstrap CIを計算する。
+//     first tested pointが失敗したleft-censored cellはinterval estimatorが未実装の
+//     ため、誤った0を報告せず集約自体を拒否する。
 type CapacityAgg struct {
 	N            int   // このセルに寄与したブロック数(honest + censored)
 	Values       []int // 各ブロックの生の capacity 値(dirs の順序どおり)
 	CensoredN    int   // Values のうち censored/range-limited だった数
 	HonestValues []int // Values のうち非 censored の値(統計の母集団)
 
-	Median float64 // HonestValues の中央値。HonestValues が空なら 0(LowerBound を見る)
+	Median float64 // censored blockが無い場合だけ設定
 	IQLo   float64 // HonestValues の 25 パーセンタイル
 	IQHi   float64 // HonestValues の 75 パーセンタイル
 
-	LowerBound    float64 // CensoredN == N のときのみ設定: max(Values)
-	MaxLowerBound float64 // 混在かつ censored の最大値が honest の最大値を超えるときのみ設定
-	Conflicted    bool    // MaxLowerBound が設定されている(honest と censored の食い違いあり)
+	LowerBound    float64 // censored blockを含むsample medianの保守的下限
+	MaxLowerBound float64 // legacy field; new aggregation leaves zero
+	Conflicted    bool    // legacy field; new aggregation leaves false
 
 	CILo, CIHi float64 // HonestValues の bootstrap median CI。len(HonestValues) < minNForBootstrap では 0
 }
@@ -74,9 +69,23 @@ func AggregateCapacity(dirs []string) (map[CapacityKey]CapacityAgg, error) {
 		censored bool // Censored || RangeLimited(= 下限の主張)
 	}
 	byKey := map[CapacityKey][]raw{}
+	comparisonByKey := map[CapacityKey]string{}
+	campaignsByKey := map[CapacityKey]map[string]bool{}
+	evidenceByKey := map[CapacityKey]map[string]string{}
+	seenDirs := map[string]bool{}
 	var order []CapacityKey
+	hasLegacyIdentity := false
+	hasComparisonIdentity := false
 
 	for _, dir := range dirs {
+		canonicalDir, err := filepath.Abs(filepath.Clean(dir))
+		if err != nil {
+			return nil, fmt.Errorf("resolve capacity input %s: %w", dir, err)
+		}
+		if seenDirs[canonicalDir] {
+			return nil, fmt.Errorf("duplicate capacity input directory %s", dir)
+		}
+		seenDirs[canonicalDir] = true
 		var doc struct {
 			Cells []sweep.CellRecord `json:"cells"`
 		}
@@ -87,13 +96,60 @@ func AggregateCapacity(dirs []string) (map[CapacityKey]CapacityAgg, error) {
 		if err := json.Unmarshal(data, &doc); err != nil {
 			return nil, fmt.Errorf("%s/capacity.json: %w", dir, err)
 		}
+		seenInDir := map[CapacityKey]bool{}
 		for _, c := range doc.Cells {
-			key := CapacityKey{Transport: c.Transport, Workload: c.Workload, Regime: c.Regime}
+			key := CapacityKey{Transport: c.Transport, Workload: c.TestName(), Regime: c.Regime}
+			if seenInDir[key] {
+				return nil, fmt.Errorf("%s/capacity.json has duplicate cell %+v", dir, key)
+			}
+			seenInDir[key] = true
+			if c.MeasurementInvalid {
+				return nil, fmt.Errorf("capacity cell %+v is measurement_invalid; reacquisition is required before numeric aggregation", key)
+			}
+			if c.Outcome != "" {
+				return nil, fmt.Errorf("capacity cell %+v has terminal outcome %s; numeric aggregation is not defined", key, c.Outcome)
+			}
+			if c.BelowRange {
+				return nil, fmt.Errorf("capacity cell %+v is left-censored below conns=%d; interval aggregation is required", key, c.BreakConns)
+			}
+			if campaignsByKey[key] == nil {
+				campaignsByKey[key] = map[string]bool{}
+			}
+			if c.CampaignIdentity != "" {
+				if campaignsByKey[key][c.CampaignIdentity] {
+					return nil, fmt.Errorf("capacity cell %+v repeats campaign_identity %q", key, c.CampaignIdentity)
+				}
+				campaignsByKey[key][c.CampaignIdentity] = true
+			}
+			if evidenceByKey[key] == nil {
+				evidenceByKey[key] = map[string]string{}
+			}
+			for _, evidenceID := range c.EvidenceIDs {
+				if previous, ok := evidenceByKey[key][evidenceID]; ok {
+					return nil, fmt.Errorf("capacity cell %+v reuses acquisition %q in %s and %s", key, evidenceID, previous, dir)
+				}
+				evidenceByKey[key][evidenceID] = dir
+			}
+			if c.ComparisonIdentity == "" {
+				hasLegacyIdentity = true
+			} else {
+				hasComparisonIdentity = true
+			}
+			if comparison, ok := comparisonByKey[key]; ok && comparison != c.ComparisonIdentity {
+				return nil, fmt.Errorf("capacity cell %+v comparison identity mismatch: %q != %q", key, comparison, c.ComparisonIdentity)
+			}
+			comparisonByKey[key] = c.ComparisonIdentity
 			if _, ok := byKey[key]; !ok {
 				order = append(order, key)
 			}
 			byKey[key] = append(byKey[key], raw{capacity: c.Capacity, censored: c.Censored || c.RangeLimited})
 		}
+	}
+	if hasLegacyIdentity && hasComparisonIdentity {
+		return nil, fmt.Errorf("cannot mix legacy capacity cells without comparison_identity with identified cells")
+	}
+	if hasLegacyIdentity && len(dirs) > 1 {
+		return nil, fmt.Errorf("cannot aggregate multiple legacy capacity inputs without comparison_identity")
 	}
 
 	out := make(map[CapacityKey]CapacityAgg, len(byKey))
@@ -103,41 +159,29 @@ func AggregateCapacity(dirs []string) (map[CapacityKey]CapacityAgg, error) {
 	for _, key := range order {
 		rows := byKey[key]
 		agg := CapacityAgg{N: len(rows)}
-		var honestF []float64
-		maxCensored := 0
-		hasCensored := false
+		var honestF, lowerBounds []float64
 		for _, r := range rows {
 			agg.Values = append(agg.Values, r.capacity)
 			if r.censored {
 				agg.CensoredN++
-				if !hasCensored || r.capacity > maxCensored {
-					maxCensored = r.capacity
-				}
-				hasCensored = true
 			} else {
 				agg.HonestValues = append(agg.HonestValues, r.capacity)
 				honestF = append(honestF, float64(r.capacity))
 			}
+			lowerBounds = append(lowerBounds, float64(r.capacity))
 		}
 		sort.Float64s(honestF)
+		sort.Float64s(lowerBounds)
 
 		switch {
-		case agg.CensoredN == agg.N:
-			// 全 censored → 下限の主張のみ(honest 実測なし)。
-			agg.LowerBound = float64(maxCensored)
+		case agg.CensoredN > 0:
+			// Right-censored blockをexact observationとして扱わない。各値を
+			// lower endpointとしたsample medianの保守的下限だけを報告する。
+			agg.LowerBound = median(lowerBounds)
 		case len(honestF) > 0:
 			agg.Median = median(honestF)
 			agg.IQLo = percentile(honestF, 0.25)
 			agg.IQHi = percentile(honestF, 0.75)
-			if hasCensored {
-				honestMax := honestF[len(honestF)-1]
-				if float64(maxCensored) > honestMax {
-					agg.MaxLowerBound = float64(maxCensored)
-					agg.Conflicted = true
-				}
-				// maxCensored <= honestMax の場合は honest 実測に既に
-				// 上回られているので無視する(意図的に何もしない)。
-			}
 			if len(honestF) >= minNForBootstrap {
 				agg.CILo, agg.CIHi = BootstrapMedianCI(honestF, bootstrapIters, bootstrapConf, rng)
 			}
@@ -177,15 +221,15 @@ func formatCapacityAgg(a CapacityAgg, found bool) string {
 	}
 	value, lo, hi := a.Median, a.IQLo, a.IQHi
 	prefix := ""
-	if a.CensoredN == a.N {
+	if a.CensoredN > 0 {
 		// 下限のみ: honest 実測が無いので IQR は意味を持たず、値そのものを
 		// 3箇所に置いて縮退させる。
 		prefix = "≥"
 		value, lo, hi = a.LowerBound, a.LowerBound, a.LowerBound
 	}
 	suffix := ""
-	if a.Conflicted {
-		suffix = "!"
+	if a.CensoredN > 0 && a.CensoredN < a.N {
+		suffix = fmt.Sprintf(" (right-censored %d/%d)", a.CensoredN, a.N)
 	}
 	return fmt.Sprintf("%s%s [%s–%s] (n=%d)%s", prefix, formatNum(value), formatNum(lo), formatNum(hi), a.N, suffix)
 }
@@ -201,14 +245,44 @@ func CapacityCITable(aggs map[CapacityKey]CapacityAgg, regime string, onlyAnchor
 		}
 	}
 	var transports []string
+	seenTransport := map[string]bool{}
 	for _, t := range transportOrder {
 		if present[t] {
 			transports = append(transports, t)
+			seenTransport[t] = true
 		}
+	}
+	var extraTransports []string
+	for name := range present {
+		if !seenTransport[name] {
+			extraTransports = append(extraTransports, name)
+		}
+	}
+	sort.Strings(extraTransports)
+	transports = append(transports, extraTransports...)
+
+	known := map[string]bool{}
+	for _, row := range workloadRows {
+		known[row.Name] = true
+	}
+	var scenarioRows []string
+	if !onlyAnchors {
+		seen := map[string]bool{}
+		for key := range aggs {
+			if key.Regime == regime && !known[key.Workload] && !seen[key.Workload] {
+				scenarioRows = append(scenarioRows, key.Workload)
+				seen[key.Workload] = true
+			}
+		}
+		sort.Strings(scenarioRows)
 	}
 
 	var b strings.Builder
-	b.WriteString("| workload | " + strings.Join(transports, " | ") + " |\n")
+	rowHeader := "workload"
+	if len(scenarioRows) > 0 {
+		rowHeader = "scenario / workload"
+	}
+	b.WriteString("| " + rowHeader + " | " + strings.Join(transports, " | ") + " |\n")
 	b.WriteString("|---" + strings.Repeat("|---", len(transports)) + "|\n")
 	for _, row := range workloadRows {
 		isAnchor := row.Anchor != "" && row.Anchor != "synthetic"
@@ -228,8 +302,15 @@ func CapacityCITable(aggs map[CapacityKey]CapacityAgg, regime string, onlyAnchor
 		}
 		b.WriteString("\n")
 	}
-	b.WriteString("\n*凡例: `median [iqlo–iqhi] (n=N)` = ブロック横断の honest capacity 中央値と IQR。" +
-		"`≥N (n=N)`(下限のみ)= 全ブロックが打ち切りで、N は max の下限値。" +
-		"末尾 `!` = 一部ブロックの censored 下限が honest 最大値を上回る食い違いあり。*\n")
+	for _, name := range scenarioRows {
+		b.WriteString("| " + name + " |")
+		for _, t := range transports {
+			a, ok := aggs[CapacityKey{Transport: t, Workload: name, Regime: regime}]
+			b.WriteString(" " + formatCapacityAgg(a, ok) + " |")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\n*凡例: `median [iqlo–iqhi] (n=N)` = uncensored blockのcapacity中央値とIQR。" +
+		"censored blockを1件でも含む場合は、right-censored sample medianの保守的下限`≥N`だけを表示する。*\n")
 	return b.String()
 }

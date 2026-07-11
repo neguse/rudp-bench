@@ -21,6 +21,10 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
       - name: Install prerequisites
         run: |
           sudo apt-get update
@@ -44,6 +48,57 @@ jobs:
           cmake --build build-v2-enet -j
           ctest --test-dir build-v2-enet --output-on-failure
 
+      - name: raw transport build + three-scenario no-loss smoke
+        run: |
+          cmake -S servers/raw_udp -B build-v2-rawudp
+          cmake --build build-v2-rawudp -j
+          ctest --test-dir build-v2-rawudp --output-on-failure
+          go build -o build-v2/orchestrator ./orchestrator/cmd/orchestrator
+          build-v2/orchestrator run -config orchestrator/examples/local-baseline-rawudp.json
+          build-v2/orchestrator run -config orchestrator/examples/local-authoritative-rawudp.json
+          build-v2/orchestrator run -config orchestrator/examples/local-room-relay-rawudp.json
+
+      - name: managed solution build + scenario no-loss smoke
+        run: |
+          dotnet build -c Release -m:1 servers/litenetlib/LiteNetLibBench.sln
+          dotnet build -c Release -m:1 servers/websocket/WebSocketBench.sln
+          dotnet build -c Release -m:1 servers/magiconion/MagicOnionBench.sln
+          dotnet run --no-build -c Release --project servers/magiconion/BenchKit.CS.Tests/BenchKit.CS.Tests.csproj
+          python3 servers/litenetlib/smoke_test.py \
+            servers/litenetlib/LiteNetLibBench.Server/bin/Release/net10.0/LiteNetLibBench.Server \
+            servers/litenetlib/LiteNetLibBench.Client/bin/Release/net10.0/LiteNetLibBench.Client
+          python3 servers/websocket/smoke_test.py \
+            servers/websocket/WebSocketBench.Server/bin/Release/net10.0/WebSocketBench.Server \
+            servers/websocket/WebSocketBench.Client/bin/Release/net10.0/WebSocketBench.Client
+          python3 servers/magiconion/smoke_test.py \
+            servers/magiconion/MagicOnionBench.Server/bin/Release/net10.0/MagicOnionBench.Server \
+            servers/magiconion/MagicOnionBench.Client/bin/Release/net10.0/MagicOnionBench.Client
+
       # 校正: duration 不変性(loopback、netem なし)
       - name: calibration duration invariance
         run: ./calibration/duration_invariance.sh
+
+  native-solution-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        adapter: [gns, msquic]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init adapter submodule
+        run: git submodule update --init --recursive third_party/${{ matrix.adapter }}
+
+      - name: Install native prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libnuma-dev libprotobuf-dev libssl-dev libsodium-dev protobuf-compiler
+
+      - name: Build and run scenario no-loss smoke
+        run: |
+          cmake -S servers/${{ matrix.adapter }} -B build-v2-${{ matrix.adapter }} -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-v2-${{ matrix.adapter }} -j2
+          ctest --test-dir build-v2-${{ matrix.adapter }} --output-on-failure

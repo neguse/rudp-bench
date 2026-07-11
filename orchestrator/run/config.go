@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 const (
 	defaultAttemptedThreshold = 0.99
 	defaultControlTimeout     = 30 * time.Second
+	defaultStalenessPeriodNS  = 10_000_000
 )
 
 type Duration struct {
@@ -67,8 +69,13 @@ func (c *CommandConfig) UnmarshalJSON(data []byte) error {
 	case '{':
 		type alias CommandConfig
 		var a alias
-		if err := json.Unmarshal(data, &a); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&a); err != nil {
 			return err
+		}
+		if err := decoder.Decode(&struct{}{}); err != io.EOF {
+			return fmt.Errorf("command must contain exactly one JSON object")
 		}
 		*c = CommandConfig(a)
 		return nil
@@ -104,25 +111,26 @@ type RunConfig struct {
 	// reliable_echo)。指定時は orchestrator が共通フラグ(--rate-* /
 	// --payload-* / --broadcast-*)を client_command に付与し、duration
 	// 未指定なら loss イベント数規則から自動導出する。
-	Workload           string        `json:"workload,omitempty"`
-	ServerCommand      CommandConfig `json:"server_command"`
-	ClientCommand      CommandConfig `json:"client_command"`
-	ClientProcs        int           `json:"client_procs"`
-	TotalConns         int           `json:"total_conns"`
-	Warmup             Duration      `json:"warmup"`
+	Workload      string        `json:"workload,omitempty"`
+	Scenario      *ScenarioSpec `json:"scenario,omitempty"`
+	ServerCommand CommandConfig `json:"server_command"`
+	ClientCommand CommandConfig `json:"client_command"`
+	ClientProcs   int           `json:"client_procs"`
+	TotalConns    int           `json:"total_conns"`
+	Warmup        Duration      `json:"warmup"`
 	// SteadyWarmup: 定常判定つき warmup(benchspec v2)。true のとき Warmup は
 	// 上限になり、全 client の送受レート定常を検出した時点で計測窓が確定する。
 	// 接続ストーム直後の非定常区間が計測窓に入る二峰性(ledger #14)への対処
 	SteadyWarmup bool `json:"steady_warmup,omitempty"`
 	// SteadyMinWarmup: 定常が見えてもこれより早く窓を開かない。レート形状から
 	// 予測できない遅い過渡を持つ transport(enet throttle ~13s)の宣言値
-	SteadyMinWarmup Duration `json:"steady_min_warmup,omitempty"`
-	Duration        Duration `json:"duration"`
-	Drain           Duration `json:"drain"`
-	DeadlineNS         uint64        `json:"deadline_ns"`
-	StalenessPeriodNS  uint64        `json:"staleness_period_ns"`
-	Netem              *NetemRegime  `json:"netem,omitempty"`
-	NetemGateOff       bool          `json:"netem_gate_off,omitempty"`
+	SteadyMinWarmup   Duration     `json:"steady_min_warmup,omitempty"`
+	Duration          Duration     `json:"duration"`
+	Drain             Duration     `json:"drain"`
+	DeadlineNS        uint64       `json:"deadline_ns"`
+	StalenessPeriodNS uint64       `json:"staleness_period_ns"`
+	Netem             *NetemRegime `json:"netem,omitempty"`
+	NetemGateOff      bool         `json:"netem_gate_off,omitempty"`
 	// 役割別 CPU 割当(taskset -c 形式)。v1 の役割隔離レイアウトを流用:
 	// OS/background 0-2,8-10 / client 3-6,11-14 / server 7,15。
 	// OS 側 slice の退避は `orchestrator isolate setup` で行う
@@ -130,12 +138,12 @@ type RunConfig struct {
 	ClientCPUs string `json:"client_cpus,omitempty"`
 	// TCP 系(blocking send)では client の送信スケジュール遅延は transport の
 	// HoL/backpressure そのもの(測定対象)であり、farm 帰属フィルタを適用しない
-	SchedIsMeasurand bool `json:"sched_is_measurand,omitempty"`
-	OutputDir          string        `json:"output_dir"`
-	AttemptedThreshold float64       `json:"attempted_threshold,omitempty"`
-	ControlTimeout     Duration      `json:"control_timeout,omitempty"`
-	SamplerInterval    Duration      `json:"sampler_interval,omitempty"`
-	ProcessExitTimeout Duration      `json:"process_exit_timeout,omitempty"`
+	SchedIsMeasurand   bool     `json:"sched_is_measurand,omitempty"`
+	OutputDir          string   `json:"output_dir"`
+	AttemptedThreshold float64  `json:"attempted_threshold,omitempty"`
+	ControlTimeout     Duration `json:"control_timeout,omitempty"`
+	SamplerInterval    Duration `json:"sampler_interval,omitempty"`
+	ProcessExitTimeout Duration `json:"process_exit_timeout,omitempty"`
 }
 
 type NetemRegime struct {
@@ -156,8 +164,13 @@ func LoadConfig(path string) (RunConfig, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
 		return cfg, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return cfg, fmt.Errorf("config must contain exactly one JSON object")
 	}
 	return cfg.Prepare()
 }
@@ -165,11 +178,47 @@ func LoadConfig(path string) (RunConfig, error) {
 // Prepare はプログラム生成された config を LoadConfig と同じ経路で確定する
 // (workload 展開 → defaults → validation)。
 func (cfg RunConfig) Prepare() (RunConfig, error) {
+	if err := cfg.applyScenario(); err != nil {
+		return cfg, err
+	}
 	if err := cfg.applyWorkload(); err != nil {
 		return cfg, err
 	}
 	cfg = cfg.withDefaults()
 	return cfg, cfg.validate()
+}
+
+func (cfg *RunConfig) applyScenario() error {
+	if cfg.Scenario == nil {
+		return nil
+	}
+	if cfg.Workload != "" {
+		return fmt.Errorf("scenario and workload are mutually exclusive")
+	}
+	if err := cfg.Scenario.Validate(); err != nil {
+		return err
+	}
+	if cfg.StalenessPeriodNS == 0 {
+		cfg.StalenessPeriodNS = defaultStalenessPeriodNS
+	}
+	scenarioArgs := cfg.Scenario.CommonArgs(cfg.TotalConns)
+	if cfg.StalenessPeriodNS > 0 {
+		scenarioArgs = append(scenarioArgs, "--staleness-period-ns", strconv.FormatUint(cfg.StalenessPeriodNS, 10))
+	}
+	for _, command := range []*CommandConfig{&cfg.ServerCommand, &cfg.ClientCommand} {
+		for _, arg := range command.Args {
+			if strings.HasPrefix(arg, "--scenario") || strings.HasPrefix(arg, "--input-") ||
+				strings.HasPrefix(arg, "--state-") || strings.HasPrefix(arg, "--publish-") ||
+				arg == "--staleness-period-ns" {
+				return fmt.Errorf("scenario %q conflicts with explicit command arg %q", cfg.Scenario.Name, arg)
+			}
+		}
+		command.Args = append(command.Args, scenarioArgs...)
+	}
+	if cfg.Duration.Duration == 0 {
+		cfg.Duration.Duration = autoDurationScenario(*cfg.Scenario, cfg.TotalConns, cfg.Netem)
+	}
+	return nil
 }
 
 // applyWorkload はセル名を解決して client 引数と duration に展開する。
@@ -212,8 +261,8 @@ func (cfg RunConfig) withDefaults() RunConfig {
 
 func (cfg RunConfig) validate() error {
 	var errs []error
-	if cfg.Transport == "" {
-		errs = append(errs, fmt.Errorf("transport is required"))
+	if !IsSafeName(cfg.Transport) {
+		errs = append(errs, fmt.Errorf("transport must be a path-safe ASCII slug"))
 	}
 	if cfg.ServerCommand.Path == "" {
 		errs = append(errs, fmt.Errorf("server_command.path is required"))
@@ -229,6 +278,20 @@ func (cfg RunConfig) validate() error {
 	}
 	if cfg.Duration.Duration < 0 || cfg.Warmup.Duration < 0 || cfg.Drain.Duration < 0 {
 		errs = append(errs, fmt.Errorf("warmup, duration, and drain must be >= 0"))
+	}
+	if cfg.Scenario != nil {
+		for _, trafficCase := range scenarioMetricCases(*cfg.Scenario) {
+			if trafficCase.spec == nil {
+				continue
+			}
+			for className, classSpec := range enabledTrafficClasses(*trafficCase.spec) {
+				minSlots, _, err := expectedSlotRange(classSpec.RateHz, cfg.Duration.Duration, 1)
+				if err != nil || minSlots == 0 {
+					errs = append(errs, fmt.Errorf("duration %s is too short to guarantee a %s/%s slot at rate %g",
+						cfg.Duration.Duration, trafficCase.name, className, classSpec.RateHz))
+				}
+			}
+		}
 	}
 	if cfg.OutputDir == "" {
 		errs = append(errs, fmt.Errorf("output_dir is required"))

@@ -52,8 +52,8 @@ if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(
     NAME gns_loopback_smoke
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/smoke_test.py"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../raw_udp/smoke_test.py"
             "$<TARGET_FILE:gns_server>" "$<TARGET_FILE:gns_client>"
   )
-  set_tests_properties(gns_loopback_smoke PROPERTIES TIMEOUT 60)
+  set_tests_properties(gns_loopback_smoke PROPERTIES TIMEOUT 90)
 endif()

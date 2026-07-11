@@ -20,6 +20,13 @@ typedef struct {
 } bk_hist;
 
 typedef struct {
+  uint32_t origin_id;
+  uint32_t local_index;
+  uint8_t traffic_id;
+  uint8_t direction;
+  uint8_t class_index;
+  bool used;
+  bool expected;
   bool has;
   uint64_t sched_ts_ns;
   // latest-value を前進させた受信の時刻。update gap(事象アライン指標)用
@@ -30,6 +37,8 @@ typedef struct {
   uint64_t seq;
   uint32_t origin_id;
   uint32_t local_index;  // 受信側 local conn。broadcast の複製と重複を区別する
+  uint8_t traffic_id;
+  uint8_t direction;
   uint8_t class_index;
   bool used;
 } bk_seen_key;
@@ -44,11 +53,35 @@ typedef struct {
   bk_hist update_gap;
 } bk_class_metrics;
 
+typedef struct {
+  uint8_t traffic_id;
+  uint8_t direction;
+  uint8_t class_index;
+  uint64_t deadline_ns;
+  bk_class_metrics metrics;
+  bk_hist staleness;
+} bk_traffic_metrics;
+
+typedef struct {
+  uint8_t traffic_id;
+  uint8_t direction;
+  uint64_t deadline_ns;
+} bk_traffic_deadline;
+
 struct bk_metrics {
   bk_metrics_config cfg;
   bk_class_metrics classes[BK_N_CLASSES];
   bk_hist staleness;
   bk_latest *latest;
+  size_t latest_cap;
+  size_t latest_len;
+  bool legacy_single_latest;
+  bk_traffic_metrics *traffic;
+  size_t traffic_len;
+  size_t traffic_cap;
+  bk_traffic_deadline *deadlines;
+  size_t deadline_len;
+  size_t deadline_cap;
   uint64_t next_staleness_sample_ns;
   bk_seen_key *seen;
   size_t seen_cap;
@@ -68,19 +101,31 @@ static uint64_t hash_mix_u64(uint64_t x) {
   return x;
 }
 
+static uint64_t flow_hash(uint32_t local_index, uint32_t origin_id,
+                          uint8_t traffic_id, uint8_t direction,
+                          uint8_t class_index) {
+  uint64_t x = (uint64_t)origin_id * 0x9e3779b185ebca87ull;
+  x ^= (uint64_t)local_index * 0xc2b2ae3d27d4eb4full;
+  x ^= (uint64_t)traffic_id << 40u;
+  x ^= (uint64_t)direction << 52u;
+  x ^= (uint64_t)class_index << 60u;
+  return hash_mix_u64(x);
+}
+
 static uint64_t seen_hash(uint32_t local_index, uint32_t origin_id,
+                          uint8_t traffic_id, uint8_t direction,
                           uint8_t class_index, uint64_t seq) {
   uint64_t x = seq;
-  x ^= (uint64_t)origin_id * 0x9e3779b185ebca87ull;
-  x ^= (uint64_t)local_index * 0xc2b2ae3d27d4eb4full;
-  x ^= (uint64_t)class_index << 56u;
+  x ^= flow_hash(local_index, origin_id, traffic_id, direction, class_index);
   return hash_mix_u64(x);
 }
 
 static bool key_equal(const bk_seen_key *k, uint32_t local_index,
-                      uint32_t origin_id, uint8_t class_index, uint64_t seq) {
+                      uint32_t origin_id, uint8_t traffic_id,
+                      uint8_t direction, uint8_t class_index, uint64_t seq) {
   return k->used && k->local_index == local_index &&
-         k->origin_id == origin_id && k->class_index == class_index &&
+         k->origin_id == origin_id && k->traffic_id == traffic_id &&
+         k->direction == direction && k->class_index == class_index &&
          k->seq == seq;
 }
 
@@ -100,8 +145,9 @@ static int seen_rehash(bk_metrics *m, size_t new_cap) {
     if (!old[i].used) {
       continue;
     }
-    const uint64_t h = seen_hash(old[i].local_index, old[i].origin_id,
-                                 old[i].class_index, old[i].seq);
+    const uint64_t h =
+        seen_hash(old[i].local_index, old[i].origin_id, old[i].traffic_id,
+                  old[i].direction, old[i].class_index, old[i].seq);
     size_t pos = (size_t)h & (m->seen_cap - 1u);
     while (m->seen[pos].used) {
       pos = (pos + 1u) & (m->seen_cap - 1u);
@@ -114,18 +160,21 @@ static int seen_rehash(bk_metrics *m, size_t new_cap) {
 }
 
 static int seen_insert_new(bk_metrics *m, uint32_t local_index,
-                           uint32_t origin_id, uint8_t class_index,
-                           uint64_t seq, bool *is_new) {
+                           uint32_t origin_id, uint8_t traffic_id,
+                           uint8_t direction, uint8_t class_index, uint64_t seq,
+                           bool *is_new) {
   if ((m->seen_len + 1u) * 10u >= m->seen_cap * 7u) {
     if (seen_rehash(m, m->seen_cap * 2u) != 0) {
       return -1;
     }
   }
 
-  const uint64_t h = seen_hash(local_index, origin_id, class_index, seq);
+  const uint64_t h = seen_hash(local_index, origin_id, traffic_id, direction,
+                               class_index, seq);
   size_t pos = (size_t)h & (m->seen_cap - 1u);
   while (m->seen[pos].used) {
-    if (key_equal(&m->seen[pos], local_index, origin_id, class_index, seq)) {
+    if (key_equal(&m->seen[pos], local_index, origin_id, traffic_id, direction,
+                  class_index, seq)) {
       *is_new = false;
       return 0;
     }
@@ -135,11 +184,156 @@ static int seen_insert_new(bk_metrics *m, uint32_t local_index,
   m->seen[pos].used = true;
   m->seen[pos].local_index = local_index;
   m->seen[pos].origin_id = origin_id;
+  m->seen[pos].traffic_id = traffic_id;
+  m->seen[pos].direction = direction;
   m->seen[pos].class_index = class_index;
   m->seen[pos].seq = seq;
   m->seen_len++;
   *is_new = true;
   return 0;
+}
+
+static bool latest_key_equal(const bk_latest *latest, uint32_t local_index,
+                             uint32_t origin_id, uint8_t traffic_id,
+                             uint8_t direction, uint8_t class_index) {
+  return latest->used && latest->local_index == local_index &&
+         latest->origin_id == origin_id && latest->traffic_id == traffic_id &&
+         latest->direction == direction &&
+         latest->class_index == class_index;
+}
+
+static int latest_rehash(bk_metrics *m, size_t new_cap) {
+  bk_latest *old = m->latest;
+  const size_t old_cap = m->latest_cap;
+  bk_latest *next = (bk_latest *)calloc(new_cap, sizeof(*next));
+  if (next == NULL) {
+    return -1;
+  }
+  m->latest = next;
+  m->latest_cap = new_cap;
+  m->latest_len = 0;
+  for (size_t i = 0; i < old_cap; ++i) {
+    if (!old[i].used) {
+      continue;
+    }
+    const uint64_t h =
+        flow_hash(old[i].local_index, old[i].origin_id, old[i].traffic_id,
+                  old[i].direction, old[i].class_index);
+    size_t pos = (size_t)h & (new_cap - 1u);
+    while (next[pos].used) {
+      pos = (pos + 1u) & (new_cap - 1u);
+    }
+    next[pos] = old[i];
+    m->latest_len++;
+  }
+  free(old);
+  return 0;
+}
+
+static bk_latest *latest_get(bk_metrics *m, uint32_t local_index,
+                             uint32_t origin_id, uint8_t traffic_id,
+                             uint8_t direction, uint8_t class_index,
+                             bool create) {
+  if (m == NULL || origin_id >= m->cfg.max_origin_id ||
+      direction >= BK_N_DIRECTIONS || class_index >= BK_N_CLASSES) {
+    return NULL;
+  }
+  if (m->legacy_single_latest) {
+    local_index = 0;
+  } else if (local_index >= m->cfg.max_local_index) {
+    return NULL;
+  }
+  if (create && (m->latest_len + 1u) * 10u >= m->latest_cap * 7u &&
+      latest_rehash(m, m->latest_cap * 2u) != 0) {
+    return NULL;
+  }
+  const uint64_t h =
+      flow_hash(local_index, origin_id, traffic_id, direction, class_index);
+  size_t pos = (size_t)h & (m->latest_cap - 1u);
+  while (m->latest[pos].used) {
+    if (latest_key_equal(&m->latest[pos], local_index, origin_id, traffic_id,
+                         direction, class_index)) {
+      return &m->latest[pos];
+    }
+    pos = (pos + 1u) & (m->latest_cap - 1u);
+  }
+  if (!create) {
+    return NULL;
+  }
+  bk_latest *latest = &m->latest[pos];
+  latest->used = true;
+  latest->local_index = local_index;
+  latest->origin_id = origin_id;
+  latest->traffic_id = traffic_id;
+  latest->direction = direction;
+  latest->class_index = class_index;
+  m->latest_len++;
+  return latest;
+}
+
+static uint64_t traffic_deadline(const bk_metrics *m, uint8_t traffic_id,
+                                 uint8_t direction) {
+  for (size_t i = 0; i < m->deadline_len; ++i) {
+    if (m->deadlines[i].traffic_id == traffic_id &&
+        m->deadlines[i].direction == direction) {
+      return m->deadlines[i].deadline_ns;
+    }
+  }
+  return m->cfg.deadline_ns;
+}
+
+static bk_traffic_metrics *traffic_get(bk_metrics *m, uint8_t traffic_id,
+                                       uint8_t direction, uint8_t class_index,
+                                       bool create) {
+  if (m == NULL || direction >= BK_N_DIRECTIONS ||
+      class_index >= BK_N_CLASSES) {
+    return NULL;
+  }
+  for (size_t i = 0; i < m->traffic_len; ++i) {
+    bk_traffic_metrics *tm = &m->traffic[i];
+    if (tm->traffic_id == traffic_id && tm->direction == direction &&
+        tm->class_index == class_index) {
+      return tm;
+    }
+  }
+  if (!create) {
+    return NULL;
+  }
+  if (m->traffic_len == m->traffic_cap) {
+    const size_t new_cap = m->traffic_cap == 0 ? 8u : m->traffic_cap * 2u;
+    bk_traffic_metrics *next =
+        (bk_traffic_metrics *)realloc(m->traffic, new_cap * sizeof(*next));
+    if (next == NULL) {
+      return NULL;
+    }
+    m->traffic = next;
+    m->traffic_cap = new_cap;
+  }
+  bk_traffic_metrics *tm = &m->traffic[m->traffic_len++];
+  memset(tm, 0, sizeof(*tm));
+  tm->traffic_id = traffic_id;
+  tm->direction = direction;
+  tm->class_index = class_index;
+  tm->deadline_ns = traffic_deadline(m, traffic_id, direction);
+  return tm;
+}
+
+static const bk_traffic_metrics *traffic_find(const bk_metrics *m,
+                                              uint8_t traffic_id,
+                                              uint8_t direction,
+                                              uint8_t class_index) {
+  if (m == NULL || direction >= BK_N_DIRECTIONS ||
+      class_index >= BK_N_CLASSES) {
+    return NULL;
+  }
+  for (size_t i = 0; i < m->traffic_len; ++i) {
+    const bk_traffic_metrics *tm = &m->traffic[i];
+    if (tm->traffic_id == traffic_id && tm->direction == direction &&
+        tm->class_index == class_index) {
+      return tm;
+    }
+  }
+  return NULL;
 }
 
 static unsigned hist_index(uint64_t value_ns) {
@@ -226,6 +420,10 @@ bk_metrics *bk_metrics_new(const bk_metrics_config *cfg) {
   if (local.max_origin_id == 0) {
     local.max_origin_id = 1;
   }
+  const bool legacy_single_latest = local.max_local_index == 0;
+  if (legacy_single_latest) {
+    local.max_local_index = 1;
+  }
   if (local.staleness_period_ns == 0) {
     local.staleness_period_ns = BK_DEFAULT_STALENESS_PERIOD_NS;
   }
@@ -235,13 +433,9 @@ bk_metrics *bk_metrics_new(const bk_metrics_config *cfg) {
     return NULL;
   }
   m->cfg = local;
-
-  const size_t latest_count = (size_t)local.max_origin_id * BK_N_CLASSES;
-  if (latest_count / BK_N_CLASSES != (size_t)local.max_origin_id) {
-    free(m);
-    return NULL;
-  }
-  m->latest = (bk_latest *)calloc(latest_count, sizeof(*m->latest));
+  m->legacy_single_latest = legacy_single_latest;
+  m->latest_cap = 1024u;
+  m->latest = (bk_latest *)calloc(m->latest_cap, sizeof(*m->latest));
   m->seen_cap = 1024u;
   m->seen = (bk_seen_key *)calloc(m->seen_cap, sizeof(*m->seen));
   if (m->latest == NULL || m->seen == NULL) {
@@ -257,6 +451,8 @@ void bk_metrics_free(bk_metrics *m) {
   }
   free(m->latest);
   free(m->seen);
+  free(m->traffic);
+  free(m->deadlines);
   free(m);
 }
 
@@ -273,18 +469,63 @@ void bk_metrics_on_slot(bk_metrics *m, const bk_header *h, bool submitted) {
   }
 
   const int class_index = bk_class_index_from_flags(h->flags);
-  m->classes[class_index].counts.slots++;
+  const uint8_t direction = (uint8_t)BK_FLAGS_DIRECTION(h->flags);
+  bk_class_metrics *aggregate = &m->classes[class_index];
+  bk_traffic_metrics *traffic =
+      traffic_get(m, h->traffic_id, direction, (uint8_t)class_index, true);
+  aggregate->counts.slots++;
+  if (traffic != NULL) {
+    traffic->metrics.counts.slots++;
+  }
   if ((h->flags & BK_FLAG_BROADCAST) != 0) {
-    m->classes[class_index].counts.slots_broadcast++;
+    aggregate->counts.slots_broadcast++;
+    if (traffic != NULL) {
+      traffic->metrics.counts.slots_broadcast++;
+    }
   }
   if (submitted) {
-    m->classes[class_index].counts.submitted++;
+    aggregate->counts.submitted++;
+    if (traffic != NULL) {
+      traffic->metrics.counts.submitted++;
+    }
   }
+}
+
+int bk_metrics_expect_latest(bk_metrics *m, uint32_t local_index,
+                             uint32_t origin_id, uint8_t traffic_id,
+                             bk_direction direction,
+                             uint64_t first_sched_ts_ns) {
+  bk_latest *latest = latest_get(m, local_index, origin_id, traffic_id,
+                                 (uint8_t)direction, BK_CLASS_LOSS_TOLERANT,
+                                 true);
+  if (latest == NULL) {
+    return -1;
+  }
+  bk_traffic_metrics *traffic =
+      traffic_get(m, traffic_id, (uint8_t)direction,
+                  BK_CLASS_LOSS_TOLERANT, true);
+  if (!latest->expected) {
+    m->classes[BK_CLASS_LOSS_TOLERANT].counts.expected_flows++;
+    if (traffic != NULL) {
+      traffic->metrics.counts.expected_flows++;
+    }
+  }
+  if (!latest->has &&
+      (!latest->expected || first_sched_ts_ns < latest->sched_ts_ns)) {
+    latest->sched_ts_ns = first_sched_ts_ns;
+  }
+  latest->expected = true;
+  return 0;
 }
 
 void bk_metrics_on_recv(bk_metrics *m, uint32_t local_index,
                         const bk_header *h, uint64_t recv_ts_ns) {
   if (m == NULL || h == NULL) {
+    return;
+  }
+  const uint8_t direction = (uint8_t)BK_FLAGS_DIRECTION(h->flags);
+  if (direction >= BK_N_DIRECTIONS ||
+      (!m->legacy_single_latest && local_index >= m->cfg.max_local_index)) {
     return;
   }
   if ((h->flags & BK_FLAG_MEASURE) == 0) {
@@ -294,45 +535,89 @@ void bk_metrics_on_recv(bk_metrics *m, uint32_t local_index,
 
   m->raw_recv_measured++;
   const uint8_t class_index = (uint8_t)bk_class_index_from_flags(h->flags);
+  bk_class_metrics *aggregate = &m->classes[class_index];
+  bk_traffic_metrics *traffic =
+      traffic_get(m, h->traffic_id, direction, class_index, true);
   bool is_new = false;
-  if (seen_insert_new(m, local_index, h->origin_id, class_index, h->seq,
-                      &is_new) != 0) {
+  if (seen_insert_new(m, local_index, h->origin_id, h->traffic_id, direction,
+                      class_index, h->seq, &is_new) != 0) {
     return;
   }
   if (!is_new) {
-    m->classes[class_index].counts.duplicates++;
+    aggregate->counts.duplicates++;
+    if (traffic != NULL) {
+      traffic->metrics.counts.duplicates++;
+    }
     return;
   }
 
-  bk_class_metrics *cm = &m->classes[class_index];
-  cm->counts.delivered_unique++;
+  aggregate->counts.delivered_unique++;
+  if (traffic != NULL) {
+    traffic->metrics.counts.delivered_unique++;
+  }
   const uint64_t sched_latency =
       bk_saturating_sub_u64(recv_ts_ns, h->sched_ts_ns);
   const uint64_t send_latency =
       bk_saturating_sub_u64(recv_ts_ns, h->send_ts_ns);
-  hist_add(&cm->latency_sched, sched_latency);
-  hist_add(&cm->latency_send, send_latency);
-
-  if (class_index == BK_CLASS_MUST_DELIVER &&
-      sched_latency <= m->cfg.deadline_ns) {
-    cm->counts.deadline_hit++;
+  hist_add(&aggregate->latency_sched, sched_latency);
+  hist_add(&aggregate->latency_send, send_latency);
+  if (traffic != NULL) {
+    hist_add(&traffic->metrics.latency_sched, sched_latency);
+    hist_add(&traffic->metrics.latency_send, send_latency);
   }
 
-  if (h->origin_id < m->cfg.max_origin_id) {
-    bk_latest *latest =
-        &m->latest[(size_t)h->origin_id * BK_N_CLASSES + class_index];
+  if (class_index == BK_CLASS_MUST_DELIVER) {
+    const uint64_t resolved_deadline =
+        traffic != NULL ? traffic->deadline_ns : m->cfg.deadline_ns;
+    if (sched_latency <= resolved_deadline) {
+      aggregate->counts.deadline_hit++;
+      if (traffic != NULL) {
+        traffic->metrics.counts.deadline_hit++;
+      }
+    }
+  }
+
+  bk_latest *latest =
+      latest_get(m, local_index, h->origin_id, h->traffic_id, direction,
+                 class_index, true);
+  if (latest != NULL) {
+    if (!latest->expected) {
+      aggregate->counts.expected_flows++;
+      if (traffic != NULL) {
+        traffic->metrics.counts.expected_flows++;
+      }
+    }
+    if (!latest->has) {
+      aggregate->counts.observed_flows++;
+      if (traffic != NULL) {
+        traffic->metrics.counts.observed_flows++;
+      }
+    }
     if (!latest->has || h->sched_ts_ns > latest->sched_ts_ns) {
       // update gap: latest-value を前進させた受信同士の間隔(事象アライン)。
       // 古い並べ替え到着は latest を進めないので gap にも数えない
       if (latest->has) {
-        hist_add(&m->classes[class_index].update_gap,
-                 bk_saturating_sub_u64(recv_ts_ns, latest->recv_ts_ns));
+        const uint64_t gap =
+            bk_saturating_sub_u64(recv_ts_ns, latest->recv_ts_ns);
+        hist_add(&aggregate->update_gap, gap);
+        if (traffic != NULL) {
+          hist_add(&traffic->metrics.update_gap, gap);
+        }
       }
+      latest->expected = true;
       latest->has = true;
       latest->sched_ts_ns = h->sched_ts_ns;
       latest->recv_ts_ns = recv_ts_ns;
     }
   }
+}
+
+static bk_class_counts finalized_counts(bk_class_counts counts) {
+  counts.never_received_flows =
+      counts.expected_flows >= counts.observed_flows
+          ? counts.expected_flows - counts.observed_flows
+          : 0;
+  return counts;
 }
 
 void bk_metrics_tick(bk_metrics *m, uint64_t now_ns) {
@@ -345,14 +630,21 @@ void bk_metrics_tick(bk_metrics *m, uint64_t now_ns) {
 
   while (m->next_staleness_sample_ns <= now_ns) {
     const uint64_t sample_ns = m->next_staleness_sample_ns;
-    for (uint32_t origin = 0; origin < m->cfg.max_origin_id; ++origin) {
-      const bk_latest *latest =
-          &m->latest[(size_t)origin * BK_N_CLASSES + BK_CLASS_LOSS_TOLERANT];
-      if (!latest->has) {
+    for (size_t i = 0; i < m->latest_cap; ++i) {
+      const bk_latest *latest = &m->latest[i];
+      if (!latest->used || latest->class_index != BK_CLASS_LOSS_TOLERANT ||
+          (!latest->expected && !latest->has)) {
         continue;
       }
-      hist_add(&m->staleness,
-               bk_saturating_sub_u64(sample_ns, latest->sched_ts_ns));
+      const uint64_t age =
+          bk_saturating_sub_u64(sample_ns, latest->sched_ts_ns);
+      hist_add(&m->staleness, age);
+      bk_traffic_metrics *traffic =
+          traffic_get(m, latest->traffic_id, latest->direction,
+                      BK_CLASS_LOSS_TOLERANT, true);
+      if (traffic != NULL) {
+        hist_add(&traffic->staleness, age);
+      }
     }
     if (UINT64_MAX - m->next_staleness_sample_ns <
         m->cfg.staleness_period_ns) {
@@ -374,7 +666,7 @@ void bk_metrics_counts(const bk_metrics *m, bool must_deliver,
   }
   const int class_index = must_deliver ? BK_CLASS_MUST_DELIVER
                                        : BK_CLASS_LOSS_TOLERANT;
-  *out = m->classes[class_index].counts;
+  *out = finalized_counts(m->classes[class_index].counts);
 }
 
 uint64_t bk_metrics_staleness_pctl(const bk_metrics *m, double p) {
@@ -421,6 +713,101 @@ uint64_t bk_metrics_latency_pctl(const bk_metrics *m, bool must_deliver,
   return hist_percentile(&m->classes[class_index].latency_sched, p);
 }
 
+int bk_metrics_traffic_counts(const bk_metrics *m, uint8_t traffic_id,
+                              bk_direction direction, bool must_deliver,
+                              bk_class_counts *out) {
+  if (out == NULL) {
+    return -1;
+  }
+  memset(out, 0, sizeof(*out));
+  const uint8_t class_index =
+      must_deliver ? BK_CLASS_MUST_DELIVER : BK_CLASS_LOSS_TOLERANT;
+  const bk_traffic_metrics *traffic =
+      traffic_find(m, traffic_id, (uint8_t)direction, class_index);
+  if (traffic == NULL) {
+    return -1;
+  }
+  *out = finalized_counts(traffic->metrics.counts);
+  return 0;
+}
+
+uint64_t bk_metrics_traffic_staleness_pctl(const bk_metrics *m,
+                                           uint8_t traffic_id,
+                                           bk_direction direction, double p) {
+  const bk_traffic_metrics *traffic = traffic_find(
+      m, traffic_id, (uint8_t)direction, BK_CLASS_LOSS_TOLERANT);
+  return traffic == NULL ? 0 : hist_percentile(&traffic->staleness, p);
+}
+
+uint64_t bk_metrics_traffic_update_gap_pctl(const bk_metrics *m,
+                                            uint8_t traffic_id,
+                                            bk_direction direction,
+                                            bool must_deliver, double p) {
+  const uint8_t class_index =
+      must_deliver ? BK_CLASS_MUST_DELIVER : BK_CLASS_LOSS_TOLERANT;
+  const bk_traffic_metrics *traffic =
+      traffic_find(m, traffic_id, (uint8_t)direction, class_index);
+  return traffic == NULL
+             ? 0
+             : hist_percentile(&traffic->metrics.update_gap, p);
+}
+
+uint64_t bk_metrics_traffic_latency_pctl(const bk_metrics *m,
+                                         uint8_t traffic_id,
+                                         bk_direction direction,
+                                         bool must_deliver, double p) {
+  const uint8_t class_index =
+      must_deliver ? BK_CLASS_MUST_DELIVER : BK_CLASS_LOSS_TOLERANT;
+  const bk_traffic_metrics *traffic =
+      traffic_find(m, traffic_id, (uint8_t)direction, class_index);
+  return traffic == NULL
+             ? 0
+             : hist_percentile(&traffic->metrics.latency_sched, p);
+}
+
+int bk_metrics_set_traffic_deadline(bk_metrics *m, uint8_t traffic_id,
+                                    bk_direction direction,
+                                    uint64_t deadline_ns) {
+  if (m == NULL || direction < 0 || direction >= BK_N_DIRECTIONS) {
+    return -1;
+  }
+  for (size_t i = 0; i < m->deadline_len; ++i) {
+    if (m->deadlines[i].traffic_id == traffic_id &&
+        m->deadlines[i].direction == (uint8_t)direction) {
+      m->deadlines[i].deadline_ns = deadline_ns;
+      for (size_t j = 0; j < m->traffic_len; ++j) {
+        if (m->traffic[j].traffic_id == traffic_id &&
+            m->traffic[j].direction == (uint8_t)direction) {
+          m->traffic[j].deadline_ns = deadline_ns;
+        }
+      }
+      return 0;
+    }
+  }
+  if (m->deadline_len == m->deadline_cap) {
+    const size_t new_cap = m->deadline_cap == 0 ? 4u : m->deadline_cap * 2u;
+    bk_traffic_deadline *next = (bk_traffic_deadline *)realloc(
+        m->deadlines, new_cap * sizeof(*next));
+    if (next == NULL) {
+      return -1;
+    }
+    m->deadlines = next;
+    m->deadline_cap = new_cap;
+  }
+  m->deadlines[m->deadline_len++] = (bk_traffic_deadline){
+      .traffic_id = traffic_id,
+      .direction = (uint8_t)direction,
+      .deadline_ns = deadline_ns,
+  };
+  for (size_t j = 0; j < m->traffic_len; ++j) {
+    if (m->traffic[j].traffic_id == traffic_id &&
+        m->traffic[j].direction == (uint8_t)direction) {
+      m->traffic[j].deadline_ns = deadline_ns;
+    }
+  }
+  return 0;
+}
+
 static int json_hist(FILE *f, const bk_hist *h) {
   if (fprintf(f,
               "{\"scheme\":\"log2x16\",\"min_ns\":%" PRIu64
@@ -447,14 +834,19 @@ static int json_hist(FILE *f, const bk_hist *h) {
 }
 
 static int json_class(FILE *f, const bk_class_metrics *cm) {
+  const bk_class_counts counts = finalized_counts(cm->counts);
   if (fprintf(f,
               "{\"slots\":%" PRIu64 ",\"slots_broadcast\":%" PRIu64
               ",\"submitted\":%" PRIu64 ",\"delivered_unique\":%" PRIu64
               ",\"duplicates\":%" PRIu64 ",\"deadline_hit\":%" PRIu64
+              ",\"expected_flows\":%" PRIu64
+              ",\"observed_flows\":%" PRIu64
+              ",\"never_received_flows\":%" PRIu64
               ",\"latency_sched_ns\":",
-              cm->counts.slots, cm->counts.slots_broadcast,
-              cm->counts.submitted, cm->counts.delivered_unique,
-              cm->counts.duplicates, cm->counts.deadline_hit) < 0) {
+              counts.slots, counts.slots_broadcast, counts.submitted,
+              counts.delivered_unique, counts.duplicates, counts.deadline_hit,
+              counts.expected_flows, counts.observed_flows,
+              counts.never_received_flows) < 0) {
     return -1;
   }
   if (json_hist(f, &cm->latency_sched) != 0) {
@@ -478,6 +870,54 @@ static int json_class(FILE *f, const bk_class_metrics *cm) {
   return 0;
 }
 
+static const char *direction_name(uint8_t direction) {
+  switch (direction) {
+    case BK_DIRECTION_ROOM_RELAY:
+      return "room_relay";
+    case BK_DIRECTION_CLIENT_TO_SERVER:
+      return "client_to_server";
+    case BK_DIRECTION_SERVER_TO_CLIENT:
+      return "server_to_client";
+    default:
+      return "invalid";
+  }
+}
+
+static int json_traffic(FILE *f, const bk_traffic_metrics *tm) {
+  const bk_class_counts counts = finalized_counts(tm->metrics.counts);
+  const char *class_name = tm->class_index == BK_CLASS_MUST_DELIVER
+                               ? "must_deliver"
+                               : "loss_tolerant";
+  if (fprintf(f,
+              "{\"traffic_id\":%u,\"direction\":\"%s\",\"class\":\"%s\""
+              ",\"deadline_ns\":%" PRIu64
+              ",\"slots\":%" PRIu64 ",\"slots_broadcast\":%" PRIu64
+              ",\"submitted\":%" PRIu64 ",\"delivered_unique\":%" PRIu64
+              ",\"duplicates\":%" PRIu64 ",\"deadline_hit\":%" PRIu64
+              ",\"expected_flows\":%" PRIu64
+              ",\"observed_flows\":%" PRIu64
+              ",\"never_received_flows\":%" PRIu64
+              ",\"latency_sched_ns\":",
+              (unsigned)tm->traffic_id, direction_name(tm->direction),
+              class_name, tm->deadline_ns, counts.slots,
+              counts.slots_broadcast, counts.submitted,
+              counts.delivered_unique, counts.duplicates, counts.deadline_hit,
+              counts.expected_flows, counts.observed_flows,
+              counts.never_received_flows) < 0) {
+    return -1;
+  }
+  if (json_hist(f, &tm->metrics.latency_sched) != 0 ||
+      fputs(",\"latency_send_ns\":", f) == EOF ||
+      json_hist(f, &tm->metrics.latency_send) != 0 ||
+      fputs(",\"update_gap_ns\":", f) == EOF ||
+      json_hist(f, &tm->metrics.update_gap) != 0 ||
+      fputs(",\"staleness_ns\":", f) == EOF ||
+      json_hist(f, &tm->staleness) != 0 || fputc('}', f) == EOF) {
+    return -1;
+  }
+  return 0;
+}
+
 int bk_metrics_dump_json(const bk_metrics *m, const char *path) {
   if (m == NULL || path == NULL) {
     return -1;
@@ -489,7 +929,7 @@ int bk_metrics_dump_json(const bk_metrics *m, const char *path) {
   }
 
   int rc = 0;
-  if (fprintf(f, "{\"version\":1,\"histogram\":{\"scheme\":\"log2x16\","
+  if (fprintf(f, "{\"version\":2,\"histogram\":{\"scheme\":\"log2x16\","
                  "\"subbins\":%u,\"min_ns\":%" PRIu64
                  ",\"max_ns\":%" PRIu64 "},\"classes\":{\"loss_tolerant\":",
               BK_HIST_SUBBINS, (uint64_t)BK_HIST_MIN_NS,
@@ -505,7 +945,16 @@ int bk_metrics_dump_json(const bk_metrics *m, const char *path) {
   if (rc == 0 && json_class(f, &m->classes[BK_CLASS_MUST_DELIVER]) != 0) {
     rc = -1;
   }
-  if (rc == 0 && fputs("},\"staleness_ns\":", f) == EOF) {
+  if (rc == 0 && fputs("},\"traffic\":[", f) == EOF) {
+    rc = -1;
+  }
+  for (size_t i = 0; rc == 0 && i < m->traffic_len; ++i) {
+    if ((i != 0 && fputc(',', f) == EOF) ||
+        json_traffic(f, &m->traffic[i]) != 0) {
+      rc = -1;
+    }
+  }
+  if (rc == 0 && fputs("],\"staleness_ns\":", f) == EOF) {
     rc = -1;
   }
   if (rc == 0 && json_hist(f, &m->staleness) != 0) {

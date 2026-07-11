@@ -17,6 +17,7 @@ int main(void) {
       .max_origin_id = kConns,
       .deadline_ns = 2 * period_ns,
       .staleness_period_ns = period_ns,
+      .max_local_index = kConns,
   };
 
   fx_transport *t = fx_null_new(kConns);
@@ -92,5 +93,29 @@ int main(void) {
 
   bk_metrics_free(metrics);
   fx_transport_free(t);
+
+  // legacy client proc は total_conns を知らず、自 proc の origin 上限より
+  // 大きい remote origin の broadcast も受信する。aggregate delivery と
+  // duplicate 会計は従来どおり落としてはならない。
+  const bk_metrics_config legacy_cfg = {
+      .max_origin_id = 1,
+      .deadline_ns = period_ns,
+  };
+  bk_metrics *legacy = bk_metrics_new(&legacy_cfg);
+  CHECK(legacy != NULL);
+  const bk_header remote = {
+      .seq = 1,
+      .sched_ts_ns = period_ns,
+      .send_ts_ns = period_ns,
+      .flags = BK_FLAG_MEASURE | BK_FLAG_BROADCAST,
+      .origin_id = 7,
+  };
+  bk_metrics_on_recv(legacy, 5, &remote, 2 * period_ns);
+  bk_metrics_on_recv(legacy, 5, &remote, 2 * period_ns);
+  bk_class_counts remote_counts = {0};
+  bk_metrics_counts(legacy, false, &remote_counts);
+  CHECK(remote_counts.delivered_unique == 1);
+  CHECK(remote_counts.duplicates == 1);
+  bk_metrics_free(legacy);
   return 0;
 }

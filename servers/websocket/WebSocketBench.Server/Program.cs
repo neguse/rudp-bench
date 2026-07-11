@@ -47,7 +47,22 @@ builder.WebHost.ConfigureKestrel(options =>
 });
 
 var stats = new ServerStats();
-var connections = new ConcurrentDictionary<long, ConnState>();
+var connections = new ConcurrentDictionary<uint, ConnState>();
+var rosterGate = new RosterGate();
+var metricsGate = new object();
+BenchMetrics? scenarioMetrics = null;
+var progress = config.Scenario?.Kind == BenchScenarioKind.AuthoritativeState
+    ? new BenchAuthoritativeProgressTracker(0, config.Scenario.TotalConns)
+    : null;
+if (config.Scenario is { } scenario)
+{
+    scenarioMetrics = new BenchMetrics(new BenchMetricsConfig(
+        checked((uint)scenario.TotalConns + 1U),
+        0,
+        config.StalenessPeriodNs,
+        (uint)scenario.TotalConns));
+    scenario.ConfigureMetrics(scenarioMetrics);
+}
 
 var app = builder.Build();
 app.UseWebSockets(new WebSocketOptions
@@ -64,24 +79,93 @@ app.Run(async context =>
         return;
     }
 
+    if (!TryResolveConnectionId(context, config, out var connectionId))
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        return;
+    }
+    if (config.Scenario is not null && rosterGate.Frozen)
+    {
+        context.Response.StatusCode = StatusCodes.Status409Conflict;
+        return;
+    }
+
     using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
-    await HandleConnectionAsync(socket, stats, connections, stopCts.Token).ConfigureAwait(false);
+    await HandleConnectionAsync(
+        socket,
+        connectionId,
+        stats,
+        connections,
+        config.Scenario,
+        scenarioMetrics,
+        metricsGate,
+        stopCts.Token).ConfigureAwait(false);
 });
 
 await app.StartAsync(stopCts.Token).ConfigureAwait(false);
 
 await using var control = await BenchControl.ConnectFromEnvironmentAsync(stopCts.Token).ConfigureAwait(false);
+string reportJson;
 try
 {
+    BenchSchedule? schedule = null;
+    ConnState[]? devRoster = null;
     if (control is not null)
     {
         await control.HelloAsync("server", "websocket", 0, stopCts.Token).ConfigureAwait(false);
         await control.ReadyAsync(0, stopCts.Token).ConfigureAwait(false);
-        var schedule = await control.WaitScheduleAsync(stopCts.Token).ConfigureAwait(false);
-        // 定常判定つき warmup(benchspec v2): 確定窓(window)を受けたら
-        // schedule を差し替える(drain 終端の前倒しに効く)
-        schedule = await PollWindowUntilFinalAsync(control, schedule, stopCts.Token).ConfigureAwait(false);
-        await DelayUntilNsAsync(schedule.DrainUntilNs, stopCts.Token).ConfigureAwait(false);
+        schedule = await control.WaitScheduleAsync(stopCts.Token).ConfigureAwait(false);
+    }
+    else if (config.Scenario is not null)
+    {
+        devRoster = await FreezeRosterAsync(
+            connections,
+            config.Scenario.TotalConns,
+            BenchClock.AddSaturating(BenchClock.NowNs(), ServerConfig.DevConnectTimeoutNs),
+            stopCts.Token).ConfigureAwait(false);
+        var now = BenchClock.NowNs();
+        schedule = new BenchSchedule(
+            BenchClock.AddSaturating(now, ServerConfig.DevWarmupNs),
+            BenchClock.AddSaturating(BenchClock.AddSaturating(now, ServerConfig.DevWarmupNs), ServerConfig.DevDurationNs),
+            BenchClock.AddSaturating(
+                BenchClock.AddSaturating(BenchClock.AddSaturating(now, ServerConfig.DevWarmupNs), ServerConfig.DevDurationNs),
+                ServerConfig.DevDrainNs));
+    }
+
+    if (schedule is { } activeSchedule && config.Scenario is { } activeScenario)
+    {
+        var roster = devRoster ?? await FreezeRosterAsync(
+            connections,
+            activeScenario.TotalConns,
+            activeSchedule.StartAtNs,
+            stopCts.Token).ConfigureAwait(false);
+        rosterGate.Freeze();
+        if (activeScenario.Kind == BenchScenarioKind.AuthoritativeState)
+        {
+            await RunAuthoritativeAsync(
+                activeScenario,
+                activeSchedule,
+                roster,
+                scenarioMetrics!,
+                metricsGate,
+                progress!,
+                control,
+                stopCts.Token).ConfigureAwait(false);
+        }
+        else
+        {
+            if (control is not null)
+            {
+                activeSchedule = await PollWindowUntilFinalAsync(control, activeSchedule, stopCts.Token)
+                    .ConfigureAwait(false);
+            }
+            await DelayUntilNsAsync(activeSchedule.DrainUntilNs, stopCts.Token).ConfigureAwait(false);
+        }
+    }
+    else if (schedule is { } legacySchedule)
+    {
+        legacySchedule = await PollWindowUntilFinalAsync(control!, legacySchedule, stopCts.Token).ConfigureAwait(false);
+        await DelayUntilNsAsync(legacySchedule.DrainUntilNs, stopCts.Token).ConfigureAwait(false);
     }
     else
     {
@@ -92,17 +176,39 @@ catch (OperationCanceledException)
 {
 }
 
-var statsJson = stats.ToJson();
+if (scenarioMetrics is not null)
+{
+    lock (metricsGate)
+    {
+        reportJson = scenarioMetrics.ToJson();
+    }
+}
+else
+{
+    reportJson = stats.ToJson();
+}
 var metricsOut = Environment.GetEnvironmentVariable("BENCH_METRICS_OUT");
 if (!string.IsNullOrWhiteSpace(metricsOut))
 {
-    await File.WriteAllTextAsync(metricsOut, statsJson + "\n", new UTF8Encoding(false), CancellationToken.None)
+    await File.WriteAllTextAsync(metricsOut, reportJson + "\n", new UTF8Encoding(false), CancellationToken.None)
         .ConfigureAwait(false);
+}
+
+var doneJson = reportJson;
+if (progress is not null)
+{
+    var snapshot = progress.ServerSnapshot();
+    BenchProgress.WriteDiagnostics(snapshot, stats.InvalidPayloadCount);
+    doneJson = BenchProgress.AttachToDoneStats(reportJson, snapshot, stats.InvalidPayloadCount);
+}
+else if (config.Scenario is not null)
+{
+    doneJson = BenchProgress.AttachValidationToDoneStats(reportJson, stats.InvalidPayloadCount);
 }
 
 if (control is not null)
 {
-    await control.DoneAsync(statsJson, CancellationToken.None).ConfigureAwait(false);
+    await control.DoneAsync(doneJson, CancellationToken.None).ConfigureAwait(false);
 }
 
 // 計測は done で報告済み。loss 下では hung socket の graceful shutdown が
@@ -114,6 +220,211 @@ if (await Task.WhenAny(stop, Task.Delay(2000)).ConfigureAwait(false) != stop)
     Environment.Exit(0);
 }
 return 0;
+
+static bool TryResolveConnectionId(HttpContext context, ServerConfig config, out uint connectionId)
+{
+    if (config.Scenario is null)
+    {
+        connectionId = ConnIds.Next();
+        return true;
+    }
+
+    return uint.TryParse(
+               context.Request.Query["id"],
+               NumberStyles.None,
+               CultureInfo.InvariantCulture,
+               out connectionId) &&
+           connectionId < (uint)config.Scenario.TotalConns;
+}
+
+static async Task<ConnState[]> FreezeRosterAsync(
+    ConcurrentDictionary<uint, ConnState> connections,
+    int totalConns,
+    ulong deadlineNs,
+    CancellationToken cancellationToken)
+{
+    while (!cancellationToken.IsCancellationRequested && BenchClock.NowNs() < deadlineNs)
+    {
+        if (connections.Count == totalConns)
+        {
+            var roster = new ConnState[totalConns];
+            var complete = true;
+            for (var i = 0; i < totalConns; i++)
+            {
+                if (!connections.TryGetValue((uint)i, out roster[i]!))
+                {
+                    complete = false;
+                    break;
+                }
+            }
+            if (complete)
+            {
+                return roster;
+            }
+        }
+        await Task.Delay(5, cancellationToken).ConfigureAwait(false);
+    }
+    throw new InvalidOperationException(
+        $"connection roster incomplete: got {connections.Count}, want {totalConns}");
+}
+
+static async Task RunAuthoritativeAsync(
+    BenchScenarioConfig scenario,
+    BenchSchedule initialSchedule,
+    ConnState[] roster,
+    BenchMetrics metrics,
+    object metricsGate,
+    BenchAuthoritativeProgressTracker progress,
+    BenchControl? control,
+    CancellationToken cancellationToken)
+{
+    var input = scenario.ClientInput!.Value;
+    var state = scenario.ServerState!.Value;
+    var schedule = initialSchedule;
+    var plan = new BenchPlan(
+        state.Streams(BenchDirection.ServerToClient),
+        BenchClock.NowNs(),
+        schedule.StartAtNs,
+        schedule.StopAtNs);
+
+    if (input.RateLt > 0)
+    {
+        lock (metricsGate)
+        {
+            foreach (var conn in roster)
+            {
+                metrics.ExpectLatest(
+                    conn.GlobalId,
+                    conn.GlobalId,
+                    input.TrafficId,
+                    BenchDirection.ClientToServer,
+                    schedule.StartAtNs);
+            }
+        }
+    }
+
+    var markedUnsent = false;
+    while (!cancellationToken.IsCancellationRequested && BenchClock.NowNs() < schedule.DrainUntilNs)
+    {
+        var now = BenchClock.NowNs();
+        if (control is not null &&
+            await control.PollWindowAsync(cancellationToken).ConfigureAwait(false) is { } window)
+        {
+            schedule = window;
+            plan.SetWindow(window.StartAtNs, window.StopAtNs);
+        }
+
+        if (now >= schedule.StartAtNs && now < schedule.StopAtNs)
+        {
+            lock (metricsGate)
+            {
+                metrics.Tick(now);
+            }
+        }
+
+        if (now < schedule.StopAtNs)
+        {
+            while (plan.TryNext(now, out var slot))
+            {
+                progress.RecordServerStateTick(slot);
+                foreach (var target in roster)
+                {
+                    await SubmitStateAsync(target, state, slot, metrics, metricsGate, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+        }
+        else if (!markedUnsent)
+        {
+            MarkServerUnsent(plan, roster.Length, scenario.TotalConns, schedule.StopAtNs, metrics, metricsGate);
+            markedUnsent = true;
+        }
+
+        now = BenchClock.NowNs();
+        var nextNs = schedule.DrainUntilNs;
+        if (now < schedule.StopAtNs && plan.PeekNs() < nextNs)
+        {
+            nextNs = plan.PeekNs();
+        }
+        await DelayUntilNextAsync(now, nextNs, schedule.DrainUntilNs, cancellationToken).ConfigureAwait(false);
+    }
+
+    if (!markedUnsent)
+    {
+        MarkServerUnsent(plan, roster.Length, scenario.TotalConns, schedule.StopAtNs, metrics, metricsGate);
+    }
+}
+
+static async Task SubmitStateAsync(
+    ConnState target,
+    BenchTrafficConfig state,
+    BenchSlot slot,
+    BenchMetrics metrics,
+    object metricsGate,
+    CancellationToken cancellationToken)
+{
+    var sendTsNs = BenchClock.NowNs();
+    var header = new BenchHeader(
+        slot.Seq,
+        slot.SchedTsNs,
+        sendTsNs,
+        slot.Flags,
+        target.ServerOriginId,
+        slot.TrafficId);
+    var payload = new byte[state.PayloadSize((slot.Flags & BenchConstants.FlagMustDeliver) != 0)];
+    var encoded = BenchPayload.TryWrite(payload, header) &&
+                  BenchPayload.TryWriteAppliedInputSeq(payload, target.ReadAppliedInputSeq()) &&
+                  BenchPayload.TryFillTargetPad(payload, target.GlobalId);
+    var submitted = encoded && await TryEnqueueAsync(target, payload, cancellationToken).ConfigureAwait(false);
+    lock (metricsGate)
+    {
+        metrics.OnSlot(header, submitted);
+    }
+}
+
+static void MarkServerUnsent(
+    BenchPlan plan,
+    int rosterSize,
+    int totalConns,
+    ulong stopAtNs,
+    BenchMetrics metrics,
+    object metricsGate)
+{
+    var cutoff = stopAtNs == 0 ? 0 : stopAtNs - 1;
+    while (plan.TryNext(cutoff, out var slot))
+    {
+        var header = new BenchHeader(
+            slot.Seq,
+            slot.SchedTsNs,
+            0,
+            slot.Flags,
+            (uint)totalConns,
+            slot.TrafficId);
+        lock (metricsGate)
+        {
+            for (var i = 0; i < rosterSize; i++)
+            {
+                metrics.OnSlot(header, false);
+            }
+        }
+    }
+}
+
+static async Task DelayUntilNextAsync(
+    ulong nowNs,
+    ulong nextNs,
+    ulong limitNs,
+    CancellationToken cancellationToken)
+{
+    var wakeNs = Math.Min(nextNs, BenchClock.AddSaturating(nowNs, 10_000_000UL));
+    wakeNs = Math.Min(wakeNs, limitNs);
+    if (wakeNs <= nowNs || wakeNs - nowNs < 1_000_000UL)
+    {
+        await Task.Yield();
+        return;
+    }
+    await Task.Delay((int)((wakeNs - nowNs) / 1_000_000UL), cancellationToken).ConfigureAwait(false);
+}
 
 // 確定窓(window)が届くか暫定 start_at に達するまで非ブロッキングで poll する
 //(benchspec v2)。どちらでも窓は確定なので以降の poll は不要
@@ -153,11 +464,14 @@ static async Task DelayUntilNsAsync(ulong targetNs, CancellationToken cancellati
 
 static async Task HandleConnectionAsync(
     WebSocket socket,
+    uint id,
     ServerStats stats,
-    ConcurrentDictionary<long, ConnState> connections,
+    ConcurrentDictionary<uint, ConnState> connections,
+    BenchScenarioConfig? scenario,
+    BenchMetrics? metrics,
+    object metricsGate,
     CancellationToken ct)
 {
-    var id = ConnIds.Next();
     // Bounded, not unbounded: caps worst-case per-connection memory. FullMode=Wait
     // means a full queue applies backpressure (awaited by the writer/broadcaster)
     // rather than dropping -- app-level dropping would corrupt the must-deliver
@@ -171,15 +485,29 @@ static async Task HandleConnectionAsync(
         SingleReader = true,
         SingleWriter = false
     });
-    var conn = new ConnState(socket, outbound);
-    connections[id] = conn;
+    var serverOriginId = scenario is null ? 0U : (uint)scenario.TotalConns;
+    var conn = new ConnState(id, serverOriginId, socket, outbound);
+    if (!connections.TryAdd(id, conn))
+    {
+        outbound.Writer.TryComplete();
+        return;
+    }
     stats.Connected();
     var writerTask = RunWriterAsync(conn, ct);
     var buffer = new byte[BenchConstants.MaxPayloadBytes];
 
     try
     {
-        await ReceiveLoopAsync(socket, buffer, connections, conn, stats, ct).ConfigureAwait(false);
+        await ReceiveLoopAsync(
+            socket,
+            buffer,
+            connections,
+            conn,
+            stats,
+            scenario,
+            metrics,
+            metricsGate,
+            ct).ConfigureAwait(false);
     }
     catch (OperationCanceledException)
     {
@@ -217,9 +545,12 @@ static async Task HandleConnectionAsync(
 static async Task ReceiveLoopAsync(
     WebSocket socket,
     byte[] buffer,
-    ConcurrentDictionary<long, ConnState> connections,
+    ConcurrentDictionary<uint, ConnState> connections,
     ConnState self,
     ServerStats stats,
+    BenchScenarioConfig? scenario,
+    BenchMetrics? metrics,
+    object metricsGate,
     CancellationToken ct)
 {
     while (true)
@@ -232,6 +563,7 @@ static async Task ReceiveLoopAsync(
             {
                 // Oversized message (> max_payload_bytes): not a valid bench frame,
                 // drop the connection rather than silently truncating/corrupting it.
+                stats.InvalidPayload();
                 return;
             }
 
@@ -249,13 +581,46 @@ static async Task ReceiveLoopAsync(
             }
         }
 
+        if (result.MessageType != WebSocketMessageType.Binary)
+        {
+            stats.InvalidPayload();
+            continue;
+        }
+
         if (!BenchPayload.TryRead(buffer.AsSpan(0, offset), out var header))
+        {
+            stats.InvalidPayload();
+            continue;
+        }
+        if (!BenchPayload.ValidateBody(buffer.AsSpan(0, offset), header))
         {
             stats.InvalidPayload();
             continue;
         }
 
         stats.CountRecv(header.Flags);
+        if (scenario?.Kind == BenchScenarioKind.AuthoritativeState)
+        {
+            var input = scenario.ClientInput!.Value;
+            if (header.OriginId != self.GlobalId ||
+                header.TrafficId != input.TrafficId ||
+                (header.Flags & BenchConstants.FlagBroadcast) != 0 ||
+                BenchConstants.DirectionFromFlags(header.Flags) != BenchDirection.ClientToServer ||
+                !input.Accepts(header.Flags, offset))
+            {
+                stats.InvalidPayload();
+                continue;
+            }
+            if ((header.Flags & BenchConstants.FlagMustDeliver) == 0)
+            {
+                self.ApplyInputSeq(header.Seq);
+            }
+            lock (metricsGate)
+            {
+                metrics!.OnRecv(self.GlobalId, header, BenchClock.NowNs());
+            }
+            continue;
+        }
         // payload passthrough must be byte-identical; copy off the shared receive
         // buffer before handing it to (potentially several) outbound queues.
         var payload = buffer.AsSpan(0, offset).ToArray();
@@ -339,36 +704,82 @@ internal static class ServerTuning
 
 internal static class ConnIds
 {
-    private static long counter;
-    public static long Next() => Interlocked.Increment(ref counter);
+    private static int counter;
+    public static uint Next() => (uint)Interlocked.Increment(ref counter);
 }
 
-internal sealed record ConnState(WebSocket Socket, Channel<byte[]> Outbound);
-
-internal readonly record struct ServerConfig(bool Valid, bool Describe, int Port)
+internal sealed class ConnState(
+    uint globalId,
+    uint serverOriginId,
+    WebSocket socket,
+    Channel<byte[]> outbound)
 {
+    private ulong appliedInputSeq;
+
+    public uint GlobalId { get; } = globalId;
+    public uint ServerOriginId { get; } = serverOriginId;
+    public WebSocket Socket { get; } = socket;
+    public Channel<byte[]> Outbound { get; } = outbound;
+
+    public void ApplyInputSeq(ulong seq) => BenchProgress.UpdateMax(ref appliedInputSeq, seq);
+
+    public ulong ReadAppliedInputSeq() => Volatile.Read(ref appliedInputSeq);
+}
+
+internal sealed class RosterGate
+{
+    private int frozen;
+
+    public bool Frozen => Volatile.Read(ref frozen) != 0;
+
+    public void Freeze() => Interlocked.Exchange(ref frozen, 1);
+}
+
+internal readonly record struct ServerConfig(
+    bool Valid,
+    bool Describe,
+    int Port,
+    BenchScenarioConfig? Scenario,
+    ulong StalenessPeriodNs)
+{
+    public const ulong DevWarmupNs = 200_000_000UL;
+    public const ulong DevDurationNs = 2_000_000_000UL;
+    public const ulong DevDrainNs = 500_000_000UL;
+    public const ulong DevConnectTimeoutNs = 10_000_000_000UL;
+
     public static ServerConfig Parse(string[] args)
     {
+        if (!BenchScenarioConfig.TryParseArguments(args, out var scenario, out var remaining))
+        {
+            return new ServerConfig(false, false, 0, null, 0);
+        }
         var port = 0;
         var havePort = false;
-        for (var i = 0; i < args.Length; i++)
+        var stalenessPeriodNs = BenchConstants.DefaultStalenessPeriodNs;
+        for (var i = 0; i < remaining.Length; i++)
         {
-            if (args[i] == "--describe")
+            if (remaining[i] == "--describe")
             {
-                return new ServerConfig(true, true, 0);
+                return new ServerConfig(true, true, 0, scenario, stalenessPeriodNs);
             }
-            if (args[i] == "--port" && i + 1 < args.Length &&
-                int.TryParse(args[++i], NumberStyles.None, CultureInfo.InvariantCulture, out port) &&
+            if (remaining[i] == "--port" && i + 1 < remaining.Length &&
+                int.TryParse(remaining[++i], NumberStyles.None, CultureInfo.InvariantCulture, out port) &&
                 port is > 0 and <= ushort.MaxValue)
             {
                 havePort = true;
                 continue;
             }
+            if (remaining[i] == "--staleness-period-ns" && i + 1 < remaining.Length &&
+                ulong.TryParse(remaining[++i], NumberStyles.None, CultureInfo.InvariantCulture, out stalenessPeriodNs) &&
+                stalenessPeriodNs > 0)
+            {
+                continue;
+            }
 
-            return new ServerConfig(false, false, 0);
+            return new ServerConfig(false, false, 0, null, 0);
         }
 
-        return new ServerConfig(havePort, false, port);
+        return new ServerConfig(havePort, false, port, scenario, stalenessPeriodNs);
     }
 }
 
@@ -384,6 +795,7 @@ internal static class BenchDescribeWs
             .Append("\"thread_model\":\"async/task-based\",")
             .Append("\"encryption\":false,")
             .Append("\"max_payload_bytes\":").Append(BenchConstants.MaxPayloadBytes.ToString(CultureInfo.InvariantCulture)).Append(',')
+            .Append("\"scenarios\":[\"environment_baseline\",\"authoritative_state\",\"room_relay\"],")
             .Append("\"tuning\":[")
             .Append("{\"knob\":\"Kestrel.ListenOptions.Protocols\",\"value\":\"Http1 (ws:// plaintext, no TLS)\",")
             .Append("\"upstream_ref\":\"https://learn.microsoft.com/aspnet/core/fundamentals/websockets\"},")
@@ -435,6 +847,8 @@ public sealed class ServerStats
     private int connections;
 
     public int ConnectionCount => Volatile.Read(ref connections);
+
+    public ulong InvalidPayloadCount => Volatile.Read(ref invalidPayload);
 
     public void Connected() => Interlocked.Increment(ref connections);
 

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -56,10 +57,17 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 	}
 	logDir := filepath.Join(cfg.OutputDir, "logs")
 	metricsDir := filepath.Join(cfg.OutputDir, "metrics")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
+	for _, path := range []string{filepath.Join(cfg.OutputDir, "result.json"), filepath.Join(cfg.OutputDir, "summary.txt"), logDir, metricsDir} {
+		if _, err := os.Stat(path); err == nil {
+			return nil, fmt.Errorf("output_dir already contains run artifact %s; use a fresh output_dir", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect output artifact %s: %w", path, err)
+		}
+	}
+	if err := os.Mkdir(logDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir logs dir: %w", err)
 	}
-	if err := os.MkdirAll(metricsDir, 0o755); err != nil {
+	if err := os.Mkdir(metricsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir metrics dir: %w", err)
 	}
 	// sudo 実行時、権限降下したベンチマークプロセスが metrics を書けるよう
@@ -71,8 +79,9 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 	resultPath := filepath.Join(cfg.OutputDir, "result.json")
 	summaryPath := filepath.Join(cfg.OutputDir, "summary.txt")
 	result := &Result{
-		Version:   1,
+		Version:   2,
 		Transport: cfg.Transport,
+		Outcome:   OutcomeInvalid,
 		Verdict:   VerdictInvalid,
 		Config:    cfg,
 		Artifacts: map[string]string{
@@ -84,9 +93,25 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
-	var extraReasons []string
+	var extraReasons, sutFailureReasons []string
+	treatment := collectTreatment(ctx, cfg)
+	result.Treatment = &treatment
+	treatmentValidation := classifyScenarioTreatment(treatment, cfg)
+	for _, reason := range treatmentValidation.Invalid {
+		extraReasons = append(extraReasons, "treatment contract: "+reason)
+	}
+	if len(treatmentValidation.Unsupported) > 0 {
+		result.Outcome = OutcomeUnsupported
+		result.OutcomeReasons = append([]string(nil), treatmentValidation.Unsupported...)
+		result.Verdict = VerdictInvalid
+		result.InvalidReasons = nil
+		return persistRunResult(result, resultPath, summaryPath)
+	}
+	if len(extraReasons) > 0 {
+		return finishRunResult(result, GateInput{ExtraReasons: extraReasons}, resultPath, summaryPath)
+	}
 	var netemEnabled bool
-	var udpDelta netops.UDPStats
+	var udpDelta, serverUDPDelta netops.UDPStats
 	var teardown []netops.Command
 	if cfg.Netem != nil {
 		netemEnabled = true
@@ -145,6 +170,11 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 			extraReasons = append(extraReasons, fmt.Sprintf("read client netns UDP counters before run: %v", err))
 		}
 		result.Netem.UDPBefore = before
+		serverBefore, err := readNetnsUDPStats(runCtx, pair.ServerNS)
+		if err != nil {
+			extraReasons = append(extraReasons, fmt.Sprintf("read server netns UDP counters before run: %v", err))
+		}
+		result.Netem.ServerUDPBefore = serverBefore
 	}
 
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("rudp-bench-%d-%d.sock", os.Getpid(), time.Now().UnixNano()))
@@ -159,9 +189,9 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		SteadyExpectedRecvPerConn: expRecv,
 		Duration:                  cfg.Duration.Duration,
 		Drain:                     cfg.Drain.Duration,
-		HelloTimeout: cfg.ControlTimeout.Duration,
-		ReadyTimeout: cfg.ControlTimeout.Duration,
-		AckTimeout:   cfg.ControlTimeout.Duration,
+		HelloTimeout:              cfg.ControlTimeout.Duration,
+		ReadyTimeout:              cfg.ControlTimeout.Duration,
+		AckTimeout:                cfg.ControlTimeout.Duration,
 		// done は schedule ack 直後から計時され、計測窓全体を跨いで待つ
 		// (steady 時は warmup が上限なのでこの見積りが最悪ケースのまま成立)
 		DoneTimeout: cfg.Warmup.Duration + cfg.Duration.Duration + cfg.Drain.Duration + cfg.ControlTimeout.Duration,
@@ -218,7 +248,9 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 			applyWaitEvent(ev, result.Processes)
 			waitsConsumed++
 			startedOK = false
-			extraReasons = append(extraReasons, "server exited before becoming ready")
+			reason := "server exited before becoming ready: " + describeWait(result.Processes[ev.resultIndex], ev)
+			extraReasons = append(extraReasons, reason)
+			sutFailureReasons = append(sutFailureReasons, reason)
 		case <-time.After(cfg.ControlTimeout.Duration):
 			startedOK = false
 			extraReasons = append(extraReasons, "server did not become ready before control timeout")
@@ -274,6 +306,7 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 			NetemEnabled:       netemEnabled,
 			UDPDropDelta:       udpDelta,
 			ExtraReasons:       extraReasons,
+			SUTFailureReasons:  sutFailureReasons,
 		}, resultPath, summaryPath)
 	}
 
@@ -304,7 +337,9 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 			applyWaitEvent(ev, result.Processes)
 			remaining--
 			if ev.err != nil {
-				extraReasons = append(extraReasons, fmt.Sprintf("process exited before control barrier completed: %s", describeWait(result.Processes[ev.resultIndex], ev)))
+				reason := fmt.Sprintf("process exited before control barrier completed: %s", describeWait(result.Processes[ev.resultIndex], ev))
+				extraReasons = append(extraReasons, reason)
+				sutFailureReasons = append(sutFailureReasons, reason)
 				cancelRun()
 				controlDone = true
 			}
@@ -332,9 +367,20 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 
 	if remaining > 0 {
 		if timedOut := drainWaits(waitCh, remaining, cfg.ProcessExitTimeout.Duration, result.Processes); timedOut {
-			extraReasons = append(extraReasons, fmt.Sprintf("timed out waiting %s for processes to exit", cfg.ProcessExitTimeout.Duration))
+			reason := fmt.Sprintf("timed out waiting %s for processes to exit", cfg.ProcessExitTimeout.Duration)
+			extraReasons = append(extraReasons, reason)
+			if ctx.Err() == nil {
+				sutFailureReasons = append(sutFailureReasons, reason)
+			}
 			cancelRun()
 			drainWaits(waitCh, remainingExitedCount(result.Processes), cfg.ProcessExitTimeout.Duration, result.Processes)
+		}
+	}
+	if ctx.Err() == nil {
+		for _, process := range result.Processes {
+			if process.Exited && process.ExitCode != 0 {
+				sutFailureReasons = append(sutFailureReasons, fmt.Sprintf("%s proc_index=%d pid=%d exit_code=%d", process.Role, process.ProcIndex, process.PID, process.ExitCode))
+			}
 		}
 	}
 
@@ -359,11 +405,26 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		result.Netem.UDPAfter = after
 		udpDelta = netops.DeltaUDPStats(result.Netem.UDPBefore, after)
 		result.Netem.UDPDelta = udpDelta
+		serverAfter, err := readNetnsUDPStats(context.Background(), pair.ServerNS)
+		if err != nil {
+			extraReasons = append(extraReasons, fmt.Sprintf("read server netns UDP counters after run: %v", err))
+		}
+		result.Netem.ServerUDPAfter = serverAfter
+		serverUDPDelta = netops.DeltaUDPStats(result.Netem.ServerUDPBefore, serverAfter)
+		result.Netem.ServerUDPDelta = serverUDPDelta
 	}
 
-	metrics, err := MergeMetricsFiles(clientMetricPaths, cfg.TotalConns)
+	metricPaths := clientMetricPaths
+	if cfg.Scenario != nil && cfg.Scenario.Kind == ScenarioAuthoritativeState {
+		metricPaths = append([]string{serverMetrics}, clientMetricPaths...)
+	}
+	metrics, err := MergeMetricsFiles(metricPaths, cfg.TotalConns)
+	if err == nil && cfg.Scenario != nil {
+		err = ValidateScenarioMetricsFiles(serverMetrics, clientMetricPaths, connSplit, cfg.TotalConns,
+			cfg.Duration.Duration, cfg.StalenessPeriodNS, *cfg.Scenario, metrics)
+	}
 	if err != nil {
-		extraReasons = append(extraReasons, fmt.Sprintf("merge metrics: %v", err))
+		extraReasons = append(extraReasons, fmt.Sprintf("metrics contract: %v", err))
 	} else {
 		result.Metrics = metrics
 	}
@@ -375,7 +436,9 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		AttemptedThreshold: cfg.AttemptedThreshold,
 		NetemEnabled:       netemEnabled,
 		UDPDropDelta:       udpDelta,
+		ServerUDPDropDelta: serverUDPDelta,
 		ExtraReasons:       extraReasons,
+		SUTFailureReasons:  sutFailureReasons,
 	}, resultPath, summaryPath)
 }
 
@@ -538,7 +601,40 @@ func remainingExitedCount(processes []ProcessResult) int {
 // (送信 / 受信、loss 調整済み)を返す。workload 名が未指定(明示 CLI 引数の
 // 開発用 config 等)なら 0 を返し、下限チェックは無効(flat 判定のみ)になる。
 func steadyExpectedRates(cfg RunConfig) (sent, recv float64) {
-	if !cfg.SteadyWarmup || cfg.Workload == "" {
+	if !cfg.SteadyWarmup {
+		return 0, 0
+	}
+	if cfg.Scenario != nil {
+		lossClient, lossServer := 1.0, 1.0
+		if cfg.Netem != nil {
+			lossClient = 1 - cfg.Netem.ClientEgress.LossPercent/100
+			lossServer = 1 - cfg.Netem.ServerEgress.LossPercent/100
+		}
+		switch cfg.Scenario.Kind {
+		case ScenarioEnvironmentBaseline:
+			if cfg.Scenario.ClientInput != nil {
+				sent = cfg.Scenario.ClientInput.rate()
+				recv = cfg.Scenario.ClientInput.LossTolerant.RateHz*lossClient*lossServer +
+					cfg.Scenario.ClientInput.MustDeliver.RateHz
+			}
+		case ScenarioAuthoritativeState:
+			if cfg.Scenario.ClientInput != nil {
+				sent = cfg.Scenario.ClientInput.rate()
+			}
+			if cfg.Scenario.ServerState != nil {
+				recv = cfg.Scenario.ServerState.LossTolerant.RateHz*lossServer +
+					cfg.Scenario.ServerState.MustDeliver.RateHz
+			}
+		case ScenarioRoomRelay:
+			if cfg.Scenario.RoomPublish != nil {
+				sent = cfg.Scenario.RoomPublish.rate()
+				recv = cfg.Scenario.RoomPublish.LossTolerant.RateHz*float64(cfg.TotalConns)*lossClient*lossServer +
+					cfg.Scenario.RoomPublish.MustDeliver.RateHz*float64(cfg.TotalConns)
+			}
+		}
+		return sent, recv
+	}
+	if cfg.Workload == "" {
 		return 0, 0
 	}
 	w, ok := LookupWorkload(cfg.Workload)
@@ -660,9 +756,81 @@ func teardownNetem(cmds []netops.Command) {
 }
 
 func finishRunResult(result *Result, gateInput GateInput, resultPath, summaryPath string) (*Result, error) {
+	gateInput.Config = &result.Config
 	gate := EvaluateGate(gateInput)
 	result.Verdict = gate.Verdict
 	result.InvalidReasons = gate.Reasons
+	if result.Config.Scenario != nil && result.Metrics != nil {
+		evaluation := EvaluateScenarioMetrics(result.Metrics, *result.Config.Scenario)
+		result.ScenarioEvaluation = &evaluation
+	}
+	gateInput.SUTFailureReasons = gate.SUTFailureReasons
+	result.Outcome, result.OutcomeReasons = classifyRunOutcome(result, gateInput)
+	return persistRunResult(result, resultPath, summaryPath)
+}
+
+func classifyRunOutcome(result *Result, gateInput GateInput) (Outcome, []string) {
+	if result.Outcome == OutcomeUnsupported {
+		return result.Outcome, dedupeStrings(result.OutcomeReasons)
+	}
+	if len(gateInput.SUTFailureReasons) > 0 {
+		if independent := independentInvalidReasons(result.InvalidReasons); len(independent) > 0 {
+			return OutcomeInvalid, independent
+		}
+		return OutcomeFail, dedupeStrings(gateInput.SUTFailureReasons)
+	}
+	if result.Verdict != VerdictValid && !onlyAttemptedShortfall(result.InvalidReasons) {
+		return OutcomeInvalid, append([]string(nil), result.InvalidReasons...)
+	}
+	if result.Config.Scenario == nil {
+		return OutcomePass, nil
+	}
+	if result.ScenarioEvaluation == nil {
+		return OutcomeInvalid, []string{"scenario evaluation is missing"}
+	}
+	if !result.ScenarioEvaluation.CompletePrimarySLOs && result.ScenarioEvaluation.OK {
+		return OutcomeInconclusive, []string{"primary SLOs missing for " + strings.Join(result.ScenarioEvaluation.MissingPrimarySLOs, ", ")}
+	}
+	if result.ScenarioEvaluation.OK {
+		return OutcomePass, nil
+	}
+	return OutcomeFail, []string{result.ScenarioEvaluation.Cause}
+}
+
+func independentInvalidReasons(reasons []string) []string {
+	var independent []string
+	for _, reason := range reasons {
+		consequence := false
+		for _, fragment := range []string{
+			"control result is missing", "control barrier failed", "merged metrics are missing",
+			"metrics contract:", "process exited before control barrier", "server exited before becoming ready",
+			" exit_code=", " did not exit", "timed out waiting", "attempted_ratio=",
+		} {
+			if strings.Contains(reason, fragment) {
+				consequence = true
+				break
+			}
+		}
+		if !consequence {
+			independent = append(independent, reason)
+		}
+	}
+	return dedupeStrings(independent)
+}
+
+func onlyAttemptedShortfall(reasons []string) bool {
+	if len(reasons) == 0 {
+		return false
+	}
+	for _, reason := range reasons {
+		if !strings.Contains(reason, "attempted_ratio=") {
+			return false
+		}
+	}
+	return true
+}
+
+func persistRunResult(result *Result, resultPath, summaryPath string) (*Result, error) {
 	if err := writeResultJSON(resultPath, result); err != nil {
 		return result, err
 	}

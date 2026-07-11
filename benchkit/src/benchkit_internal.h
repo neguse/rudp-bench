@@ -8,6 +8,7 @@
 #define BK_CLASS_LOSS_TOLERANT 0
 #define BK_CLASS_MUST_DELIVER 1
 #define BK_N_CLASSES 2
+#define BK_N_DIRECTIONS 3
 
 static inline int bk_class_index_from_flags(uint8_t flags) {
   return (flags & BK_FLAG_MUST_DELIVER) ? BK_CLASS_MUST_DELIVER

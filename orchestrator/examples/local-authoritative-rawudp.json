@@ -1,0 +1,65 @@
+{
+  "transport": "raw_udp",
+  "server_command": [
+    "build-v2-rawudp/raw_udp_server",
+    "--port",
+    "42917"
+  ],
+  "client_command": [
+    "build-v2-rawudp/raw_udp_client",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "42917",
+    "--conns",
+    "{conns}",
+    "--proc-index",
+    "{proc_index}",
+    "--origin-base",
+    "{origin_id_start}"
+  ],
+  "client_procs": 1,
+  "total_conns": 3,
+  "scenario": {
+    "name": "authoritative-smoke",
+    "kind": "authoritative_state",
+    "client_input": {
+      "traffic_id": 1,
+      "loss_tolerant": {
+        "rate_hz": 13,
+        "payload_bytes": 64,
+        "staleness_p99_ns": 200000000,
+        "min_delivery_ratio": 1
+      },
+      "must_deliver": {
+        "rate_hz": 1,
+        "payload_bytes": 64,
+        "deadline_ns": 200000000,
+        "min_deadline_hit_ratio": 1,
+        "min_eventual_delivery_ratio": 1
+      }
+    },
+    "server_state": {
+      "traffic_id": 2,
+      "loss_tolerant": {
+        "rate_hz": 20,
+        "payload_bytes": 64,
+        "staleness_p99_ns": 200000000,
+        "min_delivery_ratio": 1
+      },
+      "must_deliver": {
+        "rate_hz": 1,
+        "payload_bytes": 64,
+        "deadline_ns": 200000000,
+        "min_deadline_hit_ratio": 1,
+        "min_eventual_delivery_ratio": 1
+      }
+    }
+  },
+  "warmup": "2s",
+  "steady_warmup": true,
+  "duration": "2s",
+  "drain": "500ms",
+  "staleness_period_ns": 10000000,
+  "output_dir": "results-v2/local-authoritative-rawudp"
+}

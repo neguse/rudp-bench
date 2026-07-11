@@ -4,6 +4,7 @@
 // (RunCallbacks が status callback を同期発火する)、パケット I/O・暗号・再送は
 // GNS 内部 service スレッドが担う。
 #include "benchkit.h"
+#include "../scenario_cli.h"
 #include "gns_common.h"
 
 #include <atomic>
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <new>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -53,6 +55,10 @@ void shared_payload_free_cb(SteamNetworkingMessage_t *msg) {
 constexpr int kRecvBatch = 256;
 constexpr int kMaxDrainBatches = 16;  // 1 service あたり最大 4096 msg
 constexpr uint64_t kServiceSliceNs = 1000000ull;  // 1ms(アイドル時のみ)
+constexpr uint64_t kDevWarmupNs = 200000000ull;
+constexpr uint64_t kDevDurationNs = 2000000000ull;
+constexpr uint64_t kDevDrainNs = 500000000ull;
+constexpr uint32_t kMaxConns = 4095;
 
 enum ClassIndex {
   CLASS_LOSS_TOLERANT = 0,
@@ -73,6 +79,13 @@ struct ServerStats {
   uint64_t submit_measured[CLASS_COUNT][DIST_COUNT] = {};
   uint64_t send_failed[CLASS_COUNT][DIST_COUNT] = {};
   uint64_t invalid_payload = 0;
+  uint64_t server_state_ticks = 0;
+};
+
+struct ServerConfig {
+  uint16_t port = 0;
+  uint64_t staleness_period_ns = 10000000ull;
+  bk_scenario_cli scenario = {};
 };
 
 volatile sig_atomic_t g_stop = 0;
@@ -106,7 +119,7 @@ void usage(const char *argv0) {
   std::fprintf(stderr, "usage: %s --port PORT\n", argv0);
 }
 
-int parse_args(int argc, char **argv, uint16_t *port) {
+int parse_args(int argc, char **argv, ServerConfig *cfg) {
   bool have_port = false;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--describe") == 0) {
@@ -114,32 +127,135 @@ int parse_args(int argc, char **argv, uint16_t *port) {
       std::exit(EXIT_SUCCESS);
     }
     if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
-      if (parse_u16(argv[++i], port) != 0 || *port == 0) {
+      if (parse_u16(argv[++i], &cfg->port) != 0 || cfg->port == 0) {
         return -1;
       }
       have_port = true;
       continue;
     }
+    if (std::strcmp(argv[i], "--staleness-period-ns") == 0 &&
+        i + 1 < argc) {
+      if (bk_scenario_parse_u64(argv[++i], &cfg->staleness_period_ns) != 0 ||
+          cfg->staleness_period_ns == 0) {
+        return -1;
+      }
+      continue;
+    }
+    const int parsed =
+        bk_scenario_cli_parse(argc, argv, &i, &cfg->scenario);
+    if (parsed < 0) {
+      return -1;
+    }
+    if (parsed > 0) {
+      continue;
+    }
     return -1;
   }
-  return have_port ? 0 : -1;
+  if (!have_port ||
+      bk_scenario_cli_validate(
+          &cfg->scenario, kMaxConns,
+          rudp_bench_gns::kMaxPayloadMustDeliver) != 0) {
+    return -1;
+  }
+  const auto valid_limits = [](const bk_scenario_traffic &value) {
+    return (value.rate_lt == 0.0 ||
+            value.payload_lt <= rudp_bench_gns::kMaxPayloadLossTolerant) &&
+           (value.rate_md == 0.0 ||
+            value.payload_md <= rudp_bench_gns::kMaxPayloadMustDeliver);
+  };
+  if (cfg->scenario.present) {
+    const bk_scenario_traffic *traffic = nullptr;
+    if (cfg->scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+      if (!valid_limits(cfg->scenario.input) ||
+          !valid_limits(cfg->scenario.state)) {
+        return -1;
+      }
+    } else {
+      traffic = cfg->scenario.kind == BK_SCENARIO_ROOM_RELAY
+                    ? &cfg->scenario.publish
+                    : &cfg->scenario.input;
+      if (!valid_limits(*traffic)) {
+        return -1;
+      }
+    }
+  }
+  return 0;
 }
 
-int write_metrics_out(const char *json) {
+int write_metrics_out(const bk_metrics *metrics) {
   const char *path = std::getenv("BENCH_METRICS_OUT");
   if (path == nullptr || *path == '\0') {
     return 0;
   }
-  FILE *f = std::fopen(path, "w");
-  if (f == nullptr) {
+  return bk_metrics_dump_json(metrics, path);
+}
+
+int interval_from_rate(double rate_hz, uint64_t *out) {
+  if (rate_hz <= 0.0) {
     return -1;
   }
-  const int rc =
-      std::fputs(json, f) == EOF || std::fputc('\n', f) == EOF ? -1 : 0;
-  if (std::fclose(f) != 0) {
+  const double interval = 1000000000.0 / rate_hz;
+  if (interval < 1.0 || interval > static_cast<double>(UINT64_MAX)) {
     return -1;
   }
-  return rc;
+  *out = static_cast<uint64_t>(interval + 0.5);
+  if (*out == 0) {
+    *out = 1;
+  }
+  return 0;
+}
+
+int build_state_streams(const ServerConfig &cfg, bk_stream *streams,
+                        int *n_streams) {
+  int n = 0;
+  uint64_t interval_ns = 0;
+  if (cfg.scenario.state.rate_lt > 0.0) {
+    if (interval_from_rate(cfg.scenario.state.rate_lt, &interval_ns) != 0) {
+      return -1;
+    }
+    streams[n].must_deliver = false;
+    streams[n].broadcast = false;
+    streams[n].traffic_id = cfg.scenario.state.traffic_id;
+    streams[n].direction = BK_DIRECTION_SERVER_TO_CLIENT;
+    streams[n].interval_ns = interval_ns;
+    ++n;
+  }
+  if (cfg.scenario.state.rate_md > 0.0) {
+    if (interval_from_rate(cfg.scenario.state.rate_md, &interval_ns) != 0) {
+      return -1;
+    }
+    streams[n].must_deliver = true;
+    streams[n].broadcast = false;
+    streams[n].traffic_id = cfg.scenario.state.traffic_id;
+    streams[n].direction = BK_DIRECTION_SERVER_TO_CLIENT;
+    streams[n].interval_ns = interval_ns;
+    ++n;
+  }
+  *n_streams = n;
+  return n == 0 ? -1 : 0;
+}
+
+uint64_t mark_state_unsent(const ServerConfig &cfg, bk_metrics *metrics,
+                           bk_plan *plan, uint64_t cutoff_ns) {
+  uint64_t measured_lt_ticks = 0;
+  bk_slot slot;
+  while (bk_plan_next(plan, cutoff_ns, &slot)) {
+    if ((slot.flags & (BK_FLAG_MEASURE | BK_FLAG_MUST_DELIVER)) ==
+        BK_FLAG_MEASURE) {
+      measured_lt_ticks++;
+    }
+    for (uint32_t target = 0; target < cfg.scenario.total_conns; ++target) {
+      (void)target;
+      bk_header header = {};
+      header.seq = slot.seq;
+      header.sched_ts_ns = slot.sched_ts_ns;
+      header.flags = static_cast<uint8_t>(slot.flags & ~BK_FLAG_BROADCAST);
+      header.origin_id = cfg.scenario.total_conns;
+      header.traffic_id = slot.traffic_id;
+      bk_metrics_on_slot(metrics, &header, false);
+    }
+  }
+  return measured_lt_ticks;
 }
 
 class ServerApp;
@@ -149,7 +265,39 @@ void status_callback(SteamNetConnectionStatusChangedCallback_t *info);
 
 class ServerApp {
  public:
+  explicit ServerApp(const ServerConfig &cfg) : cfg_(cfg) {}
+
   bool start(uint16_t port) {
+    const bool authoritative =
+        cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE;
+    bk_metrics_config metrics_cfg = {};
+    metrics_cfg.max_origin_id =
+        cfg_.scenario.present ? cfg_.scenario.total_conns + 1u : 1u;
+    metrics_cfg.deadline_ns =
+        authoritative ? cfg_.scenario.input.deadline_ns : 0;
+    metrics_cfg.staleness_period_ns = cfg_.staleness_period_ns;
+    metrics_cfg.max_local_index =
+        authoritative ? cfg_.scenario.total_conns : 0;
+    metrics_ = bk_metrics_new(&metrics_cfg);
+    if (metrics_ == nullptr) {
+      return false;
+    }
+    if (authoritative &&
+        (bk_metrics_set_traffic_deadline(
+             metrics_, cfg_.scenario.input.traffic_id,
+             BK_DIRECTION_CLIENT_TO_SERVER,
+             cfg_.scenario.input.deadline_ns) != 0 ||
+         bk_metrics_set_traffic_deadline(
+             metrics_, cfg_.scenario.state.traffic_id,
+             BK_DIRECTION_SERVER_TO_CLIENT,
+             cfg_.scenario.state.deadline_ns) != 0)) {
+      return false;
+    }
+    if (authoritative) {
+      roster_.assign(cfg_.scenario.total_conns,
+                     k_HSteamNetConnection_Invalid);
+      applied_input_seq_.assign(cfg_.scenario.total_conns, 0);
+    }
     rudp_bench_gns::ensure_gns();
     iface_ = SteamNetworkingSockets();
     utils_ = SteamNetworkingUtils();
@@ -196,7 +344,8 @@ class ServerApp {
       for (int i = 0; i < n; ++i) {
         handle_payload(msgs[i]->m_conn,
                        static_cast<const uint8_t *>(msgs[i]->m_pData),
-                       static_cast<size_t>(msgs[i]->m_cbSize));
+                       static_cast<size_t>(msgs[i]->m_cbSize),
+                       msgs[i]->m_nFlags, msgs[i]->m_nConnUserData);
         msgs[i]->Release();
       }
       total += n;
@@ -221,11 +370,26 @@ class ServerApp {
 
       case k_ESteamNetworkingConnectionState_Connected:
         iface_->SetConnectionPollGroup(conn, poll_group_);
+        iface_->SetConnectionUserData(conn, -1);
         conns_.push_back(conn);
+        active_conns_.insert(conn);
         break;
 
       case k_ESteamNetworkingConnectionState_ClosedByPeer:
       case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
+        {
+          const int64 registered_origin = iface_->GetConnectionUserData(conn);
+          if (registered_origin >= 0 &&
+              registered_origin < static_cast<int64>(roster_.size()) &&
+              roster_[static_cast<size_t>(registered_origin)] == conn) {
+            roster_[static_cast<size_t>(registered_origin)] =
+                k_HSteamNetConnection_Invalid;
+            if (!roster_frozen_) {
+              registered_count_--;
+            }
+          }
+        }
+        active_conns_.erase(conn);
         iface_->CloseConnection(conn, 0, nullptr, false);
         for (size_t i = 0; i < conns_.size(); ++i) {
           if (conns_[i] == conn) {
@@ -254,11 +418,92 @@ class ServerApp {
       iface_->DestroyPollGroup(poll_group_);
       poll_group_ = k_HSteamNetPollGroup_Invalid;
     }
+    bk_metrics_free(metrics_);
+    metrics_ = nullptr;
+  }
+
+  bool roster_complete() const {
+    return cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE &&
+           registered_count_ == cfg_.scenario.total_conns;
+  }
+
+  void freeze_roster() { roster_frozen_ = true; }
+
+  bk_metrics *metrics() const { return metrics_; }
+
+  int expect_client_inputs(const bk_schedule &schedule) {
+    if (cfg_.scenario.input.rate_lt == 0.0) {
+      return 0;
+    }
+    for (uint32_t origin = 0; origin < cfg_.scenario.total_conns; ++origin) {
+      if (bk_metrics_expect_latest(
+              metrics_, origin, origin, cfg_.scenario.input.traffic_id,
+              BK_DIRECTION_CLIENT_TO_SERVER, schedule.start_at_ns) != 0) {
+        return -1;
+      }
+    }
+    return 0;
+  }
+
+  void send_state_slot(const bk_slot &slot) {
+    if ((slot.flags & (BK_FLAG_MEASURE | BK_FLAG_MUST_DELIVER)) ==
+        BK_FLAG_MEASURE) {
+      stats_.server_state_ticks++;
+    }
+    const size_t payload_size =
+        (slot.flags & BK_FLAG_MUST_DELIVER) != 0
+            ? cfg_.scenario.state.payload_md
+            : cfg_.scenario.state.payload_lt;
+    for (uint32_t target = 0; target < cfg_.scenario.total_conns; ++target) {
+      bk_header header = {};
+      header.seq = slot.seq;
+      header.sched_ts_ns = slot.sched_ts_ns;
+      header.flags = static_cast<uint8_t>(slot.flags & ~BK_FLAG_BROADCAST);
+      header.origin_id = cfg_.scenario.total_conns;
+      header.traffic_id = slot.traffic_id;
+      bool submitted = false;
+      SteamNetworkingMessage_t *msg =
+          utils_->AllocateMessage(static_cast<int>(payload_size));
+      if (msg != nullptr &&
+          bk_authoritative_state_write_applied_input_seq(
+              msg->m_pData, payload_size, applied_input_seq_[target]) == 0 &&
+          bk_authoritative_state_fill_target_pad(msg->m_pData, payload_size,
+                                                  target) == 0 &&
+          roster_[target] != k_HSteamNetConnection_Invalid) {
+        header.send_ts_ns = bk_now_ns();
+        if (bk_payload_write(msg->m_pData, payload_size, &header) != 0) {
+          msg->Release();
+          msg = nullptr;
+        }
+      }
+      if (msg != nullptr &&
+          roster_[target] != k_HSteamNetConnection_Invalid &&
+          header.send_ts_ns != 0) {
+        msg->m_conn = roster_[target];
+        msg->m_nFlags = rudp_bench_gns::send_flags_for(header.flags);
+        int64 result = 0;
+        iface_->SendMessages(1, &msg, &result);
+        submitted = result > 0;
+      } else if (msg != nullptr) {
+        msg->Release();
+      }
+      bk_metrics_on_slot(metrics_, &header, submitted);
+    }
   }
 
   int format_stats_json(char *buf, size_t cap) const {
     const ServerStats &s = stats_;
-    const int n = std::snprintf(
+    bk_authoritative_progress progress = {};
+    if (cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+      progress.roster_conns = registered_count_;
+      progress.server_state_ticks = s.server_state_ticks;
+    }
+    char progress_json[768];
+    if (bk_authoritative_progress_format("server", &progress, progress_json,
+                                         sizeof(progress_json)) != 0) {
+      return -1;
+    }
+    const int prefix = std::snprintf(
         buf, cap,
         "{\"recv\":{\"loss_tolerant\":{\"echo\":%" PRIu64
         ",\"broadcast\":%" PRIu64 "},\"must_deliver\":{\"echo\":%" PRIu64
@@ -274,7 +519,7 @@ class ServerApp {
         ",\"broadcast\":%" PRIu64
         "}},\"send_failed\":{\"loss_tolerant\":{\"echo\":%" PRIu64
         ",\"broadcast\":%" PRIu64 "},\"must_deliver\":{\"echo\":%" PRIu64
-        ",\"broadcast\":%" PRIu64 "}},\"invalid_payload\":%" PRIu64 "}",
+        ",\"broadcast\":%" PRIu64 "}},\"invalid_payload\":%" PRIu64 ",",
         s.recv[CLASS_LOSS_TOLERANT][DIST_ECHO],
         s.recv[CLASS_LOSS_TOLERANT][DIST_BROADCAST],
         s.recv[CLASS_MUST_DELIVER][DIST_ECHO],
@@ -296,16 +541,92 @@ class ServerApp {
         s.send_failed[CLASS_MUST_DELIVER][DIST_ECHO],
         s.send_failed[CLASS_MUST_DELIVER][DIST_BROADCAST],
         s.invalid_payload);
-    return (n > 0 && static_cast<size_t>(n) < cap) ? 0 : -1;
+    if (prefix <= 0 || static_cast<size_t>(prefix) >= cap) {
+      return -1;
+    }
+    const int suffix = std::snprintf(buf + prefix, cap - prefix, "%s}",
+                                     progress_json);
+    return suffix > 0 && static_cast<size_t>(suffix) < cap - prefix ? 0 : -1;
+  }
+
+  void add_server_state_ticks(uint64_t ticks) {
+    stats_.server_state_ticks += ticks;
   }
 
  private:
   void handle_payload(HSteamNetConnection origin, const uint8_t *data,
-                      size_t len) {
+                      size_t len, int transport_flags,
+                      int64 captured_origin) {
+    // A message can remain queued after its disconnect callback has closed the
+    // handle. Never call connection APIs for a handle no longer in our set.
+    if (active_conns_.find(origin) == active_conns_.end()) {
+      return;
+    }
     bk_header header;
     if (bk_payload_read(data, len, &header) != 0) {
       stats_.invalid_payload++;
       return;
+    }
+    const bool transport_reliable =
+        (transport_flags & k_nSteamNetworkingSend_Reliable) != 0;
+    const bool header_reliable =
+        (header.flags & BK_FLAG_MUST_DELIVER) != 0;
+    if (transport_reliable != header_reliable) {
+      stats_.invalid_payload++;
+      return;
+    }
+
+    const bool registration = bk_payload_is_registration(&header, len) != 0;
+    if (registration && cfg_.scenario.present &&
+        header.origin_id >= cfg_.scenario.total_conns) {
+      stats_.invalid_payload++;
+      return;
+    }
+    if (!registration &&
+        ((cfg_.scenario.present &&
+          !bk_scenario_client_payload_valid(&cfg_.scenario, &header, len)) ||
+         bk_payload_validate_body(data, len, &header) != 0)) {
+      stats_.invalid_payload++;
+      return;
+    }
+    if (registration &&
+        cfg_.scenario.kind != BK_SCENARIO_AUTHORITATIVE_STATE) {
+      return;
+    }
+
+    int64 registered_origin = captured_origin;
+    if (cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+      if (!registration &&
+          !bk_scenario_client_payload_valid(&cfg_.scenario, &header, len)) {
+        stats_.invalid_payload++;
+        return;
+      }
+      if (registered_origin < 0 && roster_[header.origin_id] == origin) {
+        // Messages already queued when registration was processed retain the
+        // previous (-1) connection-user-data snapshot.
+        registered_origin = static_cast<int64>(header.origin_id);
+      }
+      if (registered_origin < 0) {
+        if (roster_frozen_ ||
+            roster_[header.origin_id] != k_HSteamNetConnection_Invalid ||
+            !iface_->SetConnectionUserData(
+                origin, static_cast<int64>(header.origin_id))) {
+          stats_.invalid_payload++;
+          return;
+        }
+        registered_origin = static_cast<int64>(header.origin_id);
+        roster_[header.origin_id] = origin;
+        applied_input_seq_[header.origin_id] = 0;
+        registered_count_++;
+      } else if (registered_origin != static_cast<int64>(header.origin_id) ||
+                 registered_origin >= static_cast<int64>(roster_.size()) ||
+                 roster_[static_cast<size_t>(registered_origin)] != origin) {
+        stats_.invalid_payload++;
+        return;
+      }
+      if (registration) {
+        return;
+      }
     }
 
     const ClassIndex cls = class_from_flags(header.flags);
@@ -314,6 +635,17 @@ class ServerApp {
     stats_.recv[cls][dist]++;
     if (measured) {
       stats_.recv_measured[cls][dist]++;
+    }
+
+    if (cfg_.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE) {
+      const size_t target = static_cast<size_t>(registered_origin);
+      if ((header.flags & BK_FLAG_MUST_DELIVER) == 0 &&
+          header.seq > applied_input_seq_[target]) {
+        applied_input_seq_[target] = header.seq;
+      }
+      bk_metrics_on_recv(metrics_, static_cast<uint32_t>(target), &header,
+                         bk_now_ns());
+      return;
     }
 
     if (dist == DIST_ECHO) {
@@ -374,9 +706,16 @@ class ServerApp {
   HSteamListenSocket listen_sock_ = k_HSteamListenSocket_Invalid;
   HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
   std::vector<HSteamNetConnection> conns_;
+  std::unordered_set<HSteamNetConnection> active_conns_;
+  std::vector<HSteamNetConnection> roster_;
+  std::vector<uint64_t> applied_input_seq_;
+  uint32_t registered_count_ = 0;
+  bool roster_frozen_ = false;
   std::vector<SteamNetworkingMessage_t *> bcast_msgs_;   // fanout scratch
   std::vector<int64> bcast_results_;
   ServerStats stats_;
+  ServerConfig cfg_;
+  bk_metrics *metrics_ = nullptr;
 };
 
 void status_callback(SteamNetConnectionStatusChangedCallback_t *info) {
@@ -388,8 +727,8 @@ void status_callback(SteamNetConnectionStatusChangedCallback_t *info) {
 }  // namespace
 
 int main(int argc, char **argv) {
-  uint16_t port = 0;
-  if (parse_args(argc, argv, &port) != 0) {
+  ServerConfig cfg;
+  if (parse_args(argc, argv, &cfg) != 0) {
     usage(argv[0]);
     return EXIT_FAILURE;
   }
@@ -400,9 +739,9 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  auto *app = new ServerApp();
+  auto *app = new ServerApp(cfg);
   g_app = app;
-  if (!app->start(port)) {
+  if (!app->start(cfg.port)) {
     return EXIT_FAILURE;
   }
 
@@ -436,50 +775,118 @@ int main(int argc, char **argv) {
     }
   }
 
+  const bool authoritative =
+      cfg.scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE;
+  bool schedule_valid = control != nullptr;
   bool window_final = false;
+  bool roster_frozen = false;
+  bool state_marked_unsent = false;
+  int run_rc = 0;
+  bk_plan *state_plan = nullptr;
   while (!g_stop) {
-    uint64_t sleep_ns = kServiceSliceNs;
-    if (control != nullptr) {
-      const uint64_t now = bk_now_ns();
-      // 定常判定つき warmup(benchspec v2): 確定窓(window)を受けたら
-      // schedule を差し替える(drain 終端の前倒しに効く)
-      if (!window_final) {
-        if (now >= schedule.start_at_ns) {
-          window_final = true;
-        } else {
-          const int wr = bk_control_poll_window(control, &schedule);
-          if (wr < 0) {
-            std::fprintf(stderr, "benchkit window poll failed\n");
-            bk_control_close(control);
-            return EXIT_FAILURE;
-          }
-          if (wr == 1) {
-            window_final = true;
-          }
-        }
-      }
-      if (now >= schedule.drain_until_ns) {
-        break;
-      }
-      const uint64_t remain_ns = schedule.drain_until_ns - now;
-      if (remain_ns < sleep_ns) {
-        sleep_ns = remain_ns;
-      }
-    }
     const int serviced = app->service();
     if (serviced < 0) {
       std::fprintf(stderr, "gns service failed\n");
-      if (control != nullptr) {
-        bk_control_close(control);
-      }
-      return EXIT_FAILURE;
+      run_rc = -1;
+      break;
     }
-    // 受信が続いている間は sleep しない: 固定 1ms sleep は app スレッドの
-    // drain スループット上限(≒ batch×4096/ms)を作ってしまう。
-    // queue を引き切った時だけ idle sleep で CPU を返す
-    if (serviced < kRecvBatch) {
+    uint64_t now = bk_now_ns();
+    if (authoritative && !schedule_valid && app->roster_complete()) {
+      schedule.start_at_ns =
+          rudp_bench_gns::add_ns(now, kDevWarmupNs);
+      schedule.stop_at_ns =
+          rudp_bench_gns::add_ns(schedule.start_at_ns, kDevDurationNs);
+      schedule.drain_until_ns =
+          rudp_bench_gns::add_ns(schedule.stop_at_ns, kDevDrainNs);
+      schedule_valid = true;
+    }
+    if (authoritative && schedule_valid && !roster_frozen &&
+        now >= schedule.start_at_ns) {
+      std::fprintf(stderr,
+                   "authoritative roster incomplete before measurement "
+                   "start\n");
+      run_rc = -1;
+      break;
+    }
+    if (authoritative && schedule_valid && !roster_frozen &&
+        app->roster_complete()) {
+      bk_stream streams[2] = {};
+      int n_streams = 0;
+      if (build_state_streams(cfg, streams, &n_streams) != 0) {
+        run_rc = -1;
+        break;
+      }
+      state_plan = bk_plan_new(streams, n_streams, now,
+                               schedule.start_at_ns, schedule.stop_at_ns);
+      if (state_plan == nullptr || app->expect_client_inputs(schedule) != 0) {
+        std::fprintf(stderr, "authoritative state initialization failed\n");
+        run_rc = -1;
+        break;
+      }
+      app->freeze_roster();
+      roster_frozen = true;
+    }
+
+    if (control != nullptr && !window_final) {
+      if (now >= schedule.start_at_ns) {
+        window_final = true;
+      } else {
+        const int wr = bk_control_poll_window(control, &schedule);
+        if (wr < 0) {
+          std::fprintf(stderr, "benchkit window poll failed\n");
+          run_rc = -1;
+          break;
+        }
+        if (wr == 1) {
+          window_final = true;
+          if (state_plan != nullptr) {
+            bk_plan_set_window(state_plan, schedule.start_at_ns,
+                               schedule.stop_at_ns);
+          }
+        }
+      }
+    }
+
+    now = bk_now_ns();
+    if (schedule_valid && now >= schedule.start_at_ns &&
+        now < schedule.stop_at_ns) {
+      bk_metrics_tick(app->metrics(), now);
+    }
+    if (state_plan != nullptr && now < schedule.stop_at_ns) {
+      bk_slot slot;
+      while (bk_plan_next(state_plan, now, &slot)) {
+        app->send_state_slot(slot);
+      }
+    } else if (state_plan != nullptr && !state_marked_unsent) {
+      const uint64_t cutoff =
+          schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
+      app->add_server_state_ticks(
+          mark_state_unsent(cfg, app->metrics(), state_plan, cutoff));
+      state_marked_unsent = true;
+    }
+    if (control != nullptr && now >= schedule.drain_until_ns) {
+      break;
+    }
+
+    uint64_t sleep_ns = kServiceSliceNs;
+    if (state_plan != nullptr && now < schedule.stop_at_ns) {
+      const uint64_t due = bk_plan_peek_ns(state_plan);
+      if (due <= now) {
+        sleep_ns = 0;
+      } else if (due - now < sleep_ns) {
+        sleep_ns = due - now;
+      }
+    }
+    if (serviced < kRecvBatch && sleep_ns != 0) {
       std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
     }
+  }
+
+  if (state_plan != nullptr && !state_marked_unsent) {
+    const uint64_t cutoff =
+        schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
+    app->add_server_state_ticks(
+        mark_state_unsent(cfg, app->metrics(), state_plan, cutoff));
   }
 
   char stats_json[4096];
@@ -491,19 +898,24 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  if (write_metrics_out(stats_json) != 0) {
+  if (write_metrics_out(app->metrics()) != 0) {
     std::fprintf(stderr, "failed to write BENCH_METRICS_OUT\n");
+    run_rc = -1;
   }
 
-  if (control != nullptr) {
+  if (control != nullptr && run_rc == 0) {
     if (bk_control_done(control, stats_json) != 0) {
       std::fprintf(stderr, "benchkit done failed\n");
-      bk_control_close(control);
-      return EXIT_FAILURE;
+      run_rc = -1;
     }
+    bk_control_close(control);
+    control = nullptr;
+  }
+  if (control != nullptr) {
     bk_control_close(control);
   }
 
+  bk_plan_free(state_plan);
   app->shutdown();
-  return EXIT_SUCCESS;
+  return run_rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

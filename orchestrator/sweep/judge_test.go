@@ -119,6 +119,29 @@ func TestJudgeRecvDropCensored(t *testing.T) {
 	}
 }
 
+func TestJudgeServerRecvDropIsNotFarmCensored(t *testing.T) {
+	w, _ := run.LookupWorkload("r20p128")
+	res := &run.Result{
+		Verdict:        run.VerdictInvalid,
+		InvalidReasons: []string{"server netns UDP drop delta non-zero: InErrors=361 RcvbufErrors=361"},
+	}
+	j := Judge(res, w, 4, nil, samplePeriodNS)
+	if j.Censored || j.OK || !strings.Contains(j.Cause, "invalid") {
+		t.Fatalf("server receive drop must not be attributed to the farm: %+v", j)
+	}
+}
+
+func TestJudgeSUTFailureWithPassingMetricsIsStillBreak(t *testing.T) {
+	w, _ := run.LookupWorkload("r20p128")
+	res := validResult(1, 1, 50_000_000)
+	res.Outcome = run.OutcomeFail
+	res.OutcomeReasons = []string{"server netns UDP drop delta non-zero"}
+	j := Judge(res, w, 4, nil, samplePeriodNS)
+	if j.Censored || j.OK || !strings.Contains(j.Cause, "server netns UDP drop") {
+		t.Fatalf("SUT failure must not be overwritten by passing metrics: %+v", j)
+	}
+}
+
 func TestJudgeBackpressureIsBreakNotCensor(t *testing.T) {
 	// TCP 系の submit backpressure: attempted 低下は metric gate で正直に落ちる
 	w, _ := run.LookupWorkload("r20p128")
@@ -257,5 +280,72 @@ func TestJudgeHealthySchedNotCensored(t *testing.T) {
 	j := Judge(res, w, 64, nil, samplePeriodNS)
 	if !j.OK || j.Censored {
 		t.Fatalf("expected OK: %+v", j)
+	}
+}
+
+func TestJudgeScenarioUsesAbsoluteTrafficSLO(t *testing.T) {
+	scenario := run.ScenarioSpec{
+		Name: "authoritative-test",
+		Kind: run.ScenarioAuthoritativeState,
+		ClientInput: &run.TrafficSpec{
+			TrafficID: run.TrafficIDClientInput,
+			MustDeliver: run.TrafficClassSpec{
+				RateHz: 1, PayloadBytes: 64, MinDeadlineHitRatio: 0.99,
+			},
+		},
+		ServerState: &run.TrafficSpec{
+			TrafficID: run.TrafficIDServerState,
+			LossTolerant: run.TrafficClassSpec{
+				RateHz: 20, PayloadBytes: 64, StalenessP99NS: 100_000_000,
+			},
+		},
+	}
+	result := &run.Result{
+		Verdict: run.VerdictValid,
+		Metrics: &run.MergedMetrics{Traffic: []run.TrafficAggregate{
+			{TrafficID: run.TrafficIDClientInput, Direction: run.DirectionClientToServer,
+				Class: run.ClassMustDeliver, DeadlineHitRatio: 1, DeliveryRatio: 1},
+			{TrafficID: run.TrafficIDServerState, Direction: run.DirectionServerToClient,
+				Class: run.ClassLossTolerant, DeliveryRatio: 1,
+				StalenessNS: run.Histogram{Count: 10, P99NS: 90_000_000},
+				ClassCounts: run.ClassCounts{ExpectedFlows: 4}},
+		}},
+	}
+
+	judgment := JudgeScenario(result, scenario)
+	if !judgment.OK || len(judgment.Traffic) != 2 {
+		t.Fatalf("judgment = %+v", judgment)
+	}
+
+	result.Metrics.Traffic[1].StalenessNS.P99NS = 110_000_000
+	judgment = JudgeScenario(result, scenario)
+	if judgment.OK || !strings.Contains(judgment.Cause, "staleness_p99") {
+		t.Fatalf("expected absolute staleness failure, got %+v", judgment)
+	}
+}
+
+func TestJudgeScenarioRejectsNeverReceivedFlow(t *testing.T) {
+	scenario := run.ScenarioSpec{
+		Name: "relay-test",
+		Kind: run.ScenarioRoomRelay,
+		RoomPublish: &run.TrafficSpec{
+			TrafficID: 3,
+			LossTolerant: run.TrafficClassSpec{
+				RateHz: 20, PayloadBytes: 64, StalenessP99NS: 100_000_000,
+			},
+		},
+	}
+	result := &run.Result{
+		Verdict: run.VerdictValid,
+		Metrics: &run.MergedMetrics{Traffic: []run.TrafficAggregate{{
+			TrafficID: 3, Direction: run.DirectionRoomRelay, Class: run.ClassLossTolerant,
+			DeliveryRatio: 0.999, StalenessNS: run.Histogram{Count: 100, P99NS: 50_000_000},
+			ClassCounts: run.ClassCounts{ExpectedFlows: 100, ObservedFlows: 99, NeverReceivedFlows: 1},
+		}}},
+	}
+
+	judgment := JudgeScenario(result, scenario)
+	if judgment.OK || !strings.Contains(judgment.Cause, "never_received_flows=1") {
+		t.Fatalf("expected starvation failure, got %+v", judgment)
 	}
 }

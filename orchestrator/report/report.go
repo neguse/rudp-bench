@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
+	"github.com/neguse/rudp-bench/orchestrator/run"
 	"github.com/neguse/rudp-bench/orchestrator/sweep"
 )
 
@@ -37,9 +39,10 @@ var anchorBudgetNS = map[string]uint64{
 }
 
 type SweepData struct {
-	Regime string
-	Cells  map[string]map[string]sweep.CellRecord // transport → workload → cell
-	Points map[string]sweep.PointRecord           // pointKey → record
+	Regime           string
+	CampaignIdentity string
+	Cells            map[string]map[string]sweep.CellRecord // transport → workload → cell
+	Points           map[string]sweep.PointRecord           // pointKey → record
 }
 
 func LoadSweep(dir string) (*SweepData, error) {
@@ -59,15 +62,25 @@ func LoadSweep(dir string) (*SweepData, error) {
 	}
 
 	sd := &SweepData{
-		Regime: capFile.Cells[0].Regime,
-		Cells:  map[string]map[string]sweep.CellRecord{},
-		Points: map[string]sweep.PointRecord{},
+		Regime:           capFile.Cells[0].Regime,
+		CampaignIdentity: capFile.Cells[0].CampaignIdentity,
+		Cells:            map[string]map[string]sweep.CellRecord{},
+		Points:           map[string]sweep.PointRecord{},
 	}
 	for _, c := range capFile.Cells {
+		if c.Regime != sd.Regime {
+			return nil, fmt.Errorf("%s/capacity.json mixes regimes %q and %q", dir, sd.Regime, c.Regime)
+		}
+		if c.CampaignIdentity != sd.CampaignIdentity {
+			return nil, fmt.Errorf("%s/capacity.json mixes campaign identities", dir)
+		}
 		if sd.Cells[c.Transport] == nil {
 			sd.Cells[c.Transport] = map[string]sweep.CellRecord{}
 		}
-		sd.Cells[c.Transport][c.Workload] = c
+		if _, exists := sd.Cells[c.Transport][c.TestName()]; exists {
+			return nil, fmt.Errorf("%s/capacity.json has duplicate cell %s/%s", dir, c.Transport, c.TestName())
+		}
+		sd.Cells[c.Transport][c.TestName()] = c
 	}
 
 	f, err := os.Open(filepath.Join(dir, "results.jsonl"))
@@ -77,15 +90,36 @@ func LoadSweep(dir string) (*SweepData, error) {
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	lineNo := 0
 	for sc.Scan() {
+		lineNo++
 		var rec sweep.PointRecord
-		if json.Unmarshal(sc.Bytes(), &rec) != nil {
+		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+			return nil, fmt.Errorf("%s/results.jsonl line %d: %w", dir, lineNo, err)
+		}
+		if rec.CampaignIdentity != sd.CampaignIdentity {
 			continue
 		}
-		key := fmt.Sprintf("%s|%s|c%d", rec.Transport, rec.Workload, rec.Conns)
+		key := fmt.Sprintf("%s|%s|c%d", rec.Transport, rec.TestName(), rec.Conns)
 		sd.Points[key] = rec
 	}
-	return sd, sc.Err()
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	for transport, cells := range sd.Cells {
+		for name, cell := range cells {
+			for label, conns := range map[string]int{"capacity": cell.Capacity, "break": cell.BreakConns} {
+				if conns == 0 {
+					continue
+				}
+				key := fmt.Sprintf("%s|%s|c%d", transport, name, conns)
+				if _, ok := sd.Points[key]; !ok {
+					return nil, fmt.Errorf("%s/capacity.json %s point %s has no active-campaign result evidence", dir, label, key)
+				}
+			}
+		}
+	}
+	return sd, nil
 }
 
 // causeCode は break 原因の短縮ラベル(セル内表記用)。
@@ -101,8 +135,14 @@ func causeCode(cause string) string {
 		return "md"
 	case strings.Contains(cause, "farm_limited"):
 		return "farm"
-	default:
+	case strings.Contains(cause, "payload corruption"):
+		return "corrupt"
+	case strings.Contains(cause, "crash") || strings.Contains(cause, "exit_code") || strings.Contains(cause, "exited"):
+		return "crash"
+	case strings.Contains(cause, "invalid:") || strings.Contains(cause, "measurement_invalid"):
 		return "inv"
+	default:
+		return "fail"
 	}
 }
 
@@ -111,13 +151,19 @@ func formatCell(c sweep.CellRecord, found bool) string {
 		return "—"
 	}
 	switch {
+	case c.Outcome == run.OutcomeUnsupported:
+		return "UNSUPPORTED"
+	case c.Outcome == run.OutcomeInconclusive:
+		return "INCONCLUSIVE"
+	case c.BelowRange:
+		return fmt.Sprintf("<%d (%s)", c.BreakConns, causeCode(c.BreakCause))
 	case c.Censored:
 		// censored の内訳を区別する: farm(計測器の限界)と
 		// crash(その conns で transport の client 接続が死ぬ — server の
 		// quality break とは別種の transport 限界)は意味が違う
 		label := "farm"
-		if strings.Contains(c.BreakCause, "measurement_invalid") {
-			label = "crash"
+		if c.MeasurementInvalid {
+			label = "invalid"
 		}
 		return fmt.Sprintf("≥%d (%s)", c.Capacity, label)
 	case c.RangeLimited:
@@ -125,21 +171,40 @@ func formatCell(c sweep.CellRecord, found bool) string {
 	case c.Capacity == 0:
 		return fmt.Sprintf("0 (%s)", causeCode(c.BreakCause))
 	default:
-		return fmt.Sprintf("%d (%s)", c.Capacity, causeCode(c.BreakCause))
+		if code := causeCode(c.BreakCause); code != "" {
+			return fmt.Sprintf("%d (%s)", c.Capacity, code)
+		}
+		return fmt.Sprintf("%d", c.Capacity)
 	}
 }
 
 // CapacityTable は workload 行 × transport 列の markdown 表を生成する。
 // onlyAnchors = true で anchor 3 セルに絞る(loss 最悪点用)。
 func (sd *SweepData) CapacityTable(onlyAnchors bool) string {
-	var transports []string
-	for _, t := range transportOrder {
-		if _, ok := sd.Cells[t]; ok {
-			transports = append(transports, t)
+	transports := orderedTransports(sd.Cells)
+	known := map[string]bool{}
+	for _, row := range workloadRows {
+		known[row.Name] = true
+	}
+	var scenarioRows []string
+	if !onlyAnchors {
+		seen := map[string]bool{}
+		for _, cells := range sd.Cells {
+			for name := range cells {
+				if !known[name] && !seen[name] {
+					scenarioRows = append(scenarioRows, name)
+					seen[name] = true
+				}
+			}
 		}
+		sort.Strings(scenarioRows)
 	}
 	var b strings.Builder
-	b.WriteString("| workload | " + strings.Join(transports, " | ") + " |\n")
+	rowHeader := "workload"
+	if len(scenarioRows) > 0 {
+		rowHeader = "scenario / workload"
+	}
+	b.WriteString("| " + rowHeader + " | " + strings.Join(transports, " | ") + " |\n")
 	b.WriteString("|---" + strings.Repeat("|---", len(transports)) + "|\n")
 	for _, row := range workloadRows {
 		isAnchor := row.Anchor != "" && row.Anchor != "synthetic"
@@ -159,7 +224,15 @@ func (sd *SweepData) CapacityTable(onlyAnchors bool) string {
 		}
 		b.WriteString("\n")
 	}
-	b.WriteString("\n*凡例: `N (code)` = capacity N・break 原因(st=staleness / dl=delivery_lt / md=delivery_md / inv=validity)、`≥N` = 探索上限まで OK、`≥N (farm)` = farm 律速で打ち切り(server の break ではない)、`≥N (crash)` = それより上の conns で transport の client 接続が死んで測定不成立(再測でも再発 — server の quality break とは別種の transport 限界)。詳細は sweep 出力の capacity.json / results.jsonl。*\n")
+	for _, name := range scenarioRows {
+		b.WriteString("| " + name + " |")
+		for _, t := range transports {
+			c, ok := sd.Cells[t][name]
+			b.WriteString(" " + formatCell(c, ok) + " |")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\n*凡例: `N (code)` = capacity Nと最初のbreak原因(st/dl/md/crash/corrupt/fail/inv)、`≥N` = 探索上限までPASS、`≥N (farm)` = farm律速、`≥N (invalid)` = 再試行後も測定不成立。`UNSUPPORTED` / `INCONCLUSIVE`は数値capacityなし。詳細はcapacity.json/results.jsonl。*\n")
 	return b.String()
 }
 
@@ -173,7 +246,7 @@ func (sd *SweepData) AnchorVerdicts() string {
 		if !isAnchor {
 			continue
 		}
-		for _, t := range transportOrder {
+		for _, t := range orderedTransports(sd.Cells) {
 			c, ok := sd.Cells[t][row.Name]
 			if !ok || c.Capacity == 0 {
 				continue
@@ -199,6 +272,25 @@ func (sd *SweepData) AnchorVerdicts() string {
 	return b.String()
 }
 
+func orderedTransports[T any](values map[string]T) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, name := range transportOrder {
+		if _, ok := values[name]; ok {
+			out = append(out, name)
+			seen[name] = true
+		}
+	}
+	var extra []string
+	for name := range values {
+		if !seen[name] {
+			extra = append(extra, name)
+		}
+	}
+	sort.Strings(extra)
+	return append(out, extra...)
+}
+
 // ReplaceSection は md 内の <!-- generated:NAME --> ... <!-- /generated:NAME -->
 // 区間の中身を置換する。マーカーが無ければエラー。
 func ReplaceSection(md, name, content string) (string, error) {
@@ -218,25 +310,32 @@ func UpdateDoc(docPath string, sweepDirs, boundaryDirs []string) error {
 		return err
 	}
 	md := string(raw)
-	apply := func(sections map[string]string) {
+	apply := func(sections map[string]string) error {
 		for name, content := range sections {
 			updated, err := ReplaceSection(md, name, content)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[report] skip %s: %v\n", name, err)
-				continue
+				return err
 			}
 			md = updated
 		}
+		return nil
 	}
+	seenRegimes := map[string]bool{}
 	for _, dir := range sweepDirs {
 		sd, err := LoadSweep(dir)
 		if err != nil {
 			return err
 		}
-		apply(map[string]string{
+		if seenRegimes[sd.Regime] {
+			return fmt.Errorf("multiple sweep inputs use regime %q; aggregate blocks before report generation", sd.Regime)
+		}
+		seenRegimes[sd.Regime] = true
+		if err := apply(map[string]string{
 			"capacity-" + sd.Regime: sd.CapacityTable(sd.Regime != "wired"),
 			"anchors-" + sd.Regime:  sd.AnchorVerdicts(),
-		})
+		}); err != nil {
+			return err
+		}
 	}
 	for _, dir := range boundaryDirs {
 		bd, err := LoadBoundary(dir)
@@ -249,7 +348,9 @@ func UpdateDoc(docPath string, sweepDirs, boundaryDirs []string) error {
 				sections["boundary-"+anchor+"-"+label] = bd.BoundaryTable(anchor, label)
 			}
 		}
-		apply(sections)
+		if err := apply(sections); err != nil {
+			return err
+		}
 	}
 	return os.WriteFile(docPath, []byte(md), 0o644)
 }
@@ -265,8 +366,7 @@ func UpdateSections(docPath string, sections map[string]string) error {
 	for name, content := range sections {
 		updated, err := ReplaceSection(md, name, content)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[report] skip %s: %v\n", name, err)
-			continue
+			return err
 		}
 		md = updated
 	}

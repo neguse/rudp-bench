@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,103 @@ func TestMergeMetricsGolden(t *testing.T) {
 	}
 }
 
+func TestMergeMetricsTrafficSeries(t *testing.T) {
+	dir := t.TempDir()
+	h := histFixtureString(v2Bins(map[int]uint64{4: 1}))
+	lossClass := v2ClassFixtureString(
+		ClassCounts{Slots: 3, Submitted: 3, DeliveredUnique: 3, ExpectedFlows: 1, ObservedFlows: 1},
+		v2Bins(map[int]uint64{4: 1}), v2Bins(map[int]uint64{4: 1}), v2Bins(map[int]uint64{4: 1}))
+	emptyClass := v2ClassFixtureString(ClassCounts{}, v2Bins(nil), v2Bins(nil), v2Bins(nil))
+	file := fmt.Sprintf(`{
+  "version": 2,
+  "histogram": {"scheme":"log2x16","subbins":16,"min_ns":1000,"max_ns":100000000000},
+  "classes": {"loss_tolerant": %s, "must_deliver": %s},
+  "staleness_ns": %s,
+	"update_gap_ns": %s,
+  "raw": {"slots":3,"submitted":3,"recv_measured":3,"recv_unmeasured":0},
+  "traffic": [
+    {"traffic_id":2,"direction":"server_to_client","class":"loss_tolerant","deadline_ns":0,
+     "slots":3,"slots_broadcast":0,"submitted":3,"delivered_unique":3,"duplicates":0,"deadline_hit":0,
+	 "expected_flows":1,"observed_flows":1,"never_received_flows":0,
+     "latency_sched_ns":%s,"latency_send_ns":%s,"update_gap_ns":%s,"staleness_ns":%s}
+  ]
+	}`, lossClass, emptyClass, h, h, h, h, h, h)
+	path := writeMetricsFixture(t, dir, "traffic.json", file)
+
+	merged, err := MergeMetricsFiles([]string{path}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Version != 2 {
+		t.Fatalf("merged version = %d, want 2", merged.Version)
+	}
+	metric, ok := merged.TrafficMetric(2, DirectionServerToClient, ClassLossTolerant)
+	if !ok {
+		t.Fatal("server state traffic series missing")
+	}
+	if metric.ExpectedReceives != 3 || metric.DeliveryRatio != 1 || metric.StalenessNS.Count != 1 {
+		t.Fatalf("traffic metric = %+v", metric)
+	}
+}
+
+func TestMergeMetricsRejectsLegacyTrafficAggregateMismatch(t *testing.T) {
+	dir := t.TempDir()
+	emptyBins := v2Bins(nil)
+	oneBin := v2Bins(map[int]uint64{4: 1})
+	emptyHist := histFixtureString(emptyBins)
+	oneHist := histFixtureString(oneBin)
+	emptyClass := v2ClassFixtureString(ClassCounts{}, emptyBins, emptyBins, emptyBins)
+	mustClass := v2ClassFixtureString(
+		ClassCounts{Slots: 1, Submitted: 1, DeliveredUnique: 1, DeadlineHit: 0},
+		oneBin, oneBin, emptyBins)
+	file := fmt.Sprintf(`{
+  "version": 2,
+  "histogram": {"scheme":"log2x16","subbins":16,"min_ns":1000,"max_ns":100000000000},
+  "classes": {"loss_tolerant": %s, "must_deliver": %s},
+  "staleness_ns": %s,
+  "update_gap_ns": %s,
+  "raw": {"slots":1,"submitted":1,"recv_measured":1,"recv_unmeasured":0},
+  "traffic": [
+    {"traffic_id":1,"direction":"client_to_server","class":"must_deliver","deadline_ns":200000000,
+     "slots":1,"slots_broadcast":0,"submitted":1,"delivered_unique":1,"duplicates":0,"deadline_hit":1,
+     "expected_flows":0,"observed_flows":0,"never_received_flows":0,
+     "latency_sched_ns":%s,"latency_send_ns":%s,"update_gap_ns":%s,"staleness_ns":%s}
+  ]
+}`, emptyClass, mustClass, emptyHist, emptyHist, oneHist, oneHist, emptyHist, emptyHist)
+	path := writeMetricsFixture(t, dir, "mismatch.json", file)
+	if _, err := MergeMetricsFiles([]string{path}, 1); err == nil ||
+		!strings.Contains(err.Error(), "deadline_hit=0, want traffic sum=1") {
+		t.Fatalf("expected deadline aggregate mismatch, got %v", err)
+	}
+}
+
+func TestMergeMetricsRejectsMixedVersions(t *testing.T) {
+	dir := t.TempDir()
+	v1 := writeMetricsFixture(t, dir, "v1.json", metricsFixtureString(
+		ClassCounts{}, ClassCounts{}, bins(nil), bins(nil), bins(nil), bins(nil), bins(nil), RawCounts{},
+	))
+	empty := histFixtureString(v2Bins(nil))
+	class := v2ClassFixtureString(ClassCounts{}, v2Bins(nil), v2Bins(nil), v2Bins(nil))
+	v2 := writeMetricsFixture(t, dir, "v2.json", fmt.Sprintf(`{
+  "version": 2,
+  "histogram": {"scheme":"log2x16","subbins":16,"min_ns":1000,"max_ns":100000000000},
+  "classes": {"loss_tolerant": %s, "must_deliver": %s},
+  "staleness_ns": %s,
+  "update_gap_ns": %s,
+  "raw": {"slots":0,"submitted":0,"recv_measured":0,"recv_unmeasured":0},
+  "traffic": [
+    {"traffic_id":1,"direction":"client_to_server","class":"loss_tolerant","deadline_ns":0,
+     "slots":0,"slots_broadcast":0,"submitted":0,"delivered_unique":0,"duplicates":0,"deadline_hit":0,
+	 "expected_flows":0,"observed_flows":0,"never_received_flows":0,
+     "latency_sched_ns":%s,"latency_send_ns":%s,"update_gap_ns":%s,"staleness_ns":%s}
+  ]
+}`, class, class, empty, empty, empty, empty, empty, empty))
+
+	if _, err := MergeMetricsFiles([]string{v1, v2}, 1); err == nil {
+		t.Fatal("mixed v1/v2 metrics unexpectedly accepted")
+	}
+}
+
 func writeMetricsFixture(t *testing.T, dir, name, data string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -108,6 +206,22 @@ func classFixtureString(counts ClassCounts, sched, send []uint64) string {
 		histFixtureString(send))
 }
 
+func v2ClassFixtureString(counts ClassCounts, sched, send, update []uint64) string {
+	return fmt.Sprintf(`{"slots":%d,"slots_broadcast":%d,"submitted":%d,"delivered_unique":%d,"duplicates":%d,"deadline_hit":%d,"expected_flows":%d,"observed_flows":%d,"never_received_flows":%d,"latency_sched_ns":%s,"latency_send_ns":%s,"update_gap_ns":%s}`,
+		counts.Slots,
+		counts.SlotsBroadcast,
+		counts.Submitted,
+		counts.DeliveredUnique,
+		counts.Duplicates,
+		counts.DeadlineHit,
+		counts.ExpectedFlows,
+		counts.ObservedFlows,
+		counts.NeverReceivedFlows,
+		histFixtureString(sched),
+		histFixtureString(send),
+		histFixtureString(update))
+}
+
 func histFixtureString(b []uint64) string {
 	return fmt.Sprintf(`{"scheme":"log2x16","min_ns":1000,"max_ns":100000000000,"count":%d,"p50_ns":0,"p90_ns":0,"p99_ns":0,"bins":%s}`,
 		sumBins(b), binsLiteral(b))
@@ -115,6 +229,14 @@ func histFixtureString(b []uint64) string {
 
 func bins(counts map[int]uint64) []uint64 {
 	out := make([]uint64, 32)
+	for i, v := range counts {
+		out[i] = v
+	}
+	return out
+}
+
+func v2Bins(counts map[int]uint64) []uint64 {
+	out := make([]uint64, v2HistogramBins)
 	for i, v := range counts {
 		out[i] = v
 	}
