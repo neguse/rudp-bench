@@ -42,11 +42,12 @@ int main(void) {
   CHECK(BK_FLAGS_DIRECTION(out.flags) == BK_DIRECTION_SERVER_TO_CLIENT);
 
   CHECK(bk_payload_fill_body(buf, sizeof(buf), &in) == 0);
-  CHECK(buf[32] ==
-        (uint8_t)((uint8_t)in.seq ^
-                  (uint8_t)(in.sched_ts_ns >> 24u) ^
-                  (uint8_t)(in.send_ts_ns >> 40u) ^
-                  (uint8_t)in.origin_id ^ in.flags ^ in.traffic_id));
+  const uint8_t expected_body[] = {
+      0x51, 0x78, 0xa7, 0xf1, 0x04, 0x73, 0x94, 0x5c,
+      0x08, 0x30, 0x24, 0x40, 0xcc, 0x32, 0x41, 0x3e,
+  };
+  CHECK(memcmp(buf + BK_HEADER_SIZE, expected_body, sizeof(expected_body)) ==
+        0);
   CHECK(bk_payload_validate_body(buf, sizeof(buf), &in) == 0);
   buf[47] ^= 1u;
   CHECK(bk_payload_validate_body(buf, sizeof(buf), &in) == -1);
@@ -54,6 +55,60 @@ int main(void) {
   CHECK(bk_payload_validate_body(buf, BK_HEADER_SIZE, &in) == 0);
   CHECK(bk_payload_fill_body(buf, BK_HEADER_SIZE - 1u, &in) == -1);
   CHECK(bk_payload_validate_body(buf, BK_HEADER_SIZE - 1u, &in) == -1);
+
+  uint8_t representative[1000];
+  CHECK(bk_payload_write(representative, sizeof(representative), &in) == 0);
+  CHECK(bk_payload_fill_body(representative, sizeof(representative), &in) ==
+        0);
+  CHECK(memcmp(representative + BK_HEADER_SIZE,
+               representative + BK_HEADER_SIZE + 256u, 256u) != 0);
+  CHECK(memcmp(representative + BK_HEADER_SIZE + 256u,
+               representative + BK_HEADER_SIZE + 512u, 256u) != 0);
+  CHECK(representative[BK_HEADER_SIZE + 223u] == 0xdb);
+  CHECK(representative[BK_HEADER_SIZE + 224u] == 0x90);
+  CHECK(representative[BK_HEADER_SIZE + 255u] == 0x96);
+  CHECK(representative[BK_HEADER_SIZE + 256u] == 0xd8);
+  CHECK(representative[999] == 0x1c);
+  bool seen[256] = {false};
+  size_t distinct = 0;
+  for (size_t i = BK_HEADER_SIZE; i < sizeof(representative); ++i) {
+    if (!seen[representative[i]]) {
+      seen[representative[i]] = true;
+      ++distinct;
+    }
+  }
+  CHECK(distinct >= 240u);
+
+  bk_header changed = in;
+  changed.seq ^= 1u;
+  CHECK(bk_payload_fill_body(representative, sizeof(representative),
+                             &changed) == 0);
+  CHECK(memcmp(representative + BK_HEADER_SIZE, expected_body, 8u) != 0);
+  changed = in;
+  changed.sched_ts_ns ^= 1u;
+  CHECK(bk_payload_fill_body(representative, sizeof(representative),
+                             &changed) == 0);
+  CHECK(memcmp(representative + BK_HEADER_SIZE, expected_body, 8u) != 0);
+  changed = in;
+  changed.send_ts_ns ^= 1u;
+  CHECK(bk_payload_fill_body(representative, sizeof(representative),
+                             &changed) == 0);
+  CHECK(memcmp(representative + BK_HEADER_SIZE, expected_body, 8u) != 0);
+  changed = in;
+  changed.origin_id ^= 1u;
+  CHECK(bk_payload_fill_body(representative, sizeof(representative),
+                             &changed) == 0);
+  CHECK(memcmp(representative + BK_HEADER_SIZE, expected_body, 8u) != 0);
+  changed = in;
+  changed.flags ^= BK_FLAG_MEASURE;
+  CHECK(bk_payload_fill_body(representative, sizeof(representative),
+                             &changed) == 0);
+  CHECK(memcmp(representative + BK_HEADER_SIZE, expected_body, 8u) != 0);
+  changed = in;
+  changed.traffic_id ^= 1u;
+  CHECK(bk_payload_fill_body(representative, sizeof(representative),
+                             &changed) == 0);
+  CHECK(memcmp(representative + BK_HEADER_SIZE, expected_body, 8u) != 0);
 
   CHECK(bk_payload_write(buf, BK_HEADER_SIZE - 1u, &in) == -1);
   CHECK(bk_payload_read(buf, BK_HEADER_SIZE - 1u, &out) == -1);

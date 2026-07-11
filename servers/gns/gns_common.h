@@ -115,6 +115,8 @@ inline void print_describe() {
       "\"cc_algo\":\"token-bucket(SendRateMin=Max=256MBps)\","
       "\"thread_model\":\"internal_worker\","
       "\"encryption\":true,"
+      "\"payload_pattern\":\"splitmix64-v1\","
+      "\"wire_compression\":\"none\","
       "\"max_payload_bytes\":16500,"
       "\"scenarios\":[\"environment_baseline\","
       "\"authoritative_state\",\"room_relay\"],"

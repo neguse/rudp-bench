@@ -129,8 +129,10 @@ type NetemResult struct {
 	ServerUDPAfter   netops.UDPStats  `json:"server_udp_after,omitempty"`
 	ServerUDPDelta   netops.UDPStats  `json:"server_udp_delta,omitempty"`
 
-	Gate         *netops.NetemGateReport `json:"gate,omitempty"`
-	LossEvidence *NetemLossEvidence      `json:"loss_evidence,omitempty"`
+	Gate          *netops.NetemGateReport `json:"gate,omitempty"`
+	Offloads      *netops.OffloadEvidence `json:"offloads,omitempty"`
+	OffloadsAfter *netops.OffloadEvidence `json:"offloads_after,omitempty"`
+	LossEvidence  *NetemLossEvidence      `json:"loss_evidence,omitempty"`
 }
 
 // NetemLossEvidence records qdisc counters sampled strictly inside the

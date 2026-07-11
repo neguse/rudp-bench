@@ -74,17 +74,27 @@ int bk_payload_read(const void *buf, size_t len, bk_header *h) {
   return 0;
 }
 
-static uint8_t body_pattern_byte(const bk_header *h, size_t body_index) {
-  const unsigned seq_shift = (unsigned)(body_index & 7u) * 8u;
-  const unsigned sched_shift = (unsigned)((body_index + 3u) & 7u) * 8u;
-  const unsigned send_shift = (unsigned)((body_index + 5u) & 7u) * 8u;
-  const unsigned origin_shift = (unsigned)(body_index & 3u) * 8u;
-  return (uint8_t)(
-      (uint8_t)(h->seq >> seq_shift) ^
-      (uint8_t)(h->sched_ts_ns >> sched_shift) ^
-      (uint8_t)(h->send_ts_ns >> send_shift) ^
-      (uint8_t)(h->origin_id >> origin_shift) ^ h->flags ^ h->traffic_id ^
-      (uint8_t)body_index);
+static uint64_t splitmix64(uint64_t value) {
+  value += UINT64_C(0x9e3779b97f4a7c15);
+  value = (value ^ (value >> 30u)) * UINT64_C(0xbf58476d1ce4e5b9);
+  value = (value ^ (value >> 27u)) * UINT64_C(0x94d049bb133111eb);
+  return value ^ (value >> 31u);
+}
+
+static uint64_t body_pattern_key(const bk_header *h) {
+  // prng-v1 folds the complete 32-byte wire header as four LE words.
+  const uint64_t tail = (uint64_t)h->flags | ((uint64_t)h->origin_id << 8u) |
+                        ((uint64_t)h->traffic_id << 40u);
+  uint64_t key = UINT64_C(0x727564702d707231);  // "rudp-pr1"
+  key = splitmix64(key ^ h->seq);
+  key = splitmix64(key ^ h->sched_ts_ns);
+  key = splitmix64(key ^ h->send_ts_ns);
+  return splitmix64(key ^ tail);
+}
+
+static uint64_t body_pattern_block(uint64_t key, size_t block_index) {
+  return splitmix64(key + (uint64_t)block_index *
+                              UINT64_C(0x9e3779b97f4a7c15));
 }
 
 int bk_payload_fill_body(void *buf, size_t len, const bk_header *h) {
@@ -92,8 +102,16 @@ int bk_payload_fill_body(void *buf, size_t len, const bk_header *h) {
     return -1;
   }
   uint8_t *p = (uint8_t *)buf;
-  for (size_t i = BK_HEADER_SIZE; i < len; ++i) {
-    p[i] = body_pattern_byte(h, i - BK_HEADER_SIZE);
+  const uint64_t key = body_pattern_key(h);
+  size_t body_index = 0;
+  while (BK_HEADER_SIZE + body_index < len) {
+    const uint64_t block = body_pattern_block(key, body_index / 8u);
+    for (size_t offset = 0;
+         offset < 8u && BK_HEADER_SIZE + body_index < len;
+         ++offset, ++body_index) {
+      p[BK_HEADER_SIZE + body_index] =
+          (uint8_t)(block >> (unsigned)(offset * 8u));
+    }
   }
   return 0;
 }
@@ -104,9 +122,17 @@ int bk_payload_validate_body(const void *buf, size_t len,
     return -1;
   }
   const uint8_t *p = (const uint8_t *)buf;
-  for (size_t i = BK_HEADER_SIZE; i < len; ++i) {
-    if (p[i] != body_pattern_byte(h, i - BK_HEADER_SIZE)) {
-      return -1;
+  const uint64_t key = body_pattern_key(h);
+  size_t body_index = 0;
+  while (BK_HEADER_SIZE + body_index < len) {
+    const uint64_t block = body_pattern_block(key, body_index / 8u);
+    for (size_t offset = 0;
+         offset < 8u && BK_HEADER_SIZE + body_index < len;
+         ++offset, ++body_index) {
+      if (p[BK_HEADER_SIZE + body_index] !=
+          (uint8_t)(block >> (unsigned)(offset * 8u))) {
+        return -1;
+      }
     }
   }
   return 0;

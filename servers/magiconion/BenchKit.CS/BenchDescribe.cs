@@ -11,6 +11,8 @@ public static class BenchDescribe
         "\"cc_algo\":\"kernel-tcp(cubic)\"," +
         "\"thread_model\":\"internal_worker\"," +
         "\"encryption\":false," +
+        "\"payload_pattern\":\"splitmix64-v1\"," +
+        "\"wire_compression\":\"none\"," +
         "\"max_payload_bytes\":65536," +
         "\"scenarios\":[\"environment_baseline\",\"authoritative_state\",\"room_relay\"]," +
         "\"tuning\":[" +

@@ -204,8 +204,34 @@ int main(void) {
   CHECK(strstr(server_json, "\"deadline_ns\":5000000") != NULL);
   CHECK(strstr(client_json, "\"deadline_ns\":70000000") != NULL);
   CHECK(strstr(client_json, "\"never_received_flows\":1") != NULL);
+  CHECK(strstr(server_json, "\"timestamp_order_violations\":0") != NULL);
+  CHECK(strstr(client_json, "\"timestamp_order_violations\":0") != NULL);
   free(server_json);
   free(client_json);
+
+  bk_metrics *order = bk_metrics_new(&cfg);
+  CHECK(order != NULL);
+  bk_header invalid_order = input;
+  invalid_order.seq = 10;
+  invalid_order.sched_ts_ns = 300;
+  invalid_order.send_ts_ns = 200;
+  bk_metrics_on_recv(order, 0, &invalid_order, 400);
+  // A duplicate with the same bad timestamps is not another measured unique
+  // receive and must not increment the validity counter.
+  bk_metrics_on_recv(order, 0, &invalid_order, 400);
+  invalid_order.seq = 11;
+  invalid_order.sched_ts_ns = 100;
+  invalid_order.send_ts_ns = 300;
+  bk_metrics_on_recv(order, 0, &invalid_order, 200);
+  invalid_order.seq = 12;
+  invalid_order.sched_ts_ns = 300;
+  invalid_order.send_ts_ns = 200;
+  bk_metrics_on_recv(order, 0, &invalid_order, 100);
+  CHECK(bk_metrics_dump_json(order, server_path) == 0);
+  char *order_json = read_file(server_path);
+  CHECK(strstr(order_json, "\"timestamp_order_violations\":3") != NULL);
+  free(order_json);
+  bk_metrics_free(order);
   unlink(server_path);
   unlink(client_path);
 

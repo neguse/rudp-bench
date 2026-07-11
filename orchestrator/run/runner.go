@@ -47,11 +47,18 @@ type sampleEvent struct {
 	err    error
 }
 
-func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
+func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 	cfg = cfg.withDefaults()
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	lock, err := acquireAcquisitionLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, lock.close())
+	}()
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir output_dir: %w", err)
 	}
@@ -137,11 +144,39 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		if configuredLoss(cfg.Netem) && deterministicLoss(cfg.Netem) {
 			result.Netem.LossEvidence = unsupportedDeterministicLossEvidence()
 		}
-		if err := netops.RunCommands(runCtx, setup, netops.RunOptions{}); err != nil {
-			extraReasons = append(extraReasons, fmt.Sprintf("netns setup failed: %v", err))
-			return finishRunResult(result, GateInput{ExtraReasons: extraReasons, NetemEnabled: true}, resultPath, summaryPath)
+		setupCompleted := 0
+		for _, command := range setup {
+			if err := netops.RunCommands(runCtx, []netops.Command{command}, netops.RunOptions{}); err != nil {
+				extraReasons = append(extraReasons, fmt.Sprintf("netns setup failed: %v", err))
+				var cleanupErr error
+				if cleanup := partialNetemTeardown(teardown, setupCompleted); len(cleanup) > 0 {
+					cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					cleanupErr = netops.RunCommandsBestEffort(cleanupCtx, cleanup, netops.RunOptions{})
+					cancel()
+					if cleanupErr != nil {
+						extraReasons = append(extraReasons, fmt.Sprintf("partial netns cleanup failed: %v", cleanupErr))
+					}
+				}
+				finished, finishErr := finishRunResult(result, GateInput{ExtraReasons: extraReasons, NetemEnabled: true}, resultPath, summaryPath)
+				if cleanupErr != nil {
+					cleanupErr = fmt.Errorf("partial netns cleanup failed: %w", cleanupErr)
+				}
+				return finished, errors.Join(finishErr, cleanupErr)
+			}
+			setupCompleted++
 		}
-		defer teardownNetem(teardown)
+		defer func() {
+			if err := teardownNetem(teardown); err != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("netns teardown failed: %w", err))
+			}
+		}()
+		if pair.DisableOffloads {
+			offloads := netops.ReadOffloadEvidence(runCtx, pair)
+			result.Netem.Offloads = &offloads
+			if len(netops.ValidateOffloadEvidence(pair, &offloads)) > 0 {
+				return finishRunResult(result, GateInput{NetemEnabled: true}, resultPath, summaryPath)
+			}
+		}
 
 		// netem 実効値 gate(校正 §3): ping/iperf3 を実際に流し、実測の
 		// RTT/loss が設定と一致することをベンチ開始前に機械検証する。
@@ -767,15 +802,38 @@ func readNetnsUDPStats(ctx context.Context, ns string) (netops.UDPStats, error) 
 	return netops.ParseUDPStats(string(out))
 }
 
-func teardownNetem(cmds []netops.Command) {
+func teardownNetem(cmds []netops.Command) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = netops.RunCommands(ctx, cmds, netops.RunOptions{})
+	return netops.RunCommandsBestEffort(ctx, cmds, netops.RunOptions{})
+}
+
+func partialNetemTeardown(teardown []netops.Command, setupCompleted int) []netops.Command {
+	if setupCompleted <= 0 || len(teardown) == 0 {
+		return nil
+	}
+	// BuildSetupCommands creates server then client namespace first. If only
+	// the server namespace was created, do not delete a pre-existing client
+	// namespace whose creation failed. Once both are ours, run full teardown,
+	// including deterministic-loss pin cleanup.
+	if setupCompleted == 1 {
+		return teardown[:1]
+	}
+	return teardown
 }
 
 func finishRunResult(result *Result, gateInput GateInput, resultPath, summaryPath string) (*Result, error) {
 	gateInput.Config = &result.Config
 	if result.Netem != nil {
+		if result.Config.Netem != nil && result.Config.Netem.DisableOffloads &&
+			result.Netem.Offloads != nil && result.Netem.OffloadsAfter == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			after := netops.ReadOffloadEvidence(ctx, result.Config.Netem.pairSpec())
+			cancel()
+			result.Netem.OffloadsAfter = &after
+		}
+		gateInput.Offloads = result.Netem.Offloads
+		gateInput.OffloadsAfter = result.Netem.OffloadsAfter
 		gateInput.LossEvidence = result.Netem.LossEvidence
 	}
 	gate := EvaluateGate(gateInput)

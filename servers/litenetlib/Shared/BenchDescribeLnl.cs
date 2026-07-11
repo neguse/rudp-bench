@@ -37,6 +37,8 @@ public static class LnlDescribe
             "logic thread internally); client: single (StartInManualMode per conn - no internal threads, " +
             "all conns pumped from one loop via PollEvents+ManualUpdate)\"," +
             "\"encryption\":false," +
+            "\"payload_pattern\":\"splitmix64-v1\"," +
+            "\"wire_compression\":\"none\"," +
             "\"max_payload_bytes\":" + maxUnreliable + "," +
             "\"scenarios\":[\"environment_baseline\",\"authoritative_state\",\"room_relay\"]," +
             "\"tuning\":[" +

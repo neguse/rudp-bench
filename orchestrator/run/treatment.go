@@ -20,10 +20,17 @@ type advertisedTreatment struct {
 	CCAlgo          string                       `json:"cc_algo"`
 	ThreadModel     string                       `json:"thread_model"`
 	Encryption      bool                         `json:"encryption"`
+	PayloadPattern  string                       `json:"payload_pattern"`
+	WireCompression string                       `json:"wire_compression"`
 	MaxPayloadBytes int                          `json:"max_payload_bytes"`
 	Scenarios       []string                     `json:"scenarios"`
 	Tuning          []map[string]json.RawMessage `json:"tuning"`
 }
+
+const (
+	payloadPatternSplitMix64V1 = "splitmix64-v1"
+	wireCompressionNone        = "none"
+)
 
 type treatmentValidation struct {
 	Invalid     []string
@@ -140,7 +147,7 @@ func classifyScenarioTreatment(record TreatmentRecord, cfg RunConfig) treatmentV
 		context := item.role + " --describe"
 		_, err := requireJSONObject(item.description.Description, context,
 			"transport", "class_mapping", "coalescing", "cc_algo", "thread_model", "encryption",
-			"max_payload_bytes", "scenarios", "tuning")
+			"payload_pattern", "wire_compression", "max_payload_bytes", "scenarios", "tuning")
 		if err != nil {
 			validation.Invalid = append(validation.Invalid, err.Error())
 			continue
@@ -152,6 +159,12 @@ func classifyScenarioTreatment(record TreatmentRecord, cfg RunConfig) treatmentV
 		}
 		if advertised.Transport != cfg.Transport {
 			validation.Invalid = append(validation.Invalid, fmt.Sprintf("%s transport=%q, want %q", context, advertised.Transport, cfg.Transport))
+		}
+		if advertised.PayloadPattern != payloadPatternSplitMix64V1 {
+			validation.Invalid = append(validation.Invalid, fmt.Sprintf("%s payload_pattern=%q, want %q", context, advertised.PayloadPattern, payloadPatternSplitMix64V1))
+		}
+		if advertised.WireCompression != wireCompressionNone {
+			validation.Invalid = append(validation.Invalid, fmt.Sprintf("%s wire_compression=%q, want %q", context, advertised.WireCompression, wireCompressionNone))
 		}
 		for name, value := range map[string]string{
 			"coalescing":   advertised.Coalescing,

@@ -3,6 +3,7 @@ package netops
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -128,8 +129,13 @@ type PairSpec struct {
 	ClientVeth     string
 	ServerAddrCIDR string
 	ClientAddrCIDR string
+	LinkMTUBytes   int `json:"link_mtu_bytes"`
 	ServerEgress   Netem
 	ClientEgress   Netem
+	// DisableOffloads disables packet segmentation/coalescing features on both
+	// veth endpoints. This is required when qdisc packet counts are interpreted
+	// as application-message exposure evidence.
+	DisableOffloads bool `json:"disable_offloads,omitempty"`
 	// SelfExe: orchestrator 自身の実行ファイル path。LossSeed(決定的 loss
 	// 注入)を使う egress がある場合に必須(`ip netns exec <ns> <SelfExe>
 	// losstrace attach ...` を setup commands に組み込むため)
@@ -213,6 +219,7 @@ func DefaultPair(prefix string) PairSpec {
 		ClientVeth:     prefix + "-vc",
 		ServerAddrCIDR: "10.200.0.1/24",
 		ClientAddrCIDR: "10.200.0.2/24",
+		LinkMTUBytes:   1500,
 	}
 }
 
@@ -226,12 +233,20 @@ func BuildSetupCommands(spec PairSpec) ([]Command, error) {
 		{"ip", []string{"link", "add", spec.ServerVeth, "type", "veth", "peer", "name", spec.ClientVeth}},
 		{"ip", []string{"link", "set", spec.ServerVeth, "netns", spec.ServerNS}},
 		{"ip", []string{"link", "set", spec.ClientVeth, "netns", spec.ClientNS}},
+		{"ip", []string{"-n", spec.ServerNS, "link", "set", "dev", spec.ServerVeth, "mtu", strconv.Itoa(spec.LinkMTUBytes)}},
+		{"ip", []string{"-n", spec.ClientNS, "link", "set", "dev", spec.ClientVeth, "mtu", strconv.Itoa(spec.LinkMTUBytes)}},
 		{"ip", []string{"-n", spec.ServerNS, "addr", "add", spec.ServerAddrCIDR, "dev", spec.ServerVeth}},
 		{"ip", []string{"-n", spec.ClientNS, "addr", "add", spec.ClientAddrCIDR, "dev", spec.ClientVeth}},
 		{"ip", []string{"-n", spec.ServerNS, "link", "set", "lo", "up"}},
 		{"ip", []string{"-n", spec.ClientNS, "link", "set", "lo", "up"}},
 		{"ip", []string{"-n", spec.ServerNS, "link", "set", spec.ServerVeth, "up"}},
 		{"ip", []string{"-n", spec.ClientNS, "link", "set", spec.ClientVeth, "up"}},
+	}
+	if spec.DisableOffloads {
+		cmds = append(cmds,
+			buildDisableOffloadsCommand(spec.ServerNS, spec.ServerVeth),
+			buildDisableOffloadsCommand(spec.ClientNS, spec.ClientVeth),
+		)
 	}
 	if spec.ServerEgress.Enabled() {
 		args, err := spec.ServerEgress.Args()
@@ -300,6 +315,27 @@ type RunOptions struct {
 }
 
 func RunCommands(ctx context.Context, cmds []Command, opts RunOptions) error {
+	for _, command := range cmds {
+		if err := runCommand(ctx, command, opts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RunCommandsBestEffort executes every command and joins failures. Teardown
+// paths use it so one missing namespace cannot leave another namespace behind.
+func RunCommandsBestEffort(ctx context.Context, cmds []Command, opts RunOptions) error {
+	var errs []error
+	for _, command := range cmds {
+		if err := runCommand(ctx, command, opts); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func runCommand(ctx context.Context, command Command, opts RunOptions) error {
 	stdout := opts.Stdout
 	if stdout == nil {
 		stdout = io.Discard
@@ -308,17 +344,15 @@ func RunCommands(ctx context.Context, cmds []Command, opts RunOptions) error {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	for _, c := range cmds {
-		if opts.DryRun {
-			fmt.Fprintln(stdout, c.String())
-			continue
-		}
-		cmd := exec.CommandContext(ctx, c.Name, c.Args...)
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("%s: %w", c.String(), err)
-		}
+	if opts.DryRun {
+		fmt.Fprintln(stdout, command.String())
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, command.Name, command.Args...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s: %w", command.String(), err)
 	}
 	return nil
 }
@@ -344,6 +378,9 @@ func validatePair(spec PairSpec) error {
 		if value == "" {
 			return fmt.Errorf("%s is required", name)
 		}
+	}
+	if spec.LinkMTUBytes <= 0 || spec.LinkMTUBytes > 65535 {
+		return fmt.Errorf("link_mtu_bytes must be between 1 and 65535")
 	}
 	return nil
 }

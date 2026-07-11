@@ -16,6 +16,9 @@ type QdiscStats struct {
 	DelayMS     float64 `json:"delay_ms,omitempty"`
 	JitterMS    float64 `json:"jitter_ms,omitempty"`
 	LossPercent float64 `json:"loss_pct,omitempty"`
+	// Non-zero only when tc reports correlated random loss. Conformance
+	// requires independent loss, so this must remain zero there.
+	LossCorrelationPercent float64 `json:"loss_correlation_pct,omitempty"`
 	// gemodel 検出時のみ非ゼロ: p/(p+r) と 1/r から再構成した値
 	LossBurstLen float64 `json:"loss_burst_len,omitempty"`
 	Rate         string  `json:"rate,omitempty"`
@@ -94,6 +97,9 @@ func ValidateNetemEcho(expected Netem, actual QdiscStats) error {
 	} else if !closeFloat(actual.LossPercent, expected.LossPercent) {
 		return fmt.Errorf("netem loss_percent = %g, want %g", actual.LossPercent, expected.LossPercent)
 	}
+	if actual.LossCorrelationPercent != 0 {
+		return fmt.Errorf("netem loss correlation = %g%%, want independent random loss (0%%)", actual.LossCorrelationPercent)
+	}
 	if expected.Rate != "" && !strings.EqualFold(actual.Rate, expected.Rate) {
 		return fmt.Errorf("netem rate = %q, want %q", actual.Rate, expected.Rate)
 	}
@@ -143,11 +149,20 @@ func parseQdiscFields(fields []string, stat *QdiscStats) {
 					stat.LossBurstLen = 100.0 / r
 				}
 			} else {
+				var percentages []float64
 				for j := i + 1; j < len(fields); j++ {
 					if strings.HasSuffix(fields[j], "%") {
-						stat.LossPercent, _ = strconv.ParseFloat(strings.TrimSuffix(fields[j], "%"), 64)
-						break
+						value, err := strconv.ParseFloat(strings.TrimSuffix(fields[j], "%"), 64)
+						if err == nil {
+							percentages = append(percentages, value)
+						}
 					}
+				}
+				if len(percentages) > 0 {
+					stat.LossPercent = percentages[0]
+				}
+				if len(percentages) > 1 {
+					stat.LossCorrelationPercent = percentages[1]
 				}
 			}
 		case "rate":

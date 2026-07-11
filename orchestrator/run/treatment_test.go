@@ -16,10 +16,30 @@ func treatmentDescription(mapping string) json.RawMessage {
   "transport":"fake",
   "class_mapping":` + mapping + `,
   "coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,
+  "payload_pattern":"splitmix64-v1","wire_compression":"none",
   "max_payload_bytes":1024,
   "scenarios":["environment_baseline","authoritative_state","room_relay"],
   "tuning":[{"knob":"buffer","value":"1MB","upstream_ref":"https://example.invalid/upstream"}]
 }`)
+}
+
+func TestValidateScenarioTreatmentRejectsPayloadOrCompressionDrift(t *testing.T) {
+	description := treatmentDescription(validClassMapping)
+	tests := map[string]string{
+		"missing payload pattern": strings.Replace(string(description), `  "payload_pattern":"splitmix64-v1",`, "", 1),
+		"wrong payload pattern":   strings.Replace(string(description), `"payload_pattern":"splitmix64-v1"`, `"payload_pattern":"periodic"`, 1),
+		"missing compression":     strings.Replace(string(description), `"wire_compression":"none",`, "", 1),
+		"enabled compression":     strings.Replace(string(description), `"wire_compression":"none"`, `"wire_compression":"deflate"`, 1),
+	}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			drifted := json.RawMessage(raw)
+			record, cfg := treatmentFixture(drifted, drifted)
+			if reasons := validateScenarioTreatment(record, cfg); len(reasons) == 0 {
+				t.Fatal("drifted payload contract unexpectedly accepted")
+			}
+		})
+	}
 }
 
 func treatmentFixture(server, client json.RawMessage) (TreatmentRecord, RunConfig) {

@@ -67,9 +67,17 @@ public static class BenchPayload
             return false;
         }
 
-        for (var i = BenchConstants.HeaderSize; i < buffer.Length; i++)
+        var key = BodyPatternKey(header);
+        var bodyIndex = 0;
+        while (BenchConstants.HeaderSize + bodyIndex < buffer.Length)
         {
-            buffer[i] = BodyByte(header, i - BenchConstants.HeaderSize);
+            var block = BodyPatternBlock(key, (ulong)(bodyIndex / sizeof(ulong)));
+            for (var offset = 0;
+                 offset < sizeof(ulong) && BenchConstants.HeaderSize + bodyIndex < buffer.Length;
+                 offset++, bodyIndex++)
+            {
+                buffer[BenchConstants.HeaderSize + bodyIndex] = (byte)(block >> (offset * 8));
+            }
         }
         return true;
     }
@@ -81,11 +89,19 @@ public static class BenchPayload
             return false;
         }
 
-        for (var i = BenchConstants.HeaderSize; i < buffer.Length; i++)
+        var key = BodyPatternKey(header);
+        var bodyIndex = 0;
+        while (BenchConstants.HeaderSize + bodyIndex < buffer.Length)
         {
-            if (buffer[i] != BodyByte(header, i - BenchConstants.HeaderSize))
+            var block = BodyPatternBlock(key, (ulong)(bodyIndex / sizeof(ulong)));
+            for (var offset = 0;
+                 offset < sizeof(ulong) && BenchConstants.HeaderSize + bodyIndex < buffer.Length;
+                 offset++, bodyIndex++)
             {
-                return false;
+                if (buffer[BenchConstants.HeaderSize + bodyIndex] != (byte)(block >> (offset * 8)))
+                {
+                    return false;
+                }
             }
         }
         return true;
@@ -149,16 +165,34 @@ public static class BenchPayload
         return true;
     }
 
-    private static byte BodyByte(BenchHeader header, int bodyIndex)
+    private static ulong SplitMix64(ulong value)
     {
-        var i = (uint)bodyIndex;
-        return (byte)(
-            (byte)(header.Seq >> ((bodyIndex & 7) * 8)) ^
-            (byte)(header.SchedTsNs >> (((bodyIndex + 3) & 7) * 8)) ^
-            (byte)(header.SendTsNs >> (((bodyIndex + 5) & 7) * 8)) ^
-            (byte)(header.OriginId >> ((bodyIndex & 3) * 8)) ^
-            header.Flags ^
-            header.TrafficId ^
-            (byte)i);
+        unchecked
+        {
+            value += 0x9e3779b97f4a7c15UL;
+            value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9UL;
+            value = (value ^ (value >> 27)) * 0x94d049bb133111ebUL;
+            return value ^ (value >> 31);
+        }
+    }
+
+    private static ulong BodyPatternKey(BenchHeader header)
+    {
+        // prng-v1 folds the complete 32-byte wire header as four LE words.
+        var tail = (ulong)header.Flags | ((ulong)header.OriginId << 8) |
+                   ((ulong)header.TrafficId << 40);
+        var key = 0x727564702d707231UL; // "rudp-pr1"
+        key = SplitMix64(key ^ header.Seq);
+        key = SplitMix64(key ^ header.SchedTsNs);
+        key = SplitMix64(key ^ header.SendTsNs);
+        return SplitMix64(key ^ tail);
+    }
+
+    private static ulong BodyPatternBlock(ulong key, ulong blockIndex)
+    {
+        unchecked
+        {
+            return SplitMix64(key + blockIndex * 0x9e3779b97f4a7c15UL);
+        }
     }
 }

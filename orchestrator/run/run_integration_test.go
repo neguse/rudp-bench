@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/monotonic"
+	"github.com/neguse/rudp-bench/orchestrator/netops"
 )
 
 func TestMain(m *testing.M) {
@@ -31,9 +33,9 @@ func TestMain(m *testing.M) {
 
 func fakeDescription() string {
 	if os.Getenv("FAKE_DESCRIBE_MODE") == "invalid_unsupported" {
-		return `{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"fake-reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":65536,"scenarios":[],"tuning":[]}`
+		return `{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"fake-reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"payload_pattern":"splitmix64-v1","wire_compression":"none","max_payload_bytes":65536,"scenarios":[],"tuning":[]}`
 	}
-	return `{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"fake-best-effort","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"fake-reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":65536,"scenarios":["environment_baseline","authoritative_state","room_relay"],"tuning":[]}`
+	return `{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"fake-best-effort","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"fake-reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"payload_pattern":"splitmix64-v1","wire_compression":"none","max_payload_bytes":65536,"scenarios":["environment_baseline","authoritative_state","room_relay"],"tuning":[]}`
 }
 
 func TestRunIntegrationLocalFakeProcesses(t *testing.T) {
@@ -298,5 +300,30 @@ func fakeMetricsForProc(index int) string {
 			bins(map[int]uint64{0: 2}),
 			RawCounts{Slots: 5, Submitted: 5, RecvMeasured: 7},
 		)
+	}
+}
+
+func TestPartialNetemTeardownOnlyDeletesOwnedNamespaces(t *testing.T) {
+	commands := []netops.Command{
+		{Name: "ip", Args: []string{"netns", "del", "server"}},
+		{Name: "ip", Args: []string{"netns", "del", "client"}},
+		{Name: "rm", Args: []string{"-rf", "/pins"}},
+	}
+	if got := partialNetemTeardown(commands, 0); got != nil {
+		t.Fatalf("zero completed setup commands returned cleanup: %v", got)
+	}
+	if got := partialNetemTeardown(commands, 1); len(got) != 1 || got[0].Args[2] != "server" {
+		t.Fatalf("server-only cleanup=%v", got)
+	}
+	if got := partialNetemTeardown(commands, 2); len(got) != len(commands) {
+		t.Fatalf("full cleanup=%v", got)
+	}
+}
+
+func TestTeardownNetemReturnsCommandFailures(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-teardown-command")
+	err := teardownNetem([]netops.Command{{Name: missing}})
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("teardown error=%v, want command failure", err)
 	}
 }

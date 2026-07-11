@@ -26,7 +26,8 @@ public readonly record struct BenchRawCounts(
     ulong Slots,
     ulong Submitted,
     ulong RecvMeasured,
-    ulong RecvUnmeasured);
+    ulong RecvUnmeasured,
+    ulong TimestampOrderViolations);
 
 public sealed class BenchMetrics
 {
@@ -126,6 +127,7 @@ public sealed class BenchMetrics
     private ulong rawSubmitted;
     private ulong rawRecvMeasured;
     private ulong rawRecvUnmeasured;
+    private ulong rawTimestampOrderViolations;
 
     public BenchMetrics(BenchMetricsConfig config)
     {
@@ -269,6 +271,10 @@ public sealed class BenchMetrics
 
         aggregate.Counts.DeliveredUnique++;
         tm.Counts.DeliveredUnique++;
+        if (header.SchedTsNs > header.SendTsNs || header.SendTsNs > recvTsNs)
+        {
+            rawTimestampOrderViolations++;
+        }
         var schedLatency = BenchClock.SaturatingSub(recvTsNs, header.SchedTsNs);
         var sendLatency = BenchClock.SaturatingSub(recvTsNs, header.SendTsNs);
         aggregate.LatencySched.Add(schedLatency);
@@ -354,7 +360,7 @@ public sealed class BenchMetrics
     }
 
     public BenchRawCounts RawCounts() =>
-        new(rawSlots, rawSubmitted, rawRecvMeasured, rawRecvUnmeasured);
+        new(rawSlots, rawSubmitted, rawRecvMeasured, rawRecvUnmeasured, rawTimestampOrderViolations);
 
     public BenchClassCounts Counts(bool mustDeliver) => FinalizedCounts(
         classes[mustDeliver ? BenchConstants.ClassMustDeliver : BenchConstants.ClassLossTolerant].Counts);
@@ -390,6 +396,7 @@ public sealed class BenchMetrics
             .Append(",\"submitted\":").Append(rawSubmitted.ToString(CultureInfo.InvariantCulture))
             .Append(",\"recv_measured\":").Append(rawRecvMeasured.ToString(CultureInfo.InvariantCulture))
             .Append(",\"recv_unmeasured\":").Append(rawRecvUnmeasured.ToString(CultureInfo.InvariantCulture))
+            .Append(",\"timestamp_order_violations\":").Append(rawTimestampOrderViolations.ToString(CultureInfo.InvariantCulture))
             .Append("}}");
         return sb.ToString();
     }

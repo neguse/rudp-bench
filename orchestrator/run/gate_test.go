@@ -2,6 +2,7 @@ package run
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +78,20 @@ func TestEvaluateGateInvalidReasons(t *testing.T) {
 	}
 }
 
+func TestEvaluateGateRejectsTimestampOrderViolations(t *testing.T) {
+	metrics := gateMetrics(100, 100)
+	metrics.Raw.TimestampOrderViolations = 2
+	gate := EvaluateGate(GateInput{
+		Control:            controlResultWithMargin(10),
+		Metrics:            metrics,
+		Processes:          []ProcessResult{{Role: "server", ProcIndex: -1, PID: 10, Exited: true, ExitCode: 0}},
+		AttemptedThreshold: 0.99,
+	})
+	if gate.Verdict != VerdictInvalid || !reasonsContain(gate.Reasons, "timestamp_order_violations=2, want 0") {
+		t.Fatalf("gate = %+v", gate)
+	}
+}
+
 func TestEvaluateGateServerUDPDropIsSUTFailure(t *testing.T) {
 	gate := EvaluateGate(GateInput{
 		Control:            controlResultWithMargin(10),
@@ -92,6 +107,80 @@ func TestEvaluateGateServerUDPDropIsSUTFailure(t *testing.T) {
 	if !reasonsContain(gate.SUTFailureReasons, "server netns UDP drop delta") {
 		t.Fatalf("server receive drop must be attributed to the SUT: %+v", gate)
 	}
+}
+
+func TestEvaluateGateRequiresRequestedOffloadEvidence(t *testing.T) {
+	cfg := RunConfig{Netem: &NetemRegime{DisableOffloads: true}}
+	gate := EvaluateGate(GateInput{
+		Control:            controlResultWithMargin(10),
+		Metrics:            gateMetrics(100, 100),
+		Processes:          []ProcessResult{{Role: "server", ProcIndex: -1, PID: 10, Exited: true, ExitCode: 0}},
+		AttemptedThreshold: 0.99,
+		NetemEnabled:       true,
+		Config:             &cfg,
+	})
+	if gate.Verdict != VerdictInvalid || !reasonsContain(gate.Reasons, "offload evidence: missing") {
+		t.Fatalf("gate = %+v", gate)
+	}
+
+	cfg.Netem.DisableOffloads = false
+	gate = EvaluateGate(GateInput{
+		Control:            controlResultWithMargin(10),
+		Metrics:            gateMetrics(100, 100),
+		Processes:          []ProcessResult{{Role: "server", ProcIndex: -1, PID: 10, Exited: true, ExitCode: 0}},
+		AttemptedThreshold: 0.99,
+		NetemEnabled:       true,
+		Config:             &cfg,
+	})
+	if gate.Verdict != VerdictValid {
+		t.Fatalf("disabled offload gate changed legacy behavior: %+v", gate)
+	}
+}
+
+func TestEvaluateGateRequiresPostMeasurementOffloadEvidence(t *testing.T) {
+	cfg := RunConfig{Netem: &NetemRegime{DisableOffloads: true, LinkMTUBytes: 1500}}
+	before := validGateOffloadEvidence(cfg.Netem.pairSpec())
+	input := GateInput{
+		Control:            controlResultWithMargin(10),
+		Metrics:            gateMetrics(100, 100),
+		Processes:          []ProcessResult{{Role: "server", ProcIndex: -1, PID: 10, Exited: true, ExitCode: 0}},
+		AttemptedThreshold: 0.99,
+		NetemEnabled:       true,
+		Config:             &cfg,
+		Offloads:           &before,
+	}
+	gate := EvaluateGate(input)
+	if gate.Verdict != VerdictInvalid || !reasonsContain(gate.Reasons, "after measurement: missing") {
+		t.Fatalf("missing post-measurement readback accepted: %+v", gate)
+	}
+	input.OffloadsAfter = &before
+	gate = EvaluateGate(input)
+	if gate.Verdict != VerdictValid {
+		t.Fatalf("valid before/after readback rejected: %+v", gate)
+	}
+}
+
+func validGateOffloadEvidence(pair netops.PairSpec) netops.OffloadEvidence {
+	var raw strings.Builder
+	raw.WriteString("Features for benchmark-veth:\n")
+	features := map[string]netops.OffloadFeatureState{}
+	for _, name := range netops.RequiredOffloadFeatures() {
+		raw.WriteString(name + ": off\n")
+		features[name] = netops.OffloadFeatureState{}
+	}
+	sample := func(namespace, device string) netops.OffloadInterfaceEvidence {
+		return netops.OffloadInterfaceEvidence{
+			Namespace: namespace, Device: device, LinkMTUBytes: pair.LinkMTUBytes,
+			Features: features, Raw: raw.String(),
+			LinkRaw: `[{"ifname":"` + device + `","mtu":1500}]`,
+		}
+	}
+	evidence := netops.OffloadEvidence{
+		Version: netops.OffloadEvidenceVersion, RequiredFeatures: netops.RequiredOffloadFeatures(),
+		Server: sample(pair.ServerNS, pair.ServerVeth), Client: sample(pair.ClientNS, pair.ClientVeth),
+	}
+	evidence.SHA256 = netops.HashOffloadEvidence(evidence)
+	return evidence
 }
 
 func TestValidateNetemLossEvidenceRequiresDirectionalInWindowDrops(t *testing.T) {
@@ -126,6 +215,25 @@ func TestValidateNetemLossEvidenceRejectsUnreadableOrOutOfWindowSnapshots(t *tes
 	}
 }
 
+func TestValidateNetemLossEvidenceRejectsSamplesOutsidePairBracket(t *testing.T) {
+	cfg, controlResult, evidence := validNetemLossEvidenceFixture()
+	evidence.Before.ClientEgress.CaptureStartNS = evidence.Before.ServerEgress.CaptureFinishNS - 1
+	reasons := ValidateNetemLossEvidence(&cfg, controlResult, evidence)
+	if !reasonsContain(reasons, "pair bracket does not enclose sequential server/client samples") {
+		t.Fatalf("inconsistent pair/sample timing reasons = %v", reasons)
+	}
+}
+
+func TestValidateNetemLossEvidenceRejectsRawStatsDrift(t *testing.T) {
+	cfg, controlResult, evidence := validNetemLossEvidenceFixture()
+	evidence.Before.ClientEgress.Raw = strings.Replace(
+		evidence.Before.ClientEgress.Raw, "loss random 2%", "loss random 2% 25%", 1)
+	reasons := ValidateNetemLossEvidence(&cfg, controlResult, evidence)
+	if !reasonsContain(reasons, "stored stats do not match raw tc readback") {
+		t.Fatalf("raw/stats drift reasons = %v", reasons)
+	}
+}
+
 func TestValidateNetemLossEvidenceOnlyRequiresDropOnConfiguredDirection(t *testing.T) {
 	cfg, controlResult, evidence := validNetemLossEvidenceFixture()
 	cfg.Netem.ServerEgress = netops.Netem{}
@@ -133,6 +241,8 @@ func TestValidateNetemLossEvidenceOnlyRequiresDropOnConfiguredDirection(t *testi
 	serverAfter := netops.QdiscStats{Kind: "noqueue", Root: true, SentPackets: 20}
 	evidence.Before.ServerEgress.Stats = &serverBefore
 	evidence.After.ServerEgress.Stats = &serverAfter
+	evidence.Before.ServerEgress.Raw = qdiscFixtureRaw(serverBefore)
+	evidence.After.ServerEgress.Raw = qdiscFixtureRaw(serverAfter)
 	delta := netops.DeltaQdiscPair(*evidence.Before, *evidence.After)
 	evidence.Delta = &delta
 	if reasons := ValidateNetemLossEvidence(&cfg, controlResult, evidence); len(reasons) != 0 {
@@ -169,14 +279,14 @@ func validNetemLossEvidenceFixture() (RunConfig, *control.Result, *NetemLossEvid
 	before := netops.QdiscPairSnapshot{
 		CaptureStartNS:  110,
 		CaptureFinishNS: 160,
-		ServerEgress:    netops.QdiscSample{Namespace: "srv", Device: "vs", CaptureStartNS: 110, CaptureFinishNS: 130, Stats: &serverBefore},
-		ClientEgress:    netops.QdiscSample{Namespace: "cli", Device: "vc", CaptureStartNS: 135, CaptureFinishNS: 155, Stats: &clientBefore},
+		ServerEgress:    netops.QdiscSample{Namespace: "srv", Device: "vs", CaptureStartNS: 110, CaptureFinishNS: 130, Stats: &serverBefore, Raw: qdiscFixtureRaw(serverBefore)},
+		ClientEgress:    netops.QdiscSample{Namespace: "cli", Device: "vc", CaptureStartNS: 135, CaptureFinishNS: 155, Stats: &clientBefore, Raw: qdiscFixtureRaw(clientBefore)},
 	}
 	after := netops.QdiscPairSnapshot{
 		CaptureStartNS:  800,
 		CaptureFinishNS: 850,
-		ServerEgress:    netops.QdiscSample{Namespace: "srv", Device: "vs", CaptureStartNS: 800, CaptureFinishNS: 820, Stats: &serverAfter},
-		ClientEgress:    netops.QdiscSample{Namespace: "cli", Device: "vc", CaptureStartNS: 825, CaptureFinishNS: 845, Stats: &clientAfter},
+		ServerEgress:    netops.QdiscSample{Namespace: "srv", Device: "vs", CaptureStartNS: 800, CaptureFinishNS: 820, Stats: &serverAfter, Raw: qdiscFixtureRaw(serverAfter)},
+		ClientEgress:    netops.QdiscSample{Namespace: "cli", Device: "vc", CaptureStartNS: 825, CaptureFinishNS: 845, Stats: &clientAfter, Raw: qdiscFixtureRaw(clientAfter)},
 	}
 	delta := netops.DeltaQdiscPair(before, after)
 	return cfg, &control.Result{Schedule: schedule}, &NetemLossEvidence{
@@ -184,6 +294,12 @@ func validNetemLossEvidenceFixture() (RunConfig, *control.Result, *NetemLossEvid
 		Scope: lossEvidenceScopeEffectiveInner, Schedule: schedule,
 		Before: &before, After: &after, Delta: &delta,
 	}
+}
+
+func qdiscFixtureRaw(stats netops.QdiscStats) string {
+	return fmt.Sprintf("qdisc %s 1: root limit %d loss random %g%%\nSent %d bytes %d pkt (dropped %d, overlimits %d requeues %d)\n",
+		stats.Kind, stats.Limit, stats.LossPercent, stats.SentBytes, stats.SentPackets,
+		stats.Dropped, stats.Overlimits, stats.Requeues)
 }
 
 func controlResultWithMargin(margin int64) *control.Result {

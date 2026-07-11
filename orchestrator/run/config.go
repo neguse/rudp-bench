@@ -148,15 +148,17 @@ type RunConfig struct {
 }
 
 type NetemRegime struct {
-	Prefix         string       `json:"prefix,omitempty"`
-	ServerNS       string       `json:"server_ns,omitempty"`
-	ClientNS       string       `json:"client_ns,omitempty"`
-	ServerVeth     string       `json:"server_veth,omitempty"`
-	ClientVeth     string       `json:"client_veth,omitempty"`
-	ServerAddrCIDR string       `json:"server_addr_cidr,omitempty"`
-	ClientAddrCIDR string       `json:"client_addr_cidr,omitempty"`
-	ServerEgress   netops.Netem `json:"server_egress,omitempty"`
-	ClientEgress   netops.Netem `json:"client_egress,omitempty"`
+	Prefix          string       `json:"prefix,omitempty"`
+	ServerNS        string       `json:"server_ns,omitempty"`
+	ClientNS        string       `json:"client_ns,omitempty"`
+	ServerVeth      string       `json:"server_veth,omitempty"`
+	ClientVeth      string       `json:"client_veth,omitempty"`
+	ServerAddrCIDR  string       `json:"server_addr_cidr,omitempty"`
+	ClientAddrCIDR  string       `json:"client_addr_cidr,omitempty"`
+	LinkMTUBytes    int          `json:"link_mtu_bytes,omitempty"`
+	DisableOffloads bool         `json:"disable_offloads,omitempty"`
+	ServerEgress    netops.Netem `json:"server_egress,omitempty"`
+	ClientEgress    netops.Netem `json:"client_egress,omitempty"`
 }
 
 func LoadConfig(path string) (RunConfig, error) {
@@ -300,6 +302,9 @@ func (cfg RunConfig) validate() error {
 	if cfg.AttemptedThreshold < 0 || cfg.AttemptedThreshold > 1 {
 		errs = append(errs, fmt.Errorf("attempted_threshold must be between 0 and 1, got %g", cfg.AttemptedThreshold))
 	}
+	if cfg.Netem != nil && (cfg.Netem.LinkMTUBytes < 0 || cfg.Netem.LinkMTUBytes > 65535) {
+		errs = append(errs, fmt.Errorf("netem.link_mtu_bytes must be between 1 and 65535 when specified"))
+	}
 	if cfg.ControlTimeout.Duration < 0 || cfg.SamplerInterval.Duration < 0 || cfg.ProcessExitTimeout.Duration < 0 {
 		errs = append(errs, fmt.Errorf("timeouts and sampler_interval must be >= 0"))
 	}
@@ -326,8 +331,12 @@ func (n NetemRegime) pairSpec() netops.PairSpec {
 	if n.ClientAddrCIDR != "" {
 		spec.ClientAddrCIDR = n.ClientAddrCIDR
 	}
+	if n.LinkMTUBytes != 0 {
+		spec.LinkMTUBytes = n.LinkMTUBytes
+	}
 	spec.ServerEgress = n.ServerEgress
 	spec.ClientEgress = n.ClientEgress
+	spec.DisableOffloads = n.DisableOffloads
 	// 決定的 loss 注入(loss_seed)は netns 内で orchestrator 自身を
 	// `ip netns exec` するため、実行ファイル path を渡す
 	if n.ServerEgress.LossSeed != 0 || n.ClientEgress.LossSeed != 0 {

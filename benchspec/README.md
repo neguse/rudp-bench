@@ -1,11 +1,12 @@
-# benchspec — rudp-bench v3 ワイヤ契約
+# benchspec — rudp-bench v5 ワイヤ契約
 
 言語非依存の契約仕様。server / client / orchestrator の実装はすべてこの文書に従う。
 設計の背景と根拠は [v2 design spec](../docs/superpowers/specs/2026-07-02-rudp-bench-v2-design.md) 参照。
 
-- version: 4(`--describe.class_mapping` を機械検証可能な構造へ変更。wire payload、
-  control protocol、metrics schema はv3から不変。v3で追加したserver-origin
-  authoritative 1対Nと`(traffic_id, direction, class)`別の計測も維持する)
+- version: 5(通常bodyを`splitmix64-v1`へ変更し、wire圧縮禁止を`--describe`へ追加。
+  metrics raw countへtimestamp順序違反を追加する。v4の構造化class mapping、v3の
+  server-origin authoritative 1対N、control protocol、`(traffic_id, direction, class)`別の
+  計測を維持する)
 
 ## 用語
 
@@ -44,16 +45,35 @@ offset size field
 32-    body 指定 payload サイズまで、下記の決定的patternで充填
 ```
 
-authoritative state以外のbody byte `i`（offset 32を`i=0`）は、headerの
-little-endian byteを使って次で生成し、全受信端で検証する。
+authoritative state以外のbodyは`splitmix64-v1`で生成し、全受信端で検証する。
+演算はすべて符号なし64-bitで行い、overflowはmodulo 2^64とする。
 
 ```
-LE64(seq)[i % 8]
-XOR LE64(sched_ts_ns)[(i + 3) % 8]
-XOR LE64(send_ts_ns)[(i + 5) % 8]
-XOR LE32(origin_id)[i % 4]
-XOR flags XOR traffic_id XOR uint8(i)
+gamma = 0x9e3779b97f4a7c15
+
+SM64(x):
+  z = x + gamma
+  z = (z XOR (z >> 30)) * 0xbf58476d1ce4e5b9
+  z = (z XOR (z >> 27)) * 0x94d049bb133111eb
+  return z XOR (z >> 31)
+
+header_word[0] = seq
+header_word[1] = sched_ts_ns
+header_word[2] = send_ts_ns
+header_word[3] = uint64(flags) OR (uint64(origin_id) << 8)
+                 OR (uint64(traffic_id) << 40)
+
+key = 0x727564702d707231
+for word in header_word:
+  key = SM64(key XOR word)
+
+block[j] = SM64(key + uint64(j) * gamma)
+body[i] = LE64(block[i / 8])[i % 8]
 ```
+
+`header_word[3]`はwire offset 24..31をlittle-endian u64として読んだ値であり、
+reserved 2Bは0固定である。このpatternは圧縮率を指標に有利にする人工的な周期性を
+避けるための決定的テストデータであり、暗号学的PRNGではない。
 
 不一致は配送成功として会計せず、`done.stats.invalid_payload`を増やす。
 
@@ -285,7 +305,12 @@ deadlineでtrafficとclassを同時に加算する。不一致は`metrics contra
   never_received_flows`
 - histogram object: `scheme / min_ns / max_ns / count / p50_ns / p90_ns /
   p99_ns / bins`。`bins` は 448 個で、top-level `histogram` の layout に従う
-- `raw`: `slots / submitted / recv_measured / recv_unmeasured`
+- `raw`: `slots / submitted / recv_measured / recv_unmeasured /
+  timestamp_order_violations`
+
+`timestamp_order_violations`は、計測窓内で初めて受信したmessageのうち
+`sched_ts_ns <= send_ts_ns <= recv_ts_ns`を満たさない数である。duplicateは数えず、
+符号なし差分を飽和させる前に判定する。全processの合計が0でなければ`INVALID`とする。
 
 同じ run の全 process は同じ histogram layout を使う。同じ traffic key
 を出す process 間で resolved `deadline_ns` も一致させる。orchestrator は
@@ -319,6 +344,8 @@ server / client バイナリは `--describe` で以下を JSON 出力する:
   "cc_algo": "none | cubic | bbr | …",
   "thread_model": "single | multi | internal_worker",
   "encryption": true,
+  "payload_pattern": "splitmix64-v1",
+  "wire_compression": "none",
   "max_payload_bytes": 1370,
   "scenarios": ["environment_baseline", "authoritative_state", "room_relay"],
   "tuning": [{"knob": "…", "value": "…", "upstream_ref": "…"}]
@@ -326,6 +353,10 @@ server / client バイナリは `--describe` で以下を JSON 出力する:
 ```
 
 `tuning` の各項目は upstream 公式ドキュメント・推奨への参照を必須とする。
+scenario conformanceでは`payload_pattern="splitmix64-v1"`と
+`wire_compression="none"`をserver/client双方が必ず開示する。後者はapplication、
+message、transport各層でbenchmark payloadを圧縮しないことを意味する。欠落、別値、
+server/client不一致は`INVALID`とする。authoritative stateのbodyは上記専用形式を維持する。
 
 ## conformance(参加条件)
 

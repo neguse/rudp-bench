@@ -121,8 +121,8 @@ func TestRejudgeInvalidatesLegacyAndTamperedTreatmentMappings(t *testing.T) {
 			Ordering: run.ClassMappingOrderingOrdered, Realization: run.ClassMappingRealizationNative,
 		},
 	}
-	validDescription := json.RawMessage(`{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"best-effort","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":1024,"scenarios":["environment_baseline"],"tuning":[]}`)
-	legacyDescription := json.RawMessage(`{"transport":"fake","class_mapping":{"loss_tolerant":"best-effort","must_deliver":"reliable"},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":1024,"scenarios":["environment_baseline"],"tuning":[]}`)
+	validDescription := json.RawMessage(`{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"best-effort","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"payload_pattern":"splitmix64-v1","wire_compression":"none","max_payload_bytes":1024,"scenarios":["environment_baseline"],"tuning":[]}`)
+	legacyDescription := json.RawMessage(`{"transport":"fake","class_mapping":{"loss_tolerant":"best-effort","must_deliver":"reliable"},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"payload_pattern":"splitmix64-v1","wire_compression":"none","max_payload_bytes":1024,"scenarios":["environment_baseline"],"tuning":[]}`)
 
 	tests := []struct {
 		name      string
@@ -232,7 +232,7 @@ func TestRejudgePreservesTreatmentUnsupportedAsTerminal(t *testing.T) {
 			Ordering: run.ClassMappingOrderingOrdered, Realization: run.ClassMappingRealizationNative,
 		},
 	}
-	description := json.RawMessage(`{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"best-effort","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":1024,"scenarios":[],"tuning":[]}`)
+	description := json.RawMessage(`{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"best-effort","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"payload_pattern":"splitmix64-v1","wire_compression":"none","max_payload_bytes":1024,"scenarios":[],"tuning":[]}`)
 	hash := run.HashValue(mapping)
 	result := run.Result{
 		Version: 2, Verdict: run.VerdictValid, Outcome: run.OutcomePass, Transport: "fake",

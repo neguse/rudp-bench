@@ -190,7 +190,7 @@ func Collect(ctx context.Context, r rig.Rig, repoDir string) Report {
 				continue
 			}
 			report.NetworkNamespaces = append(report.NetworkNamespaces, fields[0])
-			if strings.HasPrefix(fields[0], "rudpbench") {
+			if isBenchmarkNetworkNamespace(fields[0]) {
 				netnsCheck.Status = StatusFail
 				netnsCheck.Observed = strings.Join(report.NetworkNamespaces, ",")
 			}
@@ -198,7 +198,7 @@ func Collect(ctx context.Context, r rig.Rig, repoDir string) Report {
 	}
 	report.add(netnsCheck)
 
-	for _, tool := range []string{"ip", "tc", "ping", "iperf3", "jq", "sha256sum"} {
+	for _, tool := range []string{"ip", "tc", "ethtool", "ping", "iperf3", "jq", "sha256sum"} {
 		path, err := exec.LookPath(tool)
 		status := StatusPass
 		if err != nil {
@@ -458,36 +458,239 @@ func Read(path string) (Report, error) {
 }
 
 func ValidateReferenceReport(report Report, now time.Time) error {
-	if report.Version != 1 || !report.OK {
-		return fmt.Errorf("doctor report is not PASS (version=%d ok=%v)", report.Version, report.OK)
+	if err := ValidateReferenceEnvironment(report); err != nil {
+		return err
 	}
-	if report.GeneratedAt.IsZero() || now.Sub(report.GeneratedAt) > 15*time.Minute || report.GeneratedAt.After(now.Add(time.Minute)) {
-		return fmt.Errorf("doctor report must be generated within 15 minutes of reference sweep")
+	return ValidateReferenceReportFreshness(report, now)
+}
+
+// ValidateReportIntegrity verifies the self-consistency shared by PASS and
+// FAIL doctor reports. It deliberately does not decide reference suitability.
+func ValidateReportIntegrity(report Report) error {
+	if report.Version != 1 {
+		return fmt.Errorf("doctor report version=%d, want 1", report.Version)
 	}
-	if report.Rig.ExpectedClocksource == "" || !report.Rig.RequirePerformanceGovernor ||
-		!report.Rig.RequireIsolation || report.Rig.MinNoFile == 0 {
-		return fmt.Errorf("reference rig must require clocksource, performance governor, isolation, and nofile")
+	if report.GeneratedAt.IsZero() {
+		return fmt.Errorf("doctor report generated_at is required")
+	}
+	if len(report.Checks) == 0 {
+		return fmt.Errorf("doctor report contains no checks")
+	}
+	seen := make(map[string]bool, len(report.Checks))
+	derivedOK := true
+	for index, check := range report.Checks {
+		name := strings.TrimSpace(check.Name)
+		if name == "" || name != check.Name {
+			return fmt.Errorf("doctor check[%d] has an empty or non-canonical name", index)
+		}
+		if seen[name] {
+			return fmt.Errorf("doctor report contains duplicate check %q", name)
+		}
+		seen[name] = true
+		switch check.Status {
+		case StatusPass, StatusWarn:
+		case StatusFail:
+			derivedOK = false
+		default:
+			return fmt.Errorf("doctor check %q has invalid status %q", name, check.Status)
+		}
+	}
+	if report.OK != derivedOK {
+		return fmt.Errorf("doctor report ok=%v is inconsistent with check outcomes (derived ok=%v)", report.OK, derivedOK)
+	}
+	return nil
+}
+
+// ValidateReferenceReportStructure verifies the fixed shape and rig policy of
+// a reference doctor report without requiring its checks to have passed.
+func ValidateReferenceReportStructure(report Report) error {
+	if err := ValidateReportIntegrity(report); err != nil {
+		return err
+	}
+	if err := validateReferenceCheckSet(report.Checks); err != nil {
+		return err
+	}
+	return validateReferenceRig(report.Rig)
+}
+
+// ValidateReferenceEnvironment verifies that a doctor report is a complete,
+// passing reference-host snapshot and that the relevant host state still
+// matches. Freshness is checked separately so resumable acquisitions can keep
+// stale evidence while refusing to promote it.
+func ValidateReferenceEnvironment(report Report) error {
+	if err := ValidateReferenceReportStructure(report); err != nil {
+		return err
+	}
+	if !report.OK {
+		return fmt.Errorf("doctor report outcome is FAIL")
 	}
 	if report.Git.Dirty {
 		return fmt.Errorf("reference measurement requires a clean source tree")
 	}
-	if report.Git.Commit == "" {
+	if !isGitCommit(report.Git.Commit) {
 		return fmt.Errorf("reference measurement requires a recorded source commit")
+	}
+	if report.Git.PatchSHA256 != "" || report.Git.SourceSnapshot != nil {
+		return fmt.Errorf("clean reference source provenance must not contain a dirty-worktree snapshot")
+	}
+	if err := validateReferenceCheckOutcomes(report.Checks); err != nil {
+		return err
+	}
+	if !isSHA256(report.OrchestratorSHA256) {
+		return fmt.Errorf("doctor report orchestrator sha256 is invalid")
 	}
 	if current := run.OrchestratorFingerprint(); current == "" || current != report.OrchestratorSHA256 {
 		return fmt.Errorf("doctor report orchestrator does not match the running binary")
 	}
+
 	hostname, _ := os.Hostname()
 	if hostname == "" || hostname != report.Hostname {
 		return fmt.Errorf("doctor report hostname=%q does not match current host=%q", report.Hostname, hostname)
 	}
-	if current := readTrimmed("/sys/devices/system/clocksource/clocksource0/current_clocksource"); current != report.Clocksource {
+	if report.Architecture == "" || report.Architecture != runtime.GOARCH {
+		return fmt.Errorf("doctor report architecture=%q does not match current architecture=%q", report.Architecture, runtime.GOARCH)
+	}
+	currentKernel := readTrimmed("/proc/sys/kernel/osrelease")
+	if report.KernelRelease == "" || report.KernelRelease != currentKernel {
+		return fmt.Errorf("doctor report kernel_release=%q does not match current kernel=%q", report.KernelRelease, currentKernel)
+	}
+	if report.Clocksource == "" || report.Clocksource != report.Rig.ExpectedClocksource {
+		return fmt.Errorf("doctor report clocksource=%q does not match reference rig=%q", report.Clocksource, report.Rig.ExpectedClocksource)
+	}
+	if current := readTrimmed("/sys/devices/system/clocksource/clocksource0/current_clocksource"); current == "" || current != report.Clocksource {
 		return fmt.Errorf("clocksource changed after doctor: %q != %q", current, report.Clocksource)
 	}
-	if current := readTrimmed("/sys/devices/system/cpu/online"); !equalCPUSet(current, report.OnlineCPUs) {
+	if report.OnlineCPUs == "" || !rig.IsSubset(report.Rig.AllCPUs, report.OnlineCPUs) {
+		return fmt.Errorf("doctor online CPU set %q does not contain reference rig %q", report.OnlineCPUs, report.Rig.AllCPUs)
+	}
+	if current := readTrimmed("/sys/devices/system/cpu/online"); current == "" || !equalCPUSet(current, report.OnlineCPUs) {
 		return fmt.Errorf("online CPU set changed after doctor: %q != %q", current, report.OnlineCPUs)
 	}
+	if check := governorCheck(report.Rig, report.Governors); check.Status != StatusPass {
+		return fmt.Errorf("doctor report governors do not satisfy reference rig: %s", check.Observed)
+	}
+	currentGovernors := readGovernors()
+	if check := governorCheck(report.Rig, currentGovernors); check.Status != StatusPass {
+		return fmt.Errorf("current governors do not satisfy reference rig: %s", check.Observed)
+	}
+	if !equalStringMap(report.Governors, currentGovernors) {
+		return fmt.Errorf("CPU governors changed after doctor")
+	}
+	if report.NoFileSoft < report.Rig.MinNoFile {
+		return fmt.Errorf("doctor nofile soft limit=%d is below reference minimum=%d", report.NoFileSoft, report.Rig.MinNoFile)
+	}
+	var currentLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &currentLimit); err != nil {
+		return fmt.Errorf("read current nofile limit: %w", err)
+	}
+	if report.NoFileSoft != currentLimit.Cur || report.NoFileHard != currentLimit.Max {
+		return fmt.Errorf("nofile limit changed after doctor: soft/hard=%d/%d current=%d/%d",
+			report.NoFileSoft, report.NoFileHard, currentLimit.Cur, currentLimit.Max)
+	}
 	return nil
+}
+
+// ValidateReferenceReportFreshness checks only the time window of an already
+// validated reference environment.
+func ValidateReferenceReportFreshness(report Report, now time.Time) error {
+	if report.GeneratedAt.IsZero() || now.IsZero() || now.Sub(report.GeneratedAt) > 15*time.Minute || report.GeneratedAt.After(now.Add(time.Minute)) {
+		return fmt.Errorf("doctor report must be generated within 15 minutes of reference sweep")
+	}
+	return nil
+}
+
+var referenceCheckNames = []string{
+	"clocksource",
+	"rig_cpu_layout",
+	"bench_cpu_governor",
+	"pid1_cpu_isolation",
+	"slice_cpu_isolation_system",
+	"slice_cpu_isolation_user",
+	"slice_cpu_isolation_init.scope",
+	"irq_cpu_isolation",
+	"nofile",
+	"residual_netem",
+	"residual_benchmark_netns",
+	"tool_ip",
+	"tool_tc",
+	"tool_ethtool",
+	"tool_ping",
+	"tool_iperf3",
+	"tool_jq",
+	"tool_sha256sum",
+	"source_state",
+}
+
+func validateReferenceCheckSet(checks []Check) error {
+	want := make(map[string]bool, len(referenceCheckNames))
+	for _, name := range referenceCheckNames {
+		want[name] = true
+	}
+	seen := make(map[string]bool, len(checks))
+	for _, check := range checks {
+		if !want[check.Name] {
+			return fmt.Errorf("doctor report contains unexpected reference check %q", check.Name)
+		}
+		seen[check.Name] = true
+	}
+	for _, name := range referenceCheckNames {
+		if !seen[name] {
+			return fmt.Errorf("doctor report is missing required reference check %q", name)
+		}
+	}
+	return nil
+}
+
+func validateReferenceCheckOutcomes(checks []Check) error {
+	for _, check := range checks {
+		if check.Status != StatusPass {
+			return fmt.Errorf("reference doctor check %q is %s, want PASS", check.Name, check.Status)
+		}
+	}
+	return nil
+}
+
+func validateReferenceRig(referenceRig rig.Rig) error {
+	if strings.TrimSpace(referenceRig.Name) == "" {
+		return fmt.Errorf("reference rig name is required")
+	}
+	if err := referenceRig.Validate(); err != nil {
+		return fmt.Errorf("reference rig: %w", err)
+	}
+	if referenceRig.ExpectedClocksource == "" || !referenceRig.RequirePerformanceGovernor ||
+		!referenceRig.RequireIsolation || referenceRig.MinNoFile == 0 {
+		return fmt.Errorf("reference rig must require clocksource, performance governor, isolation, and nofile")
+	}
+	return nil
+}
+
+func isGitCommit(value string) bool {
+	return (len(value) == 40 || len(value) == 64) && isLowerHex(value)
+}
+
+func isSHA256(value string) bool {
+	return len(value) == sha256.Size*2 && isLowerHex(value)
+}
+
+func isLowerHex(value string) bool {
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStringMap(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func governorCheck(r rig.Rig, governors map[string]string) Check {
@@ -549,6 +752,17 @@ func readStatusField(path, name string) string {
 		}
 	}
 	return ""
+}
+
+func isBenchmarkNetworkNamespace(name string) bool {
+	if strings.HasPrefix(name, "rudpbench") {
+		return true
+	}
+	prefix, role, ok := strings.Cut(name, "-")
+	if !ok || (role != "srv" && role != "cli") || len(prefix) != 11 || !strings.HasPrefix(prefix, "cm") {
+		return false
+	}
+	return isLowerHex(prefix[2:])
 }
 
 func parseCPUSet(value string) ([]int, error) {

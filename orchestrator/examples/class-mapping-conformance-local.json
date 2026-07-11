@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "probe": {
+    "version": 2,
+    "family_alpha": 0.01,
+    "family_alpha_scope": "per_transport_four_loss_cases",
+    "loss_percent": 1,
+    "payload_bytes": 1000,
+    "link_mtu_bytes": 1500,
+    "slots_per_run": 1000,
+    "total_connections": 1,
+    "require_exact_submission": true,
+    "valid_acquisitions_per_case": 1,
+    "max_attempts_per_case": 2,
+    "rate_hz": 50,
+    "warmup_ns": 25000000000,
+    "duration_ns": 20000000000,
+    "drain_ns": 5000000000
+  },
+  "transports": {
+    "raw_udp": {
+      "server_command": ["build-v2-rawudp/raw_udp_server", "--port", "42916"],
+      "client_command": [
+        "build-v2-rawudp/raw_udp_client", "--host", "10.200.0.1", "--port", "42916",
+        "--conns", "{conns}", "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+      ],
+      "client_procs": 1,
+      "diagnostic": true
+    },
+    "enet": {
+      "server_command": ["build-v2-enet/enet_server", "--port", "42917"],
+      "client_command": [
+        "build-v2-enet/enet_client", "--host", "10.200.0.1", "--port", "42917",
+        "--conns", "{conns}", "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+      ],
+      "client_procs": 1
+    },
+    "msquic": {
+      "server_command": ["build-v2-msquic/msquic_server", "--port", "42919"],
+      "client_command": [
+        "build-v2-msquic/msquic_client", "--host", "10.200.0.1", "--port", "42919",
+        "--conns", "{conns}", "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+      ],
+      "client_procs": 1
+    },
+    "gns": {
+      "server_command": ["build-v2-gns/gns_server", "--port", "42921"],
+      "client_command": [
+        "build-v2-gns/gns_client", "--host", "10.200.0.1", "--port", "42921",
+        "--conns", "{conns}", "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+      ],
+      "client_procs": 1
+    },
+    "magiconion": {
+      "server_command": [
+        "servers/magiconion/MagicOnionBench.Server/bin/Release/net10.0/MagicOnionBench.Server",
+        "--port", "42931"
+      ],
+      "client_command": [
+        "servers/magiconion/MagicOnionBench.Client/bin/Release/net10.0/MagicOnionBench.Client",
+        "--host", "10.200.0.1", "--port", "42931", "--conns", "{conns}",
+        "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+      ],
+      "client_procs": 1,
+      "sched_is_measurand": true
+    },
+    "websocket": {
+      "server_command": [
+        "servers/websocket/WebSocketBench.Server/bin/Release/net10.0/WebSocketBench.Server",
+        "--port", "42933"
+      ],
+      "client_command": [
+        "servers/websocket/WebSocketBench.Client/bin/Release/net10.0/WebSocketBench.Client",
+        "--host", "10.200.0.1", "--port", "42933", "--conns", "{conns}",
+        "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+      ],
+      "client_procs": 1,
+      "sched_is_measurand": true
+    },
+    "litenetlib": {
+      "server_command": [
+        "servers/litenetlib/LiteNetLibBench.Server/bin/Release/net10.0/LiteNetLibBench.Server",
+        "--port", "42941"
+      ],
+      "client_command": [
+        "servers/litenetlib/LiteNetLibBench.Client/bin/Release/net10.0/LiteNetLibBench.Client",
+        "--host", "10.200.0.1", "--port", "42941", "--conns", "{conns}",
+        "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+      ],
+      "client_procs": 1
+    }
+  },
+  "server_cpus": "7,15",
+  "client_cpus": "3,4,5,6,11,12,13,14",
+  "output_dir": "results-v2/class-mapping-conformance-local"
+}

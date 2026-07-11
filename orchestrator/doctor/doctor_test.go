@@ -162,17 +162,46 @@ func TestCollectRejectsNonGitSourceDirectory(t *testing.T) {
 
 func TestValidateReferenceRequiresSourceCommit(t *testing.T) {
 	now := time.Now().UTC()
+	checks := make([]Check, len(referenceCheckNames))
+	for index, name := range referenceCheckNames {
+		checks[index] = Check{Name: name, Status: StatusPass}
+	}
 	report := Report{
 		Version: 1, OK: true, GeneratedAt: now,
 		Rig: rig.Rig{
+			Name:                       "test",
+			OSCPUs:                     "0",
+			BenchCPUs:                  "1-2",
+			ClientCPUs:                 "1",
+			ServerCPUs:                 "2",
+			AllCPUs:                    "0-2",
 			ExpectedClocksource:        "tsc",
 			RequirePerformanceGovernor: true,
 			RequireIsolation:           true,
 			MinNoFile:                  1,
 		},
+		Checks: checks,
 	}
 	if err := ValidateReferenceReport(report, now); err == nil || !strings.Contains(err.Error(), "source commit") {
 		t.Fatalf("expected missing source commit error, got %v", err)
+	}
+}
+
+func TestBenchmarkNetworkNamespaceDetectionIncludesConformancePrefixes(t *testing.T) {
+	tests := map[string]bool{
+		"rudpbench-srv":         true,
+		"rudpbench-old-run":     true,
+		"cm012345678-srv":       true,
+		"cmabcdef012-cli":       true,
+		"cmABCDEF012-srv":       false,
+		"cm01234567-srv":        false,
+		"cm012345678-worker":    false,
+		"other-cm012345678-srv": false,
+	}
+	for name, want := range tests {
+		if got := isBenchmarkNetworkNamespace(name); got != want {
+			t.Errorf("isBenchmarkNetworkNamespace(%q)=%v, want %v", name, got, want)
+		}
 	}
 }
 

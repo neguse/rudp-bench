@@ -120,6 +120,8 @@ static void print_describe(void) {
        "\"realization\":\"unsupported\"}},"
        "\"coalescing\":\"none\",\"cc_algo\":\"none\","
        "\"thread_model\":\"single\",\"encryption\":false,"
+       "\"payload_pattern\":\"splitmix64-v1\","
+       "\"wire_compression\":\"none\","
        "\"max_payload_bytes\":65507,"
        "\"scenarios\":[\"environment_baseline\","
        "\"authoritative_state\",\"room_relay\"],\"tuning\":[]}");

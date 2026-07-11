@@ -34,6 +34,14 @@ func TestConfigIdentityTracksMeasurementInputs(t *testing.T) {
 	if got := ConfigIdentity(changed); got == a {
 		t.Fatal("expected class_mapping hash did not change identity")
 	}
+	withNetem := base
+	withNetem.Netem = &NetemRegime{}
+	withoutOffloads := ConfigIdentity(withNetem)
+	changed = withNetem
+	changed.Netem = &NetemRegime{DisableOffloads: true}
+	if got := ConfigIdentity(changed); got == withoutOffloads {
+		t.Fatal("disable_offloads did not change identity")
+	}
 }
 
 func TestCommandFingerprintTracksManagedBundleAndReferencedFiles(t *testing.T) {

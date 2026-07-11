@@ -222,6 +222,8 @@ void bk_metrics_tick(bk_metrics *m, uint64_t now_ns);
 // metrics JSON version 2。内容: legacy class 別 aggregate に加え、
 // traffic[] に (traffic_id, direction, class) 別 counts / deadline /
 // latency / update-gap / staleness、および送信/受信の生カウント。
+// raw.timestamp_order_violations は unique measured receive のうち
+// sched_ts <= send_ts <= recv_ts を満たさない件数。
 // ヒストグラムは HDR 方式(log2 メジャー + 16 線形サブビン、範囲 1us〜100s)、
 // percentile は nearest-rank ceil(count*p)。bin 配列ごと出力し、加算マージ可能。
 int bk_metrics_dump_json(const bk_metrics *m, const char *path);

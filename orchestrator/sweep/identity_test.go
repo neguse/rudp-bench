@@ -105,6 +105,12 @@ func TestComparisonIdentityTracksComparableTreatment(t *testing.T) {
 			c.Netem = &n
 			return c
 		},
+		"offload policy": func(c Config) Config {
+			n := *c.Netem
+			n.DisableOffloads = !n.DisableOffloads
+			c.Netem = &n
+			return c
+		},
 		"range": func(c Config) Config {
 			c.Conns.Max++
 			return c

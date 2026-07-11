@@ -90,6 +90,7 @@ struct bk_metrics {
   uint64_t raw_submitted;
   uint64_t raw_recv_measured;
   uint64_t raw_recv_unmeasured;
+  uint64_t raw_timestamp_order_violations;
 };
 
 static uint64_t hash_mix_u64(uint64_t x) {
@@ -555,6 +556,9 @@ void bk_metrics_on_recv(bk_metrics *m, uint32_t local_index,
   if (traffic != NULL) {
     traffic->metrics.counts.delivered_unique++;
   }
+  if (h->sched_ts_ns > h->send_ts_ns || h->send_ts_ns > recv_ts_ns) {
+    m->raw_timestamp_order_violations++;
+  }
   const uint64_t sched_latency =
       bk_saturating_sub_u64(recv_ts_ns, h->sched_ts_ns);
   const uint64_t send_latency =
@@ -964,9 +968,10 @@ int bk_metrics_dump_json(const bk_metrics *m, const char *path) {
       fprintf(f,
               ",\"raw\":{\"slots\":%" PRIu64 ",\"submitted\":%" PRIu64
               ",\"recv_measured\":%" PRIu64 ",\"recv_unmeasured\":%" PRIu64
+              ",\"timestamp_order_violations\":%" PRIu64
               "}}\n",
               m->raw_slots, m->raw_submitted, m->raw_recv_measured,
-              m->raw_recv_unmeasured) < 0) {
+              m->raw_recv_unmeasured, m->raw_timestamp_order_violations) < 0) {
     rc = -1;
   }
 

@@ -1,8 +1,11 @@
 package run
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"sort"
@@ -46,6 +49,8 @@ type RawCounts struct {
 	Submitted      uint64 `json:"submitted"`
 	RecvMeasured   uint64 `json:"recv_measured"`
 	RecvUnmeasured uint64 `json:"recv_unmeasured"`
+	// Counted once per unique measured receive that violates sched <= send <= recv.
+	TimestampOrderViolations uint64 `json:"timestamp_order_violations"`
 }
 
 type Histogram struct {
@@ -138,32 +143,73 @@ type trafficMetric struct {
 	StalenessNS    Histogram `json:"staleness_ns"`
 }
 
+// MetricsArtifactData is an immutable snapshot of one named process metrics
+// artifact. The constructor copies data, and no method exposes the backing
+// bytes, so callers can safely reuse one snapshot across independent checks.
+type MetricsArtifactData struct {
+	name string
+	data []byte
+}
+
+func NewMetricsArtifactData(name string, data []byte) MetricsArtifactData {
+	return MetricsArtifactData{name: name, data: append([]byte(nil), data...)}
+}
+
+func (artifact MetricsArtifactData) Name() string {
+	return artifact.name
+}
+
+func (artifact MetricsArtifactData) SizeBytes() int64 {
+	return int64(len(artifact.data))
+}
+
+func (artifact MetricsArtifactData) SHA256() string {
+	return HashBytes(artifact.data)
+}
+
 func MergeMetricsFiles(paths []string, totalConns int) (*MergedMetrics, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("no metrics files to merge")
 	}
+	artifacts := make([]MetricsArtifactData, 0, len(paths))
+	for _, path := range paths {
+		artifact, err := readMetricsArtifact(path)
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	return MergeMetricsData(artifacts, totalConns)
+}
+
+// MergeMetricsData merges immutable artifact snapshots without opening their
+// source paths. This is the byte-oriented counterpart of MergeMetricsFiles.
+func MergeMetricsData(artifacts []MetricsArtifactData, totalConns int) (*MergedMetrics, error) {
+	if len(artifacts) == 0 {
+		return nil, fmt.Errorf("no metrics files to merge")
+	}
 	var merged *MergedMetrics
 	expectedVersion := 0
-	for _, path := range paths {
-		file, err := readMetricsFile(path)
+	for _, artifact := range artifacts {
+		file, err := parseMetricsArtifact(artifact, false)
 		if err != nil {
 			return nil, err
 		}
 		if expectedVersion == 0 {
 			expectedVersion = file.Version
 		} else if file.Version != expectedVersion {
-			return nil, fmt.Errorf("metrics %s version = %d, cannot mix with version %d", path, file.Version, expectedVersion)
+			return nil, fmt.Errorf("metrics %s version = %d, cannot mix with version %d", artifact.name, file.Version, expectedVersion)
 		}
 		if merged == nil {
 			merged = newMergedMetrics(file.Version, file.Histogram, totalConns)
 		} else if file.Histogram != merged.Histogram {
-			return nil, fmt.Errorf("metrics %s histogram layout = %+v, want %+v", path, file.Histogram, merged.Histogram)
+			return nil, fmt.Errorf("metrics %s histogram layout = %+v, want %+v", artifact.name, file.Histogram, merged.Histogram)
 		}
 		if file.Version > merged.Version {
 			merged.Version = file.Version
 		}
 		if err := merged.add(file); err != nil {
-			return nil, fmt.Errorf("merge metrics %s: %w", path, err)
+			return nil, fmt.Errorf("merge metrics %s: %w", artifact.name, err)
 		}
 	}
 	if err := merged.finalize(); err != nil {
@@ -180,6 +226,23 @@ func readMetricsFileWithOptions(path string, allowEmptyTraffic bool) (metricsFil
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return metricsFile{}, fmt.Errorf("read metrics %s: %w", path, err)
+	}
+	return parseMetricsArtifact(NewMetricsArtifactData(path, data), allowEmptyTraffic)
+}
+
+func readMetricsArtifact(path string) (MetricsArtifactData, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return MetricsArtifactData{}, fmt.Errorf("read metrics %s: %w", path, err)
+	}
+	return NewMetricsArtifactData(path, data), nil
+}
+
+func parseMetricsArtifact(artifact MetricsArtifactData, allowEmptyTraffic bool) (metricsFile, error) {
+	path := artifact.name
+	data := artifact.data
+	if err := rejectDuplicateMetricsJSONKeys(data); err != nil {
+		return metricsFile{}, fmt.Errorf("decode metrics %s: %w", path, err)
 	}
 	var header struct {
 		Version int `json:"version"`
@@ -200,6 +263,76 @@ func readMetricsFileWithOptions(path string, allowEmptyTraffic bool) (metricsFil
 		return metricsFile{}, err
 	}
 	return file, nil
+}
+
+func rejectDuplicateMetricsJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := walkMetricsJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("contains trailing JSON value")
+		}
+		return fmt.Errorf("trailing data: %w", err)
+	}
+	return nil
+}
+
+func walkMetricsJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := map[string]bool{}
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("object key is not a string")
+			}
+			if seen[key] {
+				return fmt.Errorf("duplicate object key %q", key)
+			}
+			seen[key] = true
+			if err := walkMetricsJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim('}') {
+			return fmt.Errorf("object has invalid closing delimiter")
+		}
+	case '[':
+		for decoder.More() {
+			if err := walkMetricsJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim(']') {
+			return fmt.Errorf("array has invalid closing delimiter")
+		}
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
+	}
+	return nil
 }
 
 var v2CountFields = []string{
@@ -241,7 +374,7 @@ func validateV2JSONShape(data []byte, path string) error {
 		return err
 	}
 	if _, err := requireJSONObject(top["raw"], "metrics "+path+" raw",
-		"slots", "submitted", "recv_measured", "recv_unmeasured"); err != nil {
+		"slots", "submitted", "recv_measured", "recv_unmeasured", "timestamp_order_violations"); err != nil {
 		return err
 	}
 	var traffic []json.RawMessage
@@ -406,6 +539,18 @@ func validateV2AggregateConsistency(file metricsFile) error {
 	if err := validateHistogramSum(file.StalenessNS, staleness); err != nil {
 		return fmt.Errorf("staleness_ns: %w", err)
 	}
+	violations := file.Raw.TimestampOrderViolations
+	if violations > file.Raw.RecvMeasured {
+		return fmt.Errorf("raw timestamp_order_violations=%d exceeds recv_measured=%d",
+			violations, file.Raw.RecvMeasured)
+	}
+	lossDelivered := countSums[ClassLossTolerant].DeliveredUnique
+	mustDelivered := countSums[ClassMustDeliver].DeliveredUnique
+	if violations > lossDelivered && violations-lossDelivered > mustDelivered {
+		deliveredUnique := lossDelivered + mustDelivered
+		return fmt.Errorf("raw timestamp_order_violations=%d exceeds delivered_unique=%d",
+			violations, deliveredUnique)
+	}
 	return nil
 }
 
@@ -459,6 +604,9 @@ func ValidateMergedMetricsConsistency(metrics *MergedMetrics) error {
 	}
 	if err := validateHistogramSum(metrics.StalenessNS, staleness); err != nil {
 		return fmt.Errorf("staleness_ns: %w", err)
+	}
+	if metrics.Raw.TimestampOrderViolations != 0 {
+		return fmt.Errorf("raw timestamp_order_violations=%d, want 0", metrics.Raw.TimestampOrderViolations)
 	}
 	return nil
 }
@@ -624,6 +772,7 @@ func (m *MergedMetrics) add(file metricsFile) error {
 	m.Raw.Submitted += file.Raw.Submitted
 	m.Raw.RecvMeasured += file.Raw.RecvMeasured
 	m.Raw.RecvUnmeasured += file.Raw.RecvUnmeasured
+	m.Raw.TimestampOrderViolations += file.Raw.TimestampOrderViolations
 	return nil
 }
 

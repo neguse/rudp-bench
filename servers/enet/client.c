@@ -80,6 +80,8 @@ static void print_describe(void) {
        "\"cc_algo\":\"enet-packet-throttle(scale=32,default=32,accel=32,decel=0,interval=5000ms)\","
        "\"thread_model\":\"single\","
        "\"encryption\":false,"
+       "\"payload_pattern\":\"splitmix64-v1\","
+       "\"wire_compression\":\"none\","
        "\"max_payload_bytes\":1000,"
        "\"scenarios\":[\"environment_baseline\","
        "\"authoritative_state\",\"room_relay\"],"

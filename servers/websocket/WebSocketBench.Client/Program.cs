@@ -756,6 +756,8 @@ internal static class BenchDescribeWs
             .Append("\"cc_algo\":\"").Append(JsonEscape(CcAlgo())).Append("\",")
             .Append("\"thread_model\":\"async/task-based\",")
             .Append("\"encryption\":false,")
+            .Append("\"payload_pattern\":\"splitmix64-v1\",")
+            .Append("\"wire_compression\":\"none\",")
             .Append("\"max_payload_bytes\":").Append(BenchConstants.MaxPayloadBytes.ToString(CultureInfo.InvariantCulture)).Append(',')
             .Append("\"scenarios\":[\"environment_baseline\",\"authoritative_state\",\"room_relay\"],")
             .Append("\"tuning\":[")

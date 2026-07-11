@@ -25,6 +25,39 @@ func TestValidateScenarioMetricsFilesAuthoritative(t *testing.T) {
 	}
 }
 
+func TestValidateScenarioMetricsDataDoesNotReopenReplacedPaths(t *testing.T) {
+	dir := t.TempDir()
+	scenario := authoritativeFixture()
+	serverPath := filepath.Join(dir, "server.json")
+	clientPath := filepath.Join(dir, "client.json")
+	writeScenarioMetricsFile(t, serverPath, authoritativeTrafficFixture(scenario, "server", 3, 3))
+	writeScenarioMetricsFile(t, clientPath, authoritativeTrafficFixture(scenario, "client", 3, 3))
+	serverBytes, err := os.ReadFile(serverPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientBytes, err := os.ReadFile(clientPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewMetricsArtifactData(serverPath, serverBytes)
+	client := NewMetricsArtifactData(clientPath, clientBytes)
+	if err := os.WriteFile(serverPath, []byte(`{"tampered":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(clientPath, []byte(`{"tampered":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := MergeMetricsData([]MetricsArtifactData{server, client}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateScenarioMetricsData(server, []MetricsArtifactData{client}, []int{3}, 3,
+		time.Second, 10_000_000, scenario, merged); err != nil {
+		t.Fatalf("snapshot validation reopened a replaced source path: %v", err)
+	}
+}
+
 func TestValidateScenarioMetricsFilesAllowsUnobservedMustDeliverReceiver(t *testing.T) {
 	dir := t.TempDir()
 	scenario := authoritativeFixture()

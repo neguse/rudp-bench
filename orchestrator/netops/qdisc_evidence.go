@@ -108,6 +108,32 @@ func selectRootQdisc(stats []QdiscStats) (QdiscStats, error) {
 	return roots[0], nil
 }
 
+// ValidateQdiscSampleReadback prevents normalized counters from drifting from
+// the raw tc evidence retained in the run bundle.
+func ValidateQdiscSampleReadback(sample QdiscSample) error {
+	if sample.Error != "" {
+		return fmt.Errorf("read failed: %s", sample.Error)
+	}
+	if sample.Stats == nil {
+		return fmt.Errorf("stats are missing")
+	}
+	if sample.Raw == "" {
+		return fmt.Errorf("raw tc readback is empty")
+	}
+	parsed, err := ParseQdiscShow(sample.Raw)
+	if err != nil {
+		return fmt.Errorf("raw tc readback cannot be parsed: %w", err)
+	}
+	root, err := selectRootQdisc(parsed)
+	if err != nil {
+		return fmt.Errorf("raw tc readback root: %w", err)
+	}
+	if root != *sample.Stats {
+		return fmt.Errorf("stored stats do not match raw tc readback")
+	}
+	return nil
+}
+
 // DeltaQdiscPair subtracts cumulative counters without allowing wrap or qdisc
 // replacement to masquerade as a valid measurement delta.
 func DeltaQdiscPair(before, after QdiscPairSnapshot) QdiscPairDelta {

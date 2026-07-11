@@ -73,25 +73,7 @@ func TestMergeMetricsGolden(t *testing.T) {
 
 func TestMergeMetricsTrafficSeries(t *testing.T) {
 	dir := t.TempDir()
-	h := histFixtureString(v2Bins(map[int]uint64{4: 1}))
-	lossClass := v2ClassFixtureString(
-		ClassCounts{Slots: 3, Submitted: 3, DeliveredUnique: 3, ExpectedFlows: 1, ObservedFlows: 1},
-		v2Bins(map[int]uint64{4: 1}), v2Bins(map[int]uint64{4: 1}), v2Bins(map[int]uint64{4: 1}))
-	emptyClass := v2ClassFixtureString(ClassCounts{}, v2Bins(nil), v2Bins(nil), v2Bins(nil))
-	file := fmt.Sprintf(`{
-  "version": 2,
-  "histogram": {"scheme":"log2x16","subbins":16,"min_ns":1000,"max_ns":100000000000},
-  "classes": {"loss_tolerant": %s, "must_deliver": %s},
-  "staleness_ns": %s,
-	"update_gap_ns": %s,
-  "raw": {"slots":3,"submitted":3,"recv_measured":3,"recv_unmeasured":0},
-  "traffic": [
-    {"traffic_id":2,"direction":"server_to_client","class":"loss_tolerant","deadline_ns":0,
-     "slots":3,"slots_broadcast":0,"submitted":3,"delivered_unique":3,"duplicates":0,"deadline_hit":0,
-	 "expected_flows":1,"observed_flows":1,"never_received_flows":0,
-     "latency_sched_ns":%s,"latency_send_ns":%s,"update_gap_ns":%s,"staleness_ns":%s}
-  ]
-	}`, lossClass, emptyClass, h, h, h, h, h, h)
+	file := v2TrafficMetricsFixtureString(0)
 	path := writeMetricsFixture(t, dir, "traffic.json", file)
 
 	merged, err := MergeMetricsFiles([]string{path}, 3)
@@ -107,6 +89,50 @@ func TestMergeMetricsTrafficSeries(t *testing.T) {
 	}
 	if metric.ExpectedReceives != 3 || metric.DeliveryRatio != 1 || metric.StalenessNS.Count != 1 {
 		t.Fatalf("traffic metric = %+v", metric)
+	}
+}
+
+func TestMergeMetricsTimestampOrderViolations(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{
+		writeMetricsFixture(t, dir, "proc0.json", v2TrafficMetricsFixtureString(1)),
+		writeMetricsFixture(t, dir, "proc1.json", v2TrafficMetricsFixtureString(2)),
+	}
+	merged, err := MergeMetricsFiles(paths, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Raw.TimestampOrderViolations != 3 {
+		t.Fatalf("timestamp_order_violations = %d, want 3", merged.Raw.TimestampOrderViolations)
+	}
+	if err := ValidateMergedMetricsConsistency(merged); err == nil ||
+		!strings.Contains(err.Error(), "timestamp_order_violations=3, want 0") {
+		t.Fatalf("timestamp order violations passed persisted metrics validation: %v", err)
+	}
+}
+
+func TestMergeMetricsRejectsTimestampOrderTamper(t *testing.T) {
+	dir := t.TempDir()
+	missing := strings.Replace(v2TrafficMetricsFixtureString(0),
+		`,"timestamp_order_violations":0`, "", 1)
+	path := writeMetricsFixture(t, dir, "missing.json", missing)
+	if _, err := MergeMetricsFiles([]string{path}, 3); err == nil ||
+		!strings.Contains(err.Error(), `missing required field "timestamp_order_violations"`) {
+		t.Fatalf("missing timestamp order field accepted: %v", err)
+	}
+
+	outOfBoundsData := strings.Replace(v2TrafficMetricsFixtureString(4),
+		`"recv_measured":3`, `"recv_measured":4`, 1)
+	outOfBounds := writeMetricsFixture(t, dir, "out-of-bounds.json", outOfBoundsData)
+	if _, err := MergeMetricsFiles([]string{outOfBounds}, 3); err == nil ||
+		!strings.Contains(err.Error(), "timestamp_order_violations=4 exceeds delivered_unique=3") {
+		t.Fatalf("out-of-bounds timestamp order count accepted: %v", err)
+	}
+
+	rawOutOfBounds := writeMetricsFixture(t, dir, "raw-out-of-bounds.json", v2TrafficMetricsFixtureString(4))
+	if _, err := MergeMetricsFiles([]string{rawOutOfBounds}, 3); err == nil ||
+		!strings.Contains(err.Error(), "timestamp_order_violations=4 exceeds recv_measured=3") {
+		t.Fatalf("timestamp order count above raw receives accepted: %v", err)
 	}
 }
 
@@ -126,7 +152,7 @@ func TestMergeMetricsRejectsLegacyTrafficAggregateMismatch(t *testing.T) {
   "classes": {"loss_tolerant": %s, "must_deliver": %s},
   "staleness_ns": %s,
   "update_gap_ns": %s,
-  "raw": {"slots":1,"submitted":1,"recv_measured":1,"recv_unmeasured":0},
+  "raw": {"slots":1,"submitted":1,"recv_measured":1,"recv_unmeasured":0,"timestamp_order_violations":0},
   "traffic": [
     {"traffic_id":1,"direction":"client_to_server","class":"must_deliver","deadline_ns":200000000,
      "slots":1,"slots_broadcast":0,"submitted":1,"delivered_unique":1,"duplicates":0,"deadline_hit":1,
@@ -154,7 +180,7 @@ func TestMergeMetricsRejectsMixedVersions(t *testing.T) {
   "classes": {"loss_tolerant": %s, "must_deliver": %s},
   "staleness_ns": %s,
   "update_gap_ns": %s,
-  "raw": {"slots":0,"submitted":0,"recv_measured":0,"recv_unmeasured":0},
+  "raw": {"slots":0,"submitted":0,"recv_measured":0,"recv_unmeasured":0,"timestamp_order_violations":0},
   "traffic": [
     {"traffic_id":1,"direction":"client_to_server","class":"loss_tolerant","deadline_ns":0,
      "slots":0,"slots_broadcast":0,"submitted":0,"delivered_unique":0,"duplicates":0,"deadline_hit":0,
@@ -165,6 +191,41 @@ func TestMergeMetricsRejectsMixedVersions(t *testing.T) {
 
 	if _, err := MergeMetricsFiles([]string{v1, v2}, 1); err == nil {
 		t.Fatal("mixed v1/v2 metrics unexpectedly accepted")
+	}
+}
+
+func TestMetricsArtifactDataIsImmutable(t *testing.T) {
+	original := []byte(metricsFixtureString(
+		ClassCounts{}, ClassCounts{}, bins(nil), bins(nil), bins(nil), bins(nil), bins(nil), RawCounts{},
+	))
+	artifact := NewMetricsArtifactData("metrics/client.json", original)
+	wantHash := HashBytes(original)
+	for index := range original {
+		original[index] = 'x'
+	}
+	if artifact.SHA256() != wantHash {
+		t.Fatalf("artifact hash changed after caller mutation: got %s want %s", artifact.SHA256(), wantHash)
+	}
+	if artifact.SizeBytes() == 0 || artifact.Name() != "metrics/client.json" {
+		t.Fatalf("artifact metadata = name %q size %d", artifact.Name(), artifact.SizeBytes())
+	}
+	if _, err := MergeMetricsData([]MetricsArtifactData{artifact}, 1); err != nil {
+		t.Fatalf("immutable snapshot no longer parses: %v", err)
+	}
+}
+
+func TestMergeMetricsDataRejectsDuplicateJSONKeys(t *testing.T) {
+	valid := metricsFixtureString(
+		ClassCounts{}, ClassCounts{}, bins(nil), bins(nil), bins(nil), bins(nil), bins(nil), RawCounts{},
+	)
+	duplicate := strings.Replace(valid, `"version": 1`, `"version": 1, "version": 1`, 1)
+	if duplicate == valid {
+		t.Fatal("fixture did not contain version field")
+	}
+	artifact := NewMetricsArtifactData("metrics/duplicate.json", []byte(duplicate))
+	if _, err := MergeMetricsData([]MetricsArtifactData{artifact}, 1); err == nil ||
+		!strings.Contains(err.Error(), "duplicate object key") {
+		t.Fatalf("duplicate key error = %v", err)
 	}
 }
 
@@ -220,6 +281,28 @@ func v2ClassFixtureString(counts ClassCounts, sched, send, update []uint64) stri
 		histFixtureString(sched),
 		histFixtureString(send),
 		histFixtureString(update))
+}
+
+func v2TrafficMetricsFixtureString(timestampOrderViolations uint64) string {
+	h := histFixtureString(v2Bins(map[int]uint64{4: 1}))
+	lossClass := v2ClassFixtureString(
+		ClassCounts{Slots: 3, Submitted: 3, DeliveredUnique: 3, ExpectedFlows: 1, ObservedFlows: 1},
+		v2Bins(map[int]uint64{4: 1}), v2Bins(map[int]uint64{4: 1}), v2Bins(map[int]uint64{4: 1}))
+	emptyClass := v2ClassFixtureString(ClassCounts{}, v2Bins(nil), v2Bins(nil), v2Bins(nil))
+	return fmt.Sprintf(`{
+  "version": 2,
+  "histogram": {"scheme":"log2x16","subbins":16,"min_ns":1000,"max_ns":100000000000},
+  "classes": {"loss_tolerant": %s, "must_deliver": %s},
+  "staleness_ns": %s,
+  "update_gap_ns": %s,
+  "raw": {"slots":3,"submitted":3,"recv_measured":3,"recv_unmeasured":0,"timestamp_order_violations":%d},
+  "traffic": [
+    {"traffic_id":2,"direction":"server_to_client","class":"loss_tolerant","deadline_ns":0,
+     "slots":3,"slots_broadcast":0,"submitted":3,"delivered_unique":3,"duplicates":0,"deadline_hit":0,
+     "expected_flows":1,"observed_flows":1,"never_received_flows":0,
+     "latency_sched_ns":%s,"latency_send_ns":%s,"update_gap_ns":%s,"staleness_ns":%s}
+  ]
+}`, lossClass, emptyClass, h, h, timestampOrderViolations, h, h, h, h)
 }
 
 func histFixtureString(b []uint64) string {

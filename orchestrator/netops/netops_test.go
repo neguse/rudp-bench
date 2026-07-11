@@ -32,6 +32,8 @@ func TestBuildCommandsGolden(t *testing.T) {
 		"ip link add rbtest-vs type veth peer name rbtest-vc",
 		"ip link set rbtest-vs netns rbtest-srv",
 		"ip link set rbtest-vc netns rbtest-cli",
+		"ip -n rbtest-srv link set dev rbtest-vs mtu 1500",
+		"ip -n rbtest-cli link set dev rbtest-vc mtu 1500",
 		"ip -n rbtest-srv addr add 10.200.0.1/24 dev rbtest-vs",
 		"ip -n rbtest-cli addr add 10.200.0.2/24 dev rbtest-vc",
 		"ip -n rbtest-srv link set lo up",
@@ -48,6 +50,125 @@ func TestBuildCommandsGolden(t *testing.T) {
 	}, "\n")
 	if got != want {
 		t.Fatalf("commands mismatch\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestBuildSetupCommandsDisablesPacketShapingOffloads(t *testing.T) {
+	spec := netops.DefaultPair("rbtest")
+	spec.DisableOffloads = true
+	setup, err := netops.BuildSetupCommands(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := netops.CommandsString(setup)
+	for _, want := range []string{
+		"ip netns exec rbtest-srv ethtool -K rbtest-vs tso off gso off gro off lro off tx-udp-segmentation off rx-udp-gro-forwarding off",
+		"ip netns exec rbtest-cli ethtool -K rbtest-vc tso off gso off gro off lro off tx-udp-segmentation off rx-udp-gro-forwarding off",
+	} {
+		if !strings.Contains(got, want+"\n") {
+			t.Fatalf("setup commands do not contain %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestParseOffloadFeatures(t *testing.T) {
+	raw := `Features for rbtest-vs:
+tcp-segmentation-offload: off
+generic-segmentation-offload: off
+generic-receive-offload: off
+large-receive-offload: off [fixed]
+tx-udp-segmentation: off
+rx-udp-gro-forwarding: off
+`
+	features, err := netops.ParseOffloadFeatures(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := features["large-receive-offload"]; got.Enabled || !got.Fixed {
+		t.Fatalf("large-receive-offload = %+v", got)
+	}
+	if len(features) != 6 {
+		t.Fatalf("features len = %d, want 6", len(features))
+	}
+	if _, err := netops.ParseOffloadFeatures("Features for rbtest-vs:\n"); err == nil {
+		t.Fatal("empty feature output must fail")
+	}
+}
+
+func TestValidateOffloadEvidenceRejectsEnabledMissingAndTamperedReadback(t *testing.T) {
+	spec := netops.DefaultPair("rbtest")
+	raw := `Features for rbtest-vs:
+tcp-segmentation-offload: off
+generic-segmentation-offload: off
+generic-receive-offload: off
+large-receive-offload: off
+tx-udp-segmentation: off
+rx-udp-gro-forwarding: off
+`
+	sample := netops.OffloadInterfaceEvidence{
+		Namespace:    spec.ServerNS,
+		Device:       spec.ServerVeth,
+		LinkMTUBytes: spec.LinkMTUBytes,
+		Raw:          raw,
+		LinkRaw:      `[{"ifname":"rbtest-vs","mtu":1500}]`,
+		Features:     map[string]netops.OffloadFeatureState{},
+	}
+	for _, feature := range netops.RequiredOffloadFeatures() {
+		sample.Features[feature] = netops.OffloadFeatureState{}
+	}
+	evidence := netops.OffloadEvidence{
+		Version:          netops.OffloadEvidenceVersion,
+		RequiredFeatures: netops.RequiredOffloadFeatures(),
+		Server:           sample,
+		Client:           sample,
+	}
+	evidence.Client.Namespace = spec.ClientNS
+	evidence.Client.Device = spec.ClientVeth
+	evidence.Client.LinkRaw = `[{"ifname":"rbtest-vc","mtu":1500}]`
+	evidence.SHA256 = netops.HashOffloadEvidence(evidence)
+	if reasons := netops.ValidateOffloadEvidence(spec, &evidence); len(reasons) != 0 {
+		t.Fatalf("valid evidence rejected: %v", reasons)
+	}
+	contradictory := evidence
+	contradictory.Client.Raw = strings.Replace(contradictory.Client.Raw,
+		"generic-receive-offload: off", "generic-receive-offload: on", 1)
+	contradictory.SHA256 = netops.HashOffloadEvidence(contradictory)
+	if reasons := netops.ValidateOffloadEvidence(spec, &contradictory); !strings.Contains(strings.Join(reasons, "\n"), "does not match raw readback") {
+		t.Fatalf("contradictory raw/map evidence accepted: %v", reasons)
+	}
+	enabled := evidence.Client.Features["generic-receive-offload"]
+	enabled.Enabled = true
+	evidence.Client.Features["generic-receive-offload"] = enabled
+	delete(evidence.Server.Features, "tx-udp-segmentation")
+	reasons := netops.ValidateOffloadEvidence(spec, &evidence)
+	joined := strings.Join(reasons, "\n")
+	for _, want := range []string{"sha256=", "generic-receive-offload is on", "tx-udp-segmentation is unavailable"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("reasons %v do not contain %q", reasons, want)
+		}
+	}
+}
+
+func TestParseLinkMTU(t *testing.T) {
+	name, mtu, err := netops.ParseLinkMTU(`[{"ifname":"rbtest-vs","mtu":1500}]`)
+	if err != nil || name != "rbtest-vs" || mtu != 1500 {
+		t.Fatalf("link readback name=%q mtu=%d err=%v", name, mtu, err)
+	}
+	for _, raw := range []string{`[]`, `[{"ifname":"rbtest-vs","mtu":0}]`, `{}`} {
+		if _, _, err := netops.ParseLinkMTU(raw); err == nil {
+			t.Fatalf("invalid link readback accepted: %s", raw)
+		}
+	}
+}
+
+func TestRunCommandsBestEffortContinuesAfterFailure(t *testing.T) {
+	var output strings.Builder
+	err := netops.RunCommandsBestEffort(context.Background(), []netops.Command{
+		{Name: "sh", Args: []string{"-c", "exit 7"}},
+		{Name: "sh", Args: []string{"-c", "printf reached"}},
+	}, netops.RunOptions{Stdout: &output})
+	if err == nil || output.String() != "reached" {
+		t.Fatalf("best-effort commands err=%v output=%q", err, output.String())
 	}
 }
 
@@ -109,6 +230,22 @@ func TestDeltaQdiscPairPreservesDirectionalCounters(t *testing.T) {
 	}
 	if got := delta.ClientEgress; got == nil || got.SentBytes != 80 || got.SentPackets != 9 || got.Dropped != 5 || got.Overlimits != 6 || got.Requeues != 7 {
 		t.Fatalf("client delta = %+v", got)
+	}
+}
+
+func TestValidateNetemEchoRejectsRandomLossCorrelation(t *testing.T) {
+	stats, err := netops.ParseQdiscShow(`
+qdisc netem 8001: root refcnt 2 limit 10000 loss 1% 25%
+ Sent 1000 bytes 10 pkt (dropped 1, overlimits 0 requeues 0)
+`)
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("parse correlated qdisc stats=%v err=%v", stats, err)
+	}
+	if stats[0].LossCorrelationPercent != 25 {
+		t.Fatalf("loss correlation=%g, want 25", stats[0].LossCorrelationPercent)
+	}
+	if err := netops.ValidateNetemEcho(netops.Netem{LossPercent: 1}, stats[0]); err == nil || !strings.Contains(err.Error(), "independent") {
+		t.Fatalf("correlated random loss accepted: %v", err)
 	}
 }
 
@@ -217,5 +354,30 @@ func TestParseIperfLossPct(t *testing.T) {
 	}
 	if _, err := netops.ParseIperfLossPct(`{"end":{"sum":{}}}`); err == nil {
 		t.Fatal("want error for missing lost_percent")
+	}
+	if _, err := netops.ParseIperfLossSample(`{"end":{"sum":{"lost_percent":1}}}`); err == nil {
+		t.Fatal("want error for missing packets")
+	}
+}
+
+func TestValidateNetemGateReportRejectsZeroObservedCanonicalLoss(t *testing.T) {
+	spec := netops.PairSpec{ClientEgress: netops.Netem{LossPercent: 1}}
+	report := &netops.NetemGateReport{
+		ExpectedC2SPct: 1, LossC2SPct: 0, LossC2SPackets: 2000,
+		LossS2CPackets: 2000,
+	}
+	reasons := netops.ValidateNetemGateReport(spec, report)
+	if len(reasons) == 0 || !strings.Contains(strings.Join(reasons, "\n"), "allowed") {
+		t.Fatalf("zero observed 1%% loss was accepted: %v", reasons)
+	}
+	report.LossC2SPct = 1
+	if reasons := netops.ValidateNetemGateReport(spec, report); len(reasons) != 0 {
+		t.Fatalf("valid gate report rejected: %v", reasons)
+	}
+	spec.ClientEgress.LossPercent = 0.01
+	report.ExpectedC2SPct = 0.01
+	report.LossC2SPct = 0
+	if reasons := netops.ValidateNetemGateReport(spec, report); len(reasons) != 0 {
+		t.Fatalf("underpowered tiny-loss gate should allow zero observations: %v", reasons)
 	}
 }

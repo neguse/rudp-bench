@@ -41,22 +41,51 @@ func ValidateScenarioMetricsFiles(
 	scenario ScenarioSpec,
 	merged *MergedMetrics,
 ) error {
-	if len(clientPaths) != len(clientConns) {
-		return fmt.Errorf("client metrics paths=%d, connection partitions=%d", len(clientPaths), len(clientConns))
-	}
-	server, err := readMetricsFileWithOptions(serverPath, true)
+	server, err := readMetricsArtifact(serverPath)
 	if err != nil {
 		return err
 	}
-	if err := validateScenarioProcessMetrics(server, serverPath, "server", totalConns, totalConns, duration, scenario); err != nil {
-		return err
-	}
-	for i, path := range clientPaths {
-		client, err := readMetricsFile(path)
+	clients := make([]MetricsArtifactData, 0, len(clientPaths))
+	for _, path := range clientPaths {
+		client, err := readMetricsArtifact(path)
 		if err != nil {
 			return err
 		}
-		if err := validateScenarioProcessMetrics(client, path, "client", clientConns[i], totalConns, duration, scenario); err != nil {
+		clients = append(clients, client)
+	}
+	return ValidateScenarioMetricsData(server, clients, clientConns, totalConns, duration,
+		stalenessPeriodNS, scenario, merged)
+}
+
+// ValidateScenarioMetricsData validates immutable artifact snapshots without
+// reopening their source paths. This is the byte-oriented counterpart of
+// ValidateScenarioMetricsFiles.
+func ValidateScenarioMetricsData(
+	serverArtifact MetricsArtifactData,
+	clientArtifacts []MetricsArtifactData,
+	clientConns []int,
+	totalConns int,
+	duration time.Duration,
+	stalenessPeriodNS uint64,
+	scenario ScenarioSpec,
+	merged *MergedMetrics,
+) error {
+	if len(clientArtifacts) != len(clientConns) {
+		return fmt.Errorf("client metrics artifacts=%d, connection partitions=%d", len(clientArtifacts), len(clientConns))
+	}
+	server, err := parseMetricsArtifact(serverArtifact, true)
+	if err != nil {
+		return err
+	}
+	if err := validateScenarioProcessMetrics(server, serverArtifact.Name(), "server", totalConns, totalConns, duration, scenario); err != nil {
+		return err
+	}
+	for i, artifact := range clientArtifacts {
+		client, err := parseMetricsArtifact(artifact, false)
+		if err != nil {
+			return err
+		}
+		if err := validateScenarioProcessMetrics(client, artifact.Name(), "client", clientConns[i], totalConns, duration, scenario); err != nil {
 			return err
 		}
 	}

@@ -17,6 +17,8 @@ type GateInput struct {
 	NetemEnabled       bool
 	UDPDropDelta       netops.UDPStats
 	ServerUDPDropDelta netops.UDPStats
+	Offloads           *netops.OffloadEvidence
+	OffloadsAfter      *netops.OffloadEvidence
 	LossEvidence       *NetemLossEvidence
 	ExtraReasons       []string
 	SUTFailureReasons  []string
@@ -58,6 +60,10 @@ func EvaluateGate(input GateInput) GateResult {
 		if attempted < input.AttemptedThreshold {
 			reasons = append(reasons, fmt.Sprintf("attempted_ratio=%g below threshold=%g", attempted, input.AttemptedThreshold))
 		}
+		if input.Metrics.Raw.TimestampOrderViolations != 0 {
+			reasons = append(reasons, fmt.Sprintf("timestamp_order_violations=%d, want 0",
+				input.Metrics.Raw.TimestampOrderViolations))
+		}
 	}
 
 	for _, p := range input.Processes {
@@ -80,6 +86,7 @@ func EvaluateGate(input GateInput) GateResult {
 	if input.NetemEnabled && (input.ServerUDPDropDelta.InErrors != 0 || input.ServerUDPDropDelta.RcvbufErrors != 0) {
 		sutReasons = append(sutReasons, fmt.Sprintf("server netns UDP drop delta non-zero: InErrors=%d RcvbufErrors=%d", input.ServerUDPDropDelta.InErrors, input.ServerUDPDropDelta.RcvbufErrors))
 	}
+	reasons = append(reasons, ValidateOffloadIntervalEvidence(input.Config, input.Offloads, input.OffloadsAfter, len(sutReasons) > 0)...)
 	reasons = append(reasons, ValidateNetemLossEvidence(input.Config, input.Control, input.LossEvidence)...)
 
 	verdict := VerdictValid
@@ -92,6 +99,40 @@ func EvaluateGate(input GateInput) GateResult {
 		AttemptedRatio:    attempted,
 		SUTFailureReasons: dedupeStrings(sutReasons),
 	}
+}
+
+// ValidateOffloadEvidence is opt-in: legacy runs do not need ethtool or carry
+// offload evidence unless disable_offloads is part of their netem treatment.
+func ValidateOffloadEvidence(cfg *RunConfig, evidence *netops.OffloadEvidence) []string {
+	if cfg == nil || cfg.Netem == nil || !cfg.Netem.DisableOffloads {
+		return nil
+	}
+	var reasons []string
+	for _, reason := range netops.ValidateOffloadEvidence(cfg.Netem.pairSpec(), evidence) {
+		reasons = append(reasons, "offload evidence: "+reason)
+	}
+	return reasons
+}
+
+// ValidateOffloadIntervalEvidence proves the packet-shaping feature and MTU
+// treatment both before and after a completed measurement. A process failure
+// may prevent the after sample, but any after sample that exists is still
+// validated.
+func ValidateOffloadIntervalEvidence(cfg *RunConfig, before, after *netops.OffloadEvidence, allowMissingAfter bool) []string {
+	reasons := ValidateOffloadEvidence(cfg, before)
+	if cfg == nil || cfg.Netem == nil || !cfg.Netem.DisableOffloads {
+		return reasons
+	}
+	if after == nil {
+		if !allowMissingAfter {
+			reasons = append(reasons, "offload evidence after measurement: missing")
+		}
+		return reasons
+	}
+	for _, reason := range netops.ValidateOffloadEvidence(cfg.Netem.pairSpec(), after) {
+		reasons = append(reasons, "offload evidence after measurement: "+reason)
+	}
+	return reasons
 }
 
 // ValidateNetemLossEvidence validates random-netem qdisc counter evidence
@@ -182,12 +223,10 @@ func ValidateNetemLossEvidence(cfg *RunConfig, controlResult *control.Result, ev
 				reasons = append(reasons, prefix(fmt.Sprintf("%s %s source=%s/%s, want %s/%s",
 					check.name, phase.name, sample.Namespace, sample.Device, check.namespace, check.device)))
 			}
-			if sample.Error != "" {
-				reasons = append(reasons, prefix(fmt.Sprintf("%s %s read failed: %s", check.name, phase.name, sample.Error)))
-				continue
+			if err := netops.ValidateQdiscSampleReadback(sample); err != nil {
+				reasons = append(reasons, prefix(fmt.Sprintf("%s %s readback mismatch: %v", check.name, phase.name, err)))
 			}
 			if sample.Stats == nil {
-				reasons = append(reasons, prefix(fmt.Sprintf("%s %s stats are missing", check.name, phase.name)))
 				continue
 			}
 			if err := netops.ValidateNetemEcho(check.expected, *sample.Stats); err != nil {
@@ -226,6 +265,19 @@ func validateQdiscSnapshotBounds(schedule control.ScheduleMessage, before, after
 		if sample.CaptureStartNS < schedule.StartAtNS || sample.CaptureFinishNS > schedule.StopAtNS ||
 			sample.CaptureFinishNS < sample.CaptureStartNS {
 			reasons = append(reasons, prefix(fmt.Sprintf("%s/%s sample timing is outside or inverted", sample.Namespace, sample.Device)))
+		}
+	}
+	for _, pair := range []struct {
+		name     string
+		snapshot netops.QdiscPairSnapshot
+	}{{"before", before}, {"after", after}} {
+		snapshot := pair.snapshot
+		if snapshot.CaptureStartNS > snapshot.ServerEgress.CaptureStartNS ||
+			snapshot.ServerEgress.CaptureStartNS > snapshot.ServerEgress.CaptureFinishNS ||
+			snapshot.ServerEgress.CaptureFinishNS > snapshot.ClientEgress.CaptureStartNS ||
+			snapshot.ClientEgress.CaptureStartNS > snapshot.ClientEgress.CaptureFinishNS ||
+			snapshot.ClientEgress.CaptureFinishNS > snapshot.CaptureFinishNS {
+			reasons = append(reasons, prefix(pair.name+" pair bracket does not enclose sequential server/client samples"))
 		}
 	}
 	return reasons

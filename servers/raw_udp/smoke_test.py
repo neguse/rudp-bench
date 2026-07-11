@@ -30,6 +30,8 @@ def validate_describe(server_bin, client_bin):
         for key in (
             "transport",
             "class_mapping",
+            "payload_pattern",
+            "wire_compression",
             "max_payload_bytes",
             "scenarios",
             "tuning",
@@ -70,6 +72,10 @@ def validate_describe(server_bin, client_bin):
                 )
         if int(doc["max_payload_bytes"]) < 64:
             raise AssertionError(f"{binary}: max_payload_bytes too small")
+        if doc["payload_pattern"] != "splitmix64-v1":
+            raise AssertionError(f"{binary}: payload_pattern mismatch")
+        if doc["wire_compression"] != "none":
+            raise AssertionError(f"{binary}: wire_compression mismatch")
         if set(doc["scenarios"]) != {
             "environment_baseline",
             "authoritative_state",
@@ -88,6 +94,10 @@ def validate_describe(server_bin, client_bin):
         raise AssertionError("server/client transport descriptions differ")
     if descriptions[0]["class_mapping"] != descriptions[1]["class_mapping"]:
         raise AssertionError("server/client class mappings differ")
+    if descriptions[0]["payload_pattern"] != descriptions[1]["payload_pattern"]:
+        raise AssertionError("server/client payload patterns differ")
+    if descriptions[0]["wire_compression"] != descriptions[1]["wire_compression"]:
+        raise AssertionError("server/client wire compression differs")
 
 
 def class_delivery(metrics, name):

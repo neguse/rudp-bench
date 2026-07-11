@@ -6,6 +6,8 @@ MAPPING_FIELDS = {"primitive", "delivery", "ordering", "realization"}
 DELIVERY_VALUES = {"best_effort", "reliable"}
 ORDERING_VALUES = {"unordered", "ordered"}
 REALIZATION_VALUES = {"native", "emulated", "reliable_fallback", "unsupported"}
+PAYLOAD_PATTERN = "splitmix64-v1"
+WIRE_COMPRESSION = "none"
 
 
 def validate_describe_pair(server_bin, client_bin):
@@ -19,6 +21,14 @@ def validate_describe_pair(server_bin, client_bin):
             timeout=10,
         )
         description = json.loads(completed.stdout)
+        if description.get("payload_pattern") != PAYLOAD_PATTERN:
+            raise AssertionError(
+                f"{binary}: payload_pattern must be {PAYLOAD_PATTERN!r}"
+            )
+        if description.get("wire_compression") != WIRE_COMPRESSION:
+            raise AssertionError(
+                f"{binary}: wire_compression must be {WIRE_COMPRESSION!r}"
+            )
         mapping = description.get("class_mapping")
         if not isinstance(mapping, dict) or set(mapping) != {
             "loss_tolerant",
@@ -52,3 +62,7 @@ def validate_describe_pair(server_bin, client_bin):
         raise AssertionError("server/client transport descriptions differ")
     if descriptions[0]["class_mapping"] != descriptions[1]["class_mapping"]:
         raise AssertionError("server/client class mappings differ")
+    if descriptions[0]["payload_pattern"] != descriptions[1]["payload_pattern"]:
+        raise AssertionError("server/client payload patterns differ")
+    if descriptions[0]["wire_compression"] != descriptions[1]["wire_compression"]:
+        raise AssertionError("server/client wire compression differs")

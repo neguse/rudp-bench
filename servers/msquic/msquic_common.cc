@@ -123,6 +123,8 @@ void print_describe() {
       "\"cc_algo\":\"bbr\","
       "\"thread_model\":\"internal_worker\","
       "\"encryption\":true,"
+      "\"payload_pattern\":\"splitmix64-v1\","
+      "\"wire_compression\":\"none\","
       "\"max_payload_bytes\":1000,"
       "\"scenarios\":[\"environment_baseline\","
       "\"authoritative_state\",\"room_relay\"],"
