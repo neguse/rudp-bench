@@ -1,6 +1,7 @@
 package report
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,25 @@ import (
 	"github.com/neguse/rudp-bench/orchestrator/run"
 	"github.com/neguse/rudp-bench/orchestrator/sweep"
 )
+
+func mappingTreatment(t *testing.T, transport string, mapping map[string]run.ClassMappingSpec) *run.TreatmentRecord {
+	t.Helper()
+	description, err := json.Marshal(struct {
+		Transport    string                          `json:"transport"`
+		ClassMapping map[string]run.ClassMappingSpec `json:"class_mapping"`
+	}{transport, mapping})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := run.HashValue(mapping)
+	return &run.TreatmentRecord{
+		Server: run.CommandDescription{Description: description},
+		Client: run.CommandDescription{Description: description},
+		ClassMapping: run.ClassMappingRecord{
+			Server: mapping, Client: mapping, ServerSHA256: hash, ClientSHA256: hash, Match: true,
+		},
+	}
+}
 
 func writeSweepDir(t *testing.T) string {
 	t.Helper()
@@ -77,6 +97,129 @@ func TestCapacityTableIncludesScenarioRows(t *testing.T) {
 	table := sd.CapacityTable(false)
 	if !strings.Contains(table, "| scenario / workload |") || !strings.Contains(table, "| authoritative-smoke | 32 |") {
 		t.Fatalf("scenario table wrong:\n%s", table)
+	}
+}
+
+func TestClassMappingTable(t *testing.T) {
+	runDir := t.TempDir()
+	server := map[string]run.ClassMappingSpec{
+		run.ClassLossTolerant: {
+			Primitive: "reliable-stream", Delivery: run.ClassMappingDeliveryReliable,
+			Ordering: run.ClassMappingOrderingOrdered, Realization: run.ClassMappingRealizationReliableFallback,
+		},
+		run.ClassMustDeliver: {
+			Primitive: "reliable-stream", Delivery: run.ClassMappingDeliveryReliable,
+			Ordering: run.ClassMappingOrderingOrdered, Realization: run.ClassMappingRealizationNative,
+		},
+	}
+	hash := run.HashValue(server)
+	result, err := json.Marshal(run.Result{Transport: "websocket", Treatment: mappingTreatment(t, "websocket", server)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "result.json"), result, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sd := &SweepData{
+		Cells:  map[string]map[string]sweep.CellRecord{"websocket": {}},
+		Points: map[string]sweep.PointRecord{"websocket|scenario|c1": {Transport: "websocket", RunDir: runDir}},
+	}
+	table, err := sd.ClassMappingTable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"| transport | loss_tolerant | must_deliver | server/client |",
+		"`reliable-stream; reliable; ordered; reliable_fallback`",
+		"`reliable-stream; reliable; ordered; native`",
+		"match (`" + hash[:12] + "` / `" + hash[:12] + "`)",
+	} {
+		if !strings.Contains(table, want) {
+			t.Fatalf("mapping table missing %q:\n%s", want, table)
+		}
+	}
+}
+
+func TestClassMappingTableRejectsChangedMappingAcrossPoints(t *testing.T) {
+	writeResult := func(primitive string) string {
+		t.Helper()
+		runDir := t.TempDir()
+		mapping := map[string]run.ClassMappingSpec{
+			run.ClassLossTolerant: {
+				Primitive: primitive, Delivery: run.ClassMappingDeliveryBestEffort,
+				Ordering: run.ClassMappingOrderingUnordered, Realization: run.ClassMappingRealizationNative,
+			},
+			run.ClassMustDeliver: {
+				Primitive: "reliable", Delivery: run.ClassMappingDeliveryReliable,
+				Ordering: run.ClassMappingOrderingOrdered, Realization: run.ClassMappingRealizationNative,
+			},
+		}
+		data, err := json.Marshal(run.Result{Transport: "enet", Treatment: mappingTreatment(t, "enet", mapping)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(runDir, "result.json"), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return runDir
+	}
+	sd := &SweepData{
+		Cells: map[string]map[string]sweep.CellRecord{"enet": {}},
+		Points: map[string]sweep.PointRecord{
+			"enet|scenario|c1": {Transport: "enet", RunDir: writeResult("one")},
+			"enet|scenario|c2": {Transport: "enet", RunDir: writeResult("two")},
+		},
+	}
+	if _, err := sd.ClassMappingTable(); err == nil || !strings.Contains(err.Error(), "inconsistent class_mapping") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestClassMappingTableRejectsMissingOrMismatchedDescriptionEvidence(t *testing.T) {
+	mapping := map[string]run.ClassMappingSpec{
+		run.ClassLossTolerant: {
+			Primitive: "unreliable", Delivery: run.ClassMappingDeliveryBestEffort,
+			Ordering: run.ClassMappingOrderingUnordered, Realization: run.ClassMappingRealizationNative,
+		},
+		run.ClassMustDeliver: {
+			Primitive: "reliable", Delivery: run.ClassMappingDeliveryReliable,
+			Ordering: run.ClassMappingOrderingOrdered, Realization: run.ClassMappingRealizationNative,
+		},
+	}
+	for _, tc := range []struct {
+		name      string
+		treatment *run.TreatmentRecord
+		want      string
+	}{
+		{name: "missing", want: "treatment record is missing"},
+		{
+			name: "description mismatch",
+			treatment: func() *run.TreatmentRecord {
+				record := mappingTreatment(t, "enet", mapping)
+				record.Client.Description = json.RawMessage(strings.Replace(
+					string(record.Client.Description), `"primitive":"unreliable"`, `"primitive":"changed"`, 1))
+				return record
+			}(),
+			want: "does not match endpoint --describe",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runDir := t.TempDir()
+			data, err := json.Marshal(run.Result{Transport: "enet", Treatment: tc.treatment})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(runDir, "result.json"), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sd := &SweepData{
+				Cells:  map[string]map[string]sweep.CellRecord{"enet": {}},
+				Points: map[string]sweep.PointRecord{"enet|scenario|c1": {Transport: "enet", RunDir: runDir}},
+			}
+			if _, err := sd.ClassMappingTable(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

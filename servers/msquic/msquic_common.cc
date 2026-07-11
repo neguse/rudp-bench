@@ -112,8 +112,13 @@ const CertPaths &ensure_self_signed_cert() {
 void print_describe() {
   std::puts(
       "{\"transport\":\"msquic\","
-      "\"class_mapping\":{\"loss_tolerant\":\"quic-datagram\","
-      "\"must_deliver\":\"quic-stream\"},"
+      "\"class_mapping\":{"
+      "\"loss_tolerant\":{\"primitive\":\"quic-datagram\","
+      "\"delivery\":\"best_effort\",\"ordering\":\"unordered\","
+      "\"realization\":\"native\"},"
+      "\"must_deliver\":{\"primitive\":\"quic-stream\","
+      "\"delivery\":\"reliable\",\"ordering\":\"ordered\","
+      "\"realization\":\"native\"}},"
       "\"coalescing\":\"none\","
       "\"cc_algo\":\"bbr\","
       "\"thread_model\":\"internal_worker\","

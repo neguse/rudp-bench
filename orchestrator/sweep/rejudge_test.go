@@ -61,6 +61,250 @@ func TestRejudgeSourceEvidenceSeparatesAttempts(t *testing.T) {
 	}
 }
 
+func TestRejudgeSourceEvidenceTracksTreatmentMappingHash(t *testing.T) {
+	runDir := t.TempDir()
+	resultPath := filepath.Join(runDir, "result.json")
+	records := []PointRecord{{CampaignIdentity: "campaign", RunIdentity: "run", AcquisitionID: "acq", RunDir: runDir}}
+	write := func(primitive string) {
+		t.Helper()
+		mapping := map[string]run.ClassMappingSpec{
+			run.ClassLossTolerant: {
+				Primitive: primitive, Delivery: run.ClassMappingDeliveryBestEffort,
+				Ordering: run.ClassMappingOrderingUnordered, Realization: run.ClassMappingRealizationNative,
+			},
+			run.ClassMustDeliver: {
+				Primitive: "reliable", Delivery: run.ClassMappingDeliveryReliable,
+				Ordering: run.ClassMappingOrderingOrdered, Realization: run.ClassMappingRealizationNative,
+			},
+		}
+		hash := run.HashValue(mapping)
+		data, err := json.Marshal(run.Result{Treatment: &run.TreatmentRecord{ClassMapping: run.ClassMappingRecord{
+			Server: mapping, Client: mapping, ServerSHA256: hash, ClientSHA256: hash, Match: true,
+		}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(resultPath, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("primitive-v1")
+	first, _, err := rejudgeSourceEvidence(records, "campaign")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("primitive-v2")
+	second, _, err := rejudgeSourceEvidence(records, "campaign")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("treatment mapping hash change did not change rejudge source evidence identity")
+	}
+}
+
+func TestRejudgeInvalidatesLegacyAndTamperedTreatmentMappings(t *testing.T) {
+	scenario := &run.ScenarioSpec{
+		Name: "mapping-contract", Kind: run.ScenarioEnvironmentBaseline,
+		ClientInput: &run.TrafficSpec{
+			TrafficID:    1,
+			LossTolerant: run.TrafficClassSpec{RateHz: 1, PayloadBytes: 1, MinDeliveryRatio: 0.9},
+		},
+	}
+	validMapping := map[string]run.ClassMappingSpec{
+		run.ClassLossTolerant: {
+			Primitive: "best-effort", Delivery: run.ClassMappingDeliveryBestEffort,
+			Ordering: run.ClassMappingOrderingUnordered, Realization: run.ClassMappingRealizationNative,
+		},
+		run.ClassMustDeliver: {
+			Primitive: "reliable", Delivery: run.ClassMappingDeliveryReliable,
+			Ordering: run.ClassMappingOrderingOrdered, Realization: run.ClassMappingRealizationNative,
+		},
+	}
+	validDescription := json.RawMessage(`{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"best-effort","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":1024,"scenarios":["environment_baseline"],"tuning":[]}`)
+	legacyDescription := json.RawMessage(`{"transport":"fake","class_mapping":{"loss_tolerant":"best-effort","must_deliver":"reliable"},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":1024,"scenarios":["environment_baseline"],"tuning":[]}`)
+
+	tests := []struct {
+		name      string
+		treatment run.TreatmentRecord
+		want      string
+	}{
+		{
+			name: "legacy string mapping",
+			treatment: run.TreatmentRecord{
+				Server: run.CommandDescription{Description: legacyDescription},
+				Client: run.CommandDescription{Description: legacyDescription},
+			},
+			want: "cannot unmarshal string",
+		},
+		{
+			name: "tampered hash",
+			treatment: func() run.TreatmentRecord {
+				hash := run.HashValue(validMapping)
+				return run.TreatmentRecord{
+					Server: run.CommandDescription{Description: validDescription},
+					Client: run.CommandDescription{Description: validDescription},
+					ClassMapping: run.ClassMappingRecord{
+						Server: validMapping, Client: validMapping,
+						ServerSHA256: "tampered", ClientSHA256: hash, Match: true,
+					},
+				}
+			}(),
+			want: "server class_mapping_sha256",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			runDir := filepath.Join(dir, "run")
+			if err := os.MkdirAll(runDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			result := run.Result{
+				Version: 2, Verdict: run.VerdictValid, Outcome: run.OutcomePass,
+				Config:    run.RunConfig{Transport: "fake", Scenario: scenario, TotalConns: 1},
+				Treatment: &tt.treatment,
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(runDir, "result.json"), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			record := PointRecord{
+				Transport: "fake", Scenario: scenario.Name, Regime: "local", Conns: 1,
+				RunDir: runDir, RunIdentity: "run", AcquisitionID: "acq",
+				CampaignIdentity: "campaign", ComparisonIdentity: "comparison",
+				Verdict: run.VerdictValid, Outcome: run.OutcomePass,
+				Judgment: Judgment{Outcome: run.OutcomePass, OK: true},
+			}
+			line, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "results.jsonl"), append(line, '\n'), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			capacity := `{"seed":1,"cells":[{"transport":"fake","scenario":"mapping-contract","regime":"local","campaign_identity":"campaign","comparison_identity":"comparison","capacity":1,"evaluated_points":1}]}`
+			if err := os.WriteFile(filepath.Join(dir, "capacity.json"), []byte(capacity), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := Rejudge(dir, nil); err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := os.ReadFile(filepath.Join(dir, "results.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got PointRecord
+			if err := json.Unmarshal(persisted, &got); err != nil {
+				t.Fatal(err)
+			}
+			if !got.MeasurementInvalid || got.Outcome != run.OutcomeCensored ||
+				!strings.Contains(got.Judgment.Cause, tt.want) {
+				t.Fatalf("rejudged treatment mismatch = %+v", got)
+			}
+		})
+	}
+}
+
+func TestRejudgePreservesTreatmentUnsupportedAsTerminal(t *testing.T) {
+	dir := t.TempDir()
+	runDir := filepath.Join(dir, "run")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scenario := &run.ScenarioSpec{
+		Name: "unsupported-scenario", Kind: run.ScenarioEnvironmentBaseline,
+		ClientInput: &run.TrafficSpec{
+			TrafficID:    1,
+			LossTolerant: run.TrafficClassSpec{RateHz: 1, PayloadBytes: 1, MinDeliveryRatio: 0.9},
+		},
+	}
+	mapping := map[string]run.ClassMappingSpec{
+		run.ClassLossTolerant: {
+			Primitive: "best-effort", Delivery: run.ClassMappingDeliveryBestEffort,
+			Ordering: run.ClassMappingOrderingUnordered, Realization: run.ClassMappingRealizationNative,
+		},
+		run.ClassMustDeliver: {
+			Primitive: "reliable", Delivery: run.ClassMappingDeliveryReliable,
+			Ordering: run.ClassMappingOrderingOrdered, Realization: run.ClassMappingRealizationNative,
+		},
+	}
+	description := json.RawMessage(`{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"best-effort","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":1024,"scenarios":[],"tuning":[]}`)
+	hash := run.HashValue(mapping)
+	result := run.Result{
+		Version: 2, Verdict: run.VerdictValid, Outcome: run.OutcomePass, Transport: "fake",
+		Config: run.RunConfig{
+			Transport: "fake", Scenario: scenario, TotalConns: 1,
+			Netem: &run.NetemRegime{ClientEgress: netops.Netem{LossPercent: 1}},
+		},
+		Treatment: &run.TreatmentRecord{
+			Server: run.CommandDescription{Description: description},
+			Client: run.CommandDescription{Description: description},
+			ClassMapping: run.ClassMappingRecord{
+				Server: mapping, Client: mapping, ServerSHA256: hash, ClientSHA256: hash, Match: true,
+			},
+		},
+		// Metrics, control, and loss evidence are intentionally absent. A
+		// treatment-level terminal outcome must not inspect them.
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "result.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := PointRecord{
+		Transport: "fake", Scenario: scenario.Name, Regime: "local", Conns: 1,
+		RunDir: runDir, RunIdentity: "run", AcquisitionID: "acq",
+		CampaignIdentity: "campaign", ComparisonIdentity: "comparison",
+		Verdict: run.VerdictValid, Outcome: run.OutcomePass,
+		Judgment: Judgment{Outcome: run.OutcomePass, OK: true},
+	}
+	line, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "results.jsonl"), append(line, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	capacity := `{"seed":1,"cells":[{"transport":"fake","scenario":"unsupported-scenario","regime":"local","campaign_identity":"campaign","comparison_identity":"comparison","capacity":1,"evaluated_points":1}]}`
+	if err := os.WriteFile(filepath.Join(dir, "capacity.json"), []byte(capacity), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rejudge(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(filepath.Join(dir, "results.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got PointRecord
+	if err := json.Unmarshal(persisted, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Outcome != run.OutcomeUnsupported || got.Judgment.Outcome != run.OutcomeUnsupported ||
+		got.MeasurementInvalid || got.Judgment.Censored || !strings.Contains(got.Judgment.Cause, "does not advertise scenario") {
+		t.Fatalf("unsupported treatment rejudged as %+v", got)
+	}
+	capacityData, err := os.ReadFile(filepath.Join(dir, "capacity.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var capacityDoc struct {
+		Cells []CellRecord `json:"cells"`
+	}
+	if err := json.Unmarshal(capacityData, &capacityDoc); err != nil {
+		t.Fatal(err)
+	}
+	if len(capacityDoc.Cells) != 1 || capacityDoc.Cells[0].Outcome != run.OutcomeUnsupported {
+		t.Fatalf("unsupported capacity = %+v", capacityDoc.Cells)
+	}
+}
+
 func TestDeriveCellCensoredBeforeFail(t *testing.T) {
 	cell := deriveCell([]PointRecord{
 		pt(32, true, false, ""),

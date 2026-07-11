@@ -104,8 +104,13 @@ inline int send_payload(ISteamNetworkingSockets *iface,
 inline void print_describe() {
   std::puts(
       "{\"transport\":\"gns\","
-      "\"class_mapping\":{\"loss_tolerant\":\"unreliable-no-nagle\","
-      "\"must_deliver\":\"reliable\"},"
+      "\"class_mapping\":{"
+      "\"loss_tolerant\":{\"primitive\":\"unreliable-no-nagle\","
+      "\"delivery\":\"best_effort\",\"ordering\":\"unordered\","
+      "\"realization\":\"native\"},"
+      "\"must_deliver\":{\"primitive\":\"reliable\","
+      "\"delivery\":\"reliable\",\"ordering\":\"ordered\","
+      "\"realization\":\"native\"}},"
       "\"coalescing\":\"none\","
       "\"cc_algo\":\"token-bucket(SendRateMin=Max=256MBps)\","
       "\"thread_model\":\"internal_worker\","

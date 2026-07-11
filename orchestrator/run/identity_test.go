@@ -3,6 +3,7 @@ package run
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +28,11 @@ func TestConfigIdentityTracksMeasurementInputs(t *testing.T) {
 	changed.Scenario = &copyScenario
 	if got := ConfigIdentity(changed); got == a {
 		t.Fatal("scenario rate did not change identity")
+	}
+	changed = base
+	changed.ClassMappingSHA256 = strings.Repeat("a", 64)
+	if got := ConfigIdentity(changed); got == a {
+		t.Fatal("expected class_mapping hash did not change identity")
 	}
 }
 

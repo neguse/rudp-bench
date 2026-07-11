@@ -49,6 +49,49 @@ type TreatmentRecord struct {
 	Host               HostEnvironment    `json:"host"`
 	Server             CommandDescription `json:"server"`
 	Client             CommandDescription `json:"client"`
+	ClassMapping       ClassMappingRecord `json:"class_mapping"`
+}
+
+type ClassMappingDelivery string
+
+const (
+	ClassMappingDeliveryBestEffort ClassMappingDelivery = "best_effort"
+	ClassMappingDeliveryReliable   ClassMappingDelivery = "reliable"
+)
+
+type ClassMappingOrdering string
+
+const (
+	ClassMappingOrderingUnordered ClassMappingOrdering = "unordered"
+	ClassMappingOrderingOrdered   ClassMappingOrdering = "ordered"
+)
+
+type ClassMappingRealization string
+
+const (
+	ClassMappingRealizationNative           ClassMappingRealization = "native"
+	ClassMappingRealizationEmulated         ClassMappingRealization = "emulated"
+	ClassMappingRealizationReliableFallback ClassMappingRealization = "reliable_fallback"
+	ClassMappingRealizationUnsupported      ClassMappingRealization = "unsupported"
+)
+
+// ClassMappingSpec describes the concrete transport primitive and the
+// semantics it actually supplies for one benchmark traffic class.
+type ClassMappingSpec struct {
+	Primitive   string                  `json:"primitive"`
+	Delivery    ClassMappingDelivery    `json:"delivery"`
+	Ordering    ClassMappingOrdering    `json:"ordering"`
+	Realization ClassMappingRealization `json:"realization"`
+}
+
+// ClassMappingRecord preserves both endpoint advertisements. Hashes are over
+// canonical JSON, so field order in --describe output does not affect them.
+type ClassMappingRecord struct {
+	Server       map[string]ClassMappingSpec `json:"server,omitempty"`
+	Client       map[string]ClassMappingSpec `json:"client,omitempty"`
+	ServerSHA256 string                      `json:"server_sha256,omitempty"`
+	ClientSHA256 string                      `json:"client_sha256,omitempty"`
+	Match        bool                        `json:"match"`
 }
 
 type CommandDescription struct {

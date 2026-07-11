@@ -76,14 +76,25 @@ func Rejudge(dir string, schedMeasurand map[string]bool) error {
 			res.Config.SchedIsMeasurand = true
 		}
 		var contractInvalid []string
-		if err := run.ValidateMergedMetricsConsistency(res.Metrics); err != nil {
-			contractInvalid = append(contractInvalid, "metrics contract: "+err.Error())
+		treatmentInvalid, treatmentUnsupported := run.ValidateScenarioTreatmentContract(res.Treatment, res.Config)
+		for _, reason := range treatmentInvalid {
+			contractInvalid = append(contractInvalid, "treatment contract: "+reason)
 		}
-		var lossEvidence *run.NetemLossEvidence
-		if res.Netem != nil {
-			lossEvidence = res.Netem.LossEvidence
+		if len(contractInvalid) == 0 && len(treatmentUnsupported) > 0 {
+			res.Outcome = run.OutcomeUnsupported
+			res.OutcomeReasons = append([]string(nil), treatmentUnsupported...)
+			res.Verdict = run.VerdictInvalid
+			res.InvalidReasons = nil
+		} else {
+			if err := run.ValidateMergedMetricsConsistency(res.Metrics); err != nil {
+				contractInvalid = append(contractInvalid, "metrics contract: "+err.Error())
+			}
+			var lossEvidence *run.NetemLossEvidence
+			if res.Netem != nil {
+				lossEvidence = res.Netem.LossEvidence
+			}
+			contractInvalid = append(contractInvalid, run.ValidateNetemLossEvidence(&res.Config, res.Control, lossEvidence)...)
 		}
-		contractInvalid = append(contractInvalid, run.ValidateNetemLossEvidence(&res.Config, res.Control, lossEvidence)...)
 		if len(contractInvalid) > 0 {
 			res.Verdict = run.VerdictInvalid
 			res.InvalidReasons = append(res.InvalidReasons, contractInvalid...)

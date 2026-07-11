@@ -6,10 +6,12 @@ via `UseWebSockets`, not SignalR -- one bench message = one binary WebSocket mes
 (permessage-deflate is off by default on both sides; never enabled here).
 
 Both traffic classes map to the single reliable ordered WebSocket/TCP stream
-(`"loss_tolerant": "reliable-stream"`, `"must_deliver": "reliable-stream"`), matching
-the benchspec TCP-family rule. `coalescing` is `"none"`: no sender-side latest-value
-replacement is implemented, so this is the simplest honest baseline for a TCP-family
-transport (the benchspec permits, but does not require, loss-tolerant coalescing here).
+(`primitive: "reliable-stream"`). `--describe` marks must-deliver as a native
+reliable/ordered realization and loss-tolerant as `reliable_fallback`, because
+WebSocket cannot provide best-effort unordered delivery. `coalescing` is `"none"`:
+no sender-side latest-value replacement is implemented, so this is the simplest
+honest baseline for a TCP-family transport (the benchspec permits, but does not
+require, loss-tolerant coalescing here).
 
 Server-side sends to a given WebSocket are serialized by a per-connection outbound
 queue (`System.Threading.Channels.Channel<byte[]>`, one writer task) since only one

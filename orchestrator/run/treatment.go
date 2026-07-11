@@ -8,13 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
 
 type advertisedTreatment struct {
 	Transport       string                       `json:"transport"`
-	ClassMapping    map[string]string            `json:"class_mapping"`
+	ClassMapping    map[string]ClassMappingSpec  `json:"class_mapping"`
 	Coalescing      string                       `json:"coalescing"`
 	CCAlgo          string                       `json:"cc_algo"`
 	ThreadModel     string                       `json:"thread_model"`
@@ -30,7 +31,7 @@ type treatmentValidation struct {
 }
 
 func collectTreatment(ctx context.Context, cfg RunConfig) TreatmentRecord {
-	return TreatmentRecord{
+	record := TreatmentRecord{
 		OrchestratorSHA256: OrchestratorFingerprint(),
 		EnvironmentSHA256:  EnvironmentFingerprint(),
 		Environment:        RelevantEnvironment(),
@@ -38,6 +39,47 @@ func collectTreatment(ctx context.Context, cfg RunConfig) TreatmentRecord {
 		Server:             describeCommand(ctx, cfg.ServerCommand),
 		Client:             describeCommand(ctx, cfg.ClientCommand),
 	}
+	record.ClassMapping = collectClassMappingRecord(record.Server, record.Client)
+	return record
+}
+
+func collectClassMappingRecord(server, client CommandDescription) ClassMappingRecord {
+	record := ClassMappingRecord{}
+	serverMapping, serverOK := describedClassMapping(server.Description)
+	if serverOK {
+		record.Server = serverMapping
+		record.ServerSHA256 = HashValue(serverMapping)
+	}
+	clientMapping, clientOK := describedClassMapping(client.Description)
+	if clientOK {
+		record.Client = clientMapping
+		record.ClientSHA256 = HashValue(clientMapping)
+	}
+	if serverOK && clientOK {
+		serverCanonical, _ := json.Marshal(serverMapping)
+		clientCanonical, _ := json.Marshal(clientMapping)
+		record.Match = bytes.Equal(serverCanonical, clientCanonical)
+	}
+	return record
+}
+
+func describedClassMapping(description json.RawMessage) (map[string]ClassMappingSpec, bool) {
+	if len(description) == 0 {
+		return nil, false
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(description, &object); err != nil {
+		return nil, false
+	}
+	raw, ok := object["class_mapping"]
+	if !ok {
+		return nil, false
+	}
+	var mapping map[string]ClassMappingSpec
+	if err := json.Unmarshal(raw, &mapping); err != nil || mapping == nil {
+		return nil, false
+	}
+	return mapping, true
 }
 
 func describeCommand(ctx context.Context, command CommandConfig) CommandDescription {
@@ -81,9 +123,8 @@ func describeCommand(ctx context.Context, command CommandConfig) CommandDescript
 }
 
 func classifyScenarioTreatment(record TreatmentRecord, cfg RunConfig) treatmentValidation {
-	var validation treatmentValidation
-	if cfg.Scenario == nil {
-		return validation
+	validation := treatmentValidation{
+		Invalid: ValidateTreatmentClassMappingEvidence(&record, cfg.Transport),
 	}
 	for _, item := range []struct {
 		role        string
@@ -97,9 +138,10 @@ func classifyScenarioTreatment(record TreatmentRecord, cfg RunConfig) treatmentV
 			continue
 		}
 		context := item.role + " --describe"
-		if _, err := requireJSONObject(item.description.Description, context,
+		_, err := requireJSONObject(item.description.Description, context,
 			"transport", "class_mapping", "coalescing", "cc_algo", "thread_model", "encryption",
-			"max_payload_bytes", "scenarios", "tuning"); err != nil {
+			"max_payload_bytes", "scenarios", "tuning")
+		if err != nil {
 			validation.Invalid = append(validation.Invalid, err.Error())
 			continue
 		}
@@ -120,16 +162,13 @@ func classifyScenarioTreatment(record TreatmentRecord, cfg RunConfig) treatmentV
 				validation.Invalid = append(validation.Invalid, fmt.Sprintf("%s %s is empty", context, name))
 			}
 		}
-		for _, class := range metricClassNames {
-			if advertised.ClassMapping[class] == "" {
-				validation.Invalid = append(validation.Invalid, fmt.Sprintf("%s missing class_mapping.%s", context, class))
+		if cfg.Scenario != nil {
+			if !containsString(advertised.Scenarios, string(cfg.Scenario.Kind)) {
+				validation.Unsupported = append(validation.Unsupported, fmt.Sprintf("%s does not advertise scenario %q", context, cfg.Scenario.Kind))
 			}
-		}
-		if !containsString(advertised.Scenarios, string(cfg.Scenario.Kind)) {
-			validation.Unsupported = append(validation.Unsupported, fmt.Sprintf("%s does not advertise scenario %q", context, cfg.Scenario.Kind))
-		}
-		if need := scenarioMaxPayload(*cfg.Scenario); advertised.MaxPayloadBytes < need {
-			validation.Unsupported = append(validation.Unsupported, fmt.Sprintf("%s max_payload_bytes=%d below scenario payload=%d", context, advertised.MaxPayloadBytes, need))
+			if need := scenarioMaxPayload(*cfg.Scenario); advertised.MaxPayloadBytes < need {
+				validation.Unsupported = append(validation.Unsupported, fmt.Sprintf("%s max_payload_bytes=%d below scenario payload=%d", context, advertised.MaxPayloadBytes, need))
+			}
 		}
 		for i, tuning := range advertised.Tuning {
 			for _, field := range []string{"knob", "value", "upstream_ref"} {
@@ -144,9 +183,227 @@ func classifyScenarioTreatment(record TreatmentRecord, cfg RunConfig) treatmentV
 	return validation
 }
 
+func validateClassMapping(data json.RawMessage, context string) (map[string]ClassMappingSpec, []string) {
+	var reasons []string
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(data, &entries); err != nil || entries == nil {
+		if err == nil {
+			err = fmt.Errorf("value is not an object")
+		}
+		return nil, []string{fmt.Sprintf("%s class_mapping: %v", context, err)}
+	}
+	for name := range entries {
+		if name != ClassLossTolerant && name != ClassMustDeliver {
+			reasons = append(reasons, fmt.Sprintf("%s class_mapping has unknown class %q", context, name))
+		}
+	}
+	mapping := make(map[string]ClassMappingSpec, len(metricClassNames))
+	for _, class := range metricClassNames {
+		raw, ok := entries[class]
+		if !ok || string(raw) == "null" {
+			reasons = append(reasons, fmt.Sprintf("%s missing class_mapping.%s", context, class))
+			continue
+		}
+		fields, err := requireJSONObject(raw, context+" class_mapping."+class,
+			"primitive", "delivery", "ordering", "realization")
+		if err != nil {
+			reasons = append(reasons, err.Error())
+			continue
+		}
+		for name := range fields {
+			switch name {
+			case "primitive", "delivery", "ordering", "realization":
+			default:
+				reasons = append(reasons, fmt.Sprintf("%s class_mapping.%s has unknown field %q", context, class, name))
+			}
+		}
+		var spec ClassMappingSpec
+		if err := json.Unmarshal(raw, &spec); err != nil {
+			reasons = append(reasons, fmt.Sprintf("%s class_mapping.%s: %v", context, class, err))
+			continue
+		}
+		mapping[class] = spec
+		reasons = append(reasons, validateClassMappingSpec(context, class, spec)...)
+	}
+	sort.Strings(reasons)
+	return mapping, reasons
+}
+
+func validateClassMappingSpec(context, class string, spec ClassMappingSpec) []string {
+	var reasons []string
+	prefix := context + " class_mapping." + class
+	if strings.TrimSpace(spec.Primitive) == "" {
+		reasons = append(reasons, prefix+" primitive is empty")
+	}
+	if spec.Delivery != ClassMappingDeliveryBestEffort && spec.Delivery != ClassMappingDeliveryReliable {
+		reasons = append(reasons, fmt.Sprintf("%s delivery=%q is invalid", prefix, spec.Delivery))
+	}
+	if spec.Ordering != ClassMappingOrderingUnordered && spec.Ordering != ClassMappingOrderingOrdered {
+		reasons = append(reasons, fmt.Sprintf("%s ordering=%q is invalid", prefix, spec.Ordering))
+	}
+	switch spec.Realization {
+	case ClassMappingRealizationNative, ClassMappingRealizationEmulated:
+		if class == ClassLossTolerant && spec.Delivery != ClassMappingDeliveryBestEffort {
+			reasons = append(reasons, fmt.Sprintf("%s realization=%q requires delivery=%q", prefix, spec.Realization, ClassMappingDeliveryBestEffort))
+		}
+		if class == ClassMustDeliver &&
+			(spec.Delivery != ClassMappingDeliveryReliable || spec.Ordering != ClassMappingOrderingOrdered) {
+			reasons = append(reasons, fmt.Sprintf("%s realization=%q requires delivery=%q and ordering=%q",
+				prefix, spec.Realization, ClassMappingDeliveryReliable, ClassMappingOrderingOrdered))
+		}
+	case ClassMappingRealizationReliableFallback:
+		if class != ClassLossTolerant || spec.Delivery != ClassMappingDeliveryReliable {
+			reasons = append(reasons, fmt.Sprintf("%s realization=%q requires loss_tolerant with delivery=%q", prefix, spec.Realization, ClassMappingDeliveryReliable))
+		}
+	case ClassMappingRealizationUnsupported:
+		providesRequestedGuarantee := class == ClassLossTolerant && spec.Delivery == ClassMappingDeliveryBestEffort ||
+			class == ClassMustDeliver && spec.Delivery == ClassMappingDeliveryReliable && spec.Ordering == ClassMappingOrderingOrdered
+		if providesRequestedGuarantee {
+			reasons = append(reasons, fmt.Sprintf("%s realization=%q must disclose an absent class delivery guarantee", prefix, spec.Realization))
+		}
+	default:
+		reasons = append(reasons, fmt.Sprintf("%s realization=%q is invalid", prefix, spec.Realization))
+	}
+	return reasons
+}
+
+func canonicalClassMappingsEqual(a, b map[string]ClassMappingSpec) bool {
+	aJSON, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	bJSON, err := json.Marshal(b)
+	return err == nil && bytes.Equal(aJSON, bJSON)
+}
+
+// ValidateScenarioTreatmentContract applies the current --describe schema and
+// verifies that the structured evidence in TreatmentRecord is an exact
+// canonical rendering of the two endpoint descriptions.
+func ValidateScenarioTreatmentContract(record *TreatmentRecord, cfg RunConfig) (invalid, unsupported []string) {
+	if record == nil {
+		return []string{"treatment record is missing"}, nil
+	}
+	validation := classifyScenarioTreatment(*record, cfg)
+	invalid = append(invalid, validation.Invalid...)
+	unsupported = append(unsupported, validation.Unsupported...)
+	if cfg.ClassMappingSHA256 != "" &&
+		(record.ClassMapping.ServerSHA256 != cfg.ClassMappingSHA256 || record.ClassMapping.ClientSHA256 != cfg.ClassMappingSHA256) {
+		invalid = append(invalid, fmt.Sprintf("class_mapping_sha256 drift: server=%q client=%q, expected %q",
+			record.ClassMapping.ServerSHA256, record.ClassMapping.ClientSHA256, cfg.ClassMappingSHA256))
+	}
+	return invalid, unsupported
+}
+
+// PreflightClassMapping executes each endpoint's --describe once and returns a
+// validated canonical mapping record suitable for binding into sweep identity.
+func PreflightClassMapping(ctx context.Context, transport string, server, client CommandConfig) (ClassMappingRecord, error) {
+	treatment := &TreatmentRecord{
+		Server: describeCommand(ctx, server),
+		Client: describeCommand(ctx, client),
+	}
+	treatment.ClassMapping = collectClassMappingRecord(treatment.Server, treatment.Client)
+	if reasons := ValidateTreatmentClassMappingEvidence(treatment, transport); len(reasons) > 0 {
+		return treatment.ClassMapping, fmt.Errorf("%s", strings.Join(reasons, "; "))
+	}
+	return treatment.ClassMapping, nil
+}
+
+// ValidateTreatmentClassMappingEvidence validates endpoint descriptions,
+// strict mapping schema, canonical agreement, stored hashes, and the exact
+// structured rendering without executing either endpoint.
+func ValidateTreatmentClassMappingEvidence(record *TreatmentRecord, transport string) []string {
+	if record == nil {
+		return []string{"treatment record is missing"}
+	}
+	var reasons []string
+	validMappings := map[string]map[string]ClassMappingSpec{}
+	for _, endpoint := range []struct {
+		name        string
+		description CommandDescription
+	}{
+		{"server", record.Server},
+		{"client", record.Client},
+	} {
+		if endpoint.description.Error != "" {
+			reasons = append(reasons, fmt.Sprintf("%s --describe: %s", endpoint.name, endpoint.description.Error))
+			continue
+		}
+		context := endpoint.name + " --describe"
+		object, err := requireJSONObject(endpoint.description.Description, context, "transport", "class_mapping")
+		if err != nil {
+			reasons = append(reasons, err.Error())
+			continue
+		}
+		var advertisedTransport string
+		if err := json.Unmarshal(object["transport"], &advertisedTransport); err != nil {
+			reasons = append(reasons, fmt.Sprintf("%s transport: %v", context, err))
+		} else if advertisedTransport != transport {
+			reasons = append(reasons, fmt.Sprintf("%s transport=%q, want %q", context, advertisedTransport, transport))
+		}
+		mapping, mappingReasons := validateClassMapping(object["class_mapping"], context)
+		reasons = append(reasons, mappingReasons...)
+		if len(mappingReasons) == 0 {
+			validMappings[endpoint.name] = mapping
+		}
+	}
+	server, serverOK := validMappings["server"]
+	client, clientOK := validMappings["client"]
+	if serverOK && clientOK && !canonicalClassMappingsEqual(server, client) {
+		reasons = append(reasons, "server/client --describe class_mapping canonical mismatch")
+	}
+	reasons = append(reasons, validateStructuredClassMappingEvidence(record)...)
+	sort.Strings(reasons)
+	return reasons
+}
+
+func validateStructuredClassMappingEvidence(record *TreatmentRecord) []string {
+	reasons := ValidateClassMappingRecord(record.ClassMapping)
+	expected := collectClassMappingRecord(record.Server, record.Client)
+	if HashValue(record.ClassMapping) != HashValue(expected) {
+		reasons = append(reasons, "structured class_mapping evidence does not match endpoint --describe output")
+	}
+	return reasons
+}
+
+// ValidateClassMappingRecord verifies the structured mapping schema, its
+// canonical hashes, and endpoint agreement. It is also used by report readers
+// so malformed persisted evidence is never rendered as a valid mapping.
+func ValidateClassMappingRecord(record ClassMappingRecord) []string {
+	var reasons []string
+	for _, endpoint := range []struct {
+		name    string
+		mapping map[string]ClassMappingSpec
+		hash    string
+	}{
+		{"server", record.Server, record.ServerSHA256},
+		{"client", record.Client, record.ClientSHA256},
+	} {
+		if endpoint.mapping == nil {
+			reasons = append(reasons, endpoint.name+" structured class_mapping is missing")
+			continue
+		}
+		raw, _ := json.Marshal(endpoint.mapping)
+		_, mappingReasons := validateClassMapping(raw, endpoint.name+" treatment record")
+		reasons = append(reasons, mappingReasons...)
+		wantHash := HashValue(endpoint.mapping)
+		if endpoint.hash != wantHash {
+			reasons = append(reasons, fmt.Sprintf("%s class_mapping_sha256=%q, want %q", endpoint.name, endpoint.hash, wantHash))
+		}
+	}
+	actualMatch := record.Server != nil && record.Client != nil && canonicalClassMappingsEqual(record.Server, record.Client)
+	if record.Match != actualMatch {
+		reasons = append(reasons, fmt.Sprintf("class_mapping match=%v, want %v", record.Match, actualMatch))
+	}
+	if !actualMatch {
+		reasons = append(reasons, "structured server/client class_mapping canonical mismatch")
+	}
+	sort.Strings(reasons)
+	return reasons
+}
+
 func validateScenarioTreatment(record TreatmentRecord, cfg RunConfig) []string {
-	validation := classifyScenarioTreatment(record, cfg)
-	return append(validation.Invalid, validation.Unsupported...)
+	invalid, unsupported := ValidateScenarioTreatmentContract(&record, cfg)
+	return append(invalid, unsupported...)
 }
 
 func scenarioMaxPayload(scenario ScenarioSpec) int {

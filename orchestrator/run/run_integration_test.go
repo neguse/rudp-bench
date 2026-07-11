@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -15,6 +16,25 @@ import (
 	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/monotonic"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("RUDP_BENCH_FAKE_PROCESS") == "1" {
+		for _, arg := range os.Args {
+			if arg == "--describe" {
+				fmt.Print(fakeDescription())
+				os.Exit(0)
+			}
+		}
+	}
+	os.Exit(m.Run())
+}
+
+func fakeDescription() string {
+	if os.Getenv("FAKE_DESCRIBE_MODE") == "invalid_unsupported" {
+		return `{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"fake-reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":65536,"scenarios":[],"tuning":[]}`
+	}
+	return `{"transport":"fake","class_mapping":{"loss_tolerant":{"primitive":"fake-best-effort","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"fake-reliable","delivery":"reliable","ordering":"ordered","realization":"native"}},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":65536,"scenarios":["environment_baseline","authoritative_state","room_relay"],"tuning":[]}`
+}
 
 func TestRunIntegrationLocalFakeProcesses(t *testing.T) {
 	outDir := t.TempDir()
@@ -76,6 +96,10 @@ func TestRunIntegrationLocalFakeProcesses(t *testing.T) {
 	if result.Treatment == nil || len(result.Treatment.Server.Description) == 0 || len(result.Treatment.Client.Description) == 0 {
 		t.Fatalf("treatment = %+v", result.Treatment)
 	}
+	if !result.Treatment.ClassMapping.Match || result.Treatment.ClassMapping.ServerSHA256 == "" ||
+		result.Treatment.ClassMapping.ServerSHA256 != result.Treatment.ClassMapping.ClientSHA256 {
+		t.Fatalf("class mapping record = %+v", result.Treatment.ClassMapping)
+	}
 	loss := result.Metrics.Classes[ClassLossTolerant]
 	if loss.Slots != 15 || loss.SlotsBroadcast != 3 || loss.ExpectedReceives != 21 || loss.DeliveredUnique != 21 {
 		t.Fatalf("loss aggregate = %+v", loss)
@@ -90,13 +114,67 @@ func TestRunIntegrationLocalFakeProcesses(t *testing.T) {
 	}
 }
 
+func TestRunTreatmentInvalidPrecedesUnsupported(t *testing.T) {
+	descriptionEnv := []string{
+		"RUDP_BENCH_FAKE_PROCESS=1",
+		"FAKE_TRANSPORT=fake",
+		"FAKE_DESCRIBE_MODE=invalid_unsupported",
+	}
+	cfg := RunConfig{
+		Transport: "fake",
+		Scenario:  ptr(authoritativeFixture()),
+		ServerCommand: CommandConfig{
+			Path: os.Args[0], Env: descriptionEnv,
+		},
+		ClientCommand: CommandConfig{
+			Path: os.Args[0], Env: descriptionEnv,
+		},
+		ClientProcs: 1,
+		TotalConns:  1,
+		Duration:    Duration{Duration: time.Second},
+		OutputDir:   t.TempDir(),
+	}
+	result, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != OutcomeInvalid || result.Verdict != VerdictInvalid {
+		t.Fatalf("outcome=%s verdict=%s reasons=%v", result.Outcome, result.Verdict, result.InvalidReasons)
+	}
+	if got := strings.Join(result.InvalidReasons, "; "); !strings.Contains(got, "primitive is empty") {
+		t.Fatalf("invalid reasons = %v", result.InvalidReasons)
+	}
+}
+
+func TestRunRejectsClassMappingDriftBeforeMeasurement(t *testing.T) {
+	env := []string{"RUDP_BENCH_FAKE_PROCESS=1", "FAKE_TRANSPORT=fake"}
+	cfg := RunConfig{
+		Transport:          "fake",
+		ClassMappingSHA256: strings.Repeat("f", 64),
+		ServerCommand:      CommandConfig{Path: os.Args[0], Env: env},
+		ClientCommand:      CommandConfig{Path: os.Args[0], Env: env},
+		ClientProcs:        1,
+		TotalConns:         1,
+		Duration:           Duration{Duration: time.Second},
+		OutputDir:          t.TempDir(),
+	}
+	result, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != OutcomeInvalid ||
+		!strings.Contains(strings.Join(result.InvalidReasons, "; "), "class_mapping_sha256 drift") {
+		t.Fatalf("mapping drift result = %+v", result)
+	}
+}
+
 func TestFakeProcessHelper(t *testing.T) {
 	if os.Getenv("RUDP_BENCH_FAKE_PROCESS") != "1" {
 		return
 	}
 	for _, arg := range os.Args {
 		if arg == "--describe" {
-			fmt.Print(`{"transport":"fake","class_mapping":{"loss_tolerant":"fake","must_deliver":"fake"},"coalescing":"none","cc_algo":"none","thread_model":"single","encryption":false,"max_payload_bytes":65536,"scenarios":["environment_baseline","authoritative_state","room_relay"],"tuning":[]}`)
+			fmt.Print(fakeDescription())
 			os.Exit(0)
 		}
 	}

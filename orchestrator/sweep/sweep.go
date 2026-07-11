@@ -25,6 +25,9 @@ type TransportSpec struct {
 	ServerCommand run.CommandConfig `json:"server_command"`
 	ClientCommand run.CommandConfig `json:"client_command"`
 	ClientProcs   int               `json:"client_procs"`
+	// ClassMappingSHA256 is filled by Sweep.New after endpoint preflight. When
+	// supplied in config it is an expected value and must match the preflight.
+	ClassMappingSHA256 string `json:"class_mapping_sha256,omitempty"`
 	// TCP 系(blocking send)は true: sched 遅延を farm でなく transport に帰属
 	SchedIsMeasurand bool `json:"sched_is_measurand,omitempty"`
 	// 定常が見えてもこれより早く窓を開かない(遅い過渡の宣言。enet は 15s)
@@ -240,9 +243,18 @@ func New(cfg Config) (*Sweep, error) {
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return nil, err
 	}
-	identityConfig := cfg
-	identityConfig.OutputDir = ""
-	identityConfig.DoctorReport = ""
+	for name, transport := range cfg.Transports {
+		mapping, err := run.PreflightClassMapping(context.Background(), name, transport.ServerCommand, transport.ClientCommand)
+		if err != nil {
+			return nil, fmt.Errorf("transport %q class_mapping preflight: %w", name, err)
+		}
+		actual := mapping.ServerSHA256
+		if transport.ClassMappingSHA256 != "" && transport.ClassMappingSHA256 != actual {
+			return nil, fmt.Errorf("transport %q class_mapping_sha256=%q, preflight=%q", name, transport.ClassMappingSHA256, actual)
+		}
+		transport.ClassMappingSHA256 = actual
+		cfg.Transports[name] = transport
+	}
 	binaries := map[string][2]string{}
 	for name, transport := range cfg.Transports {
 		binaries[name] = [2]string{
@@ -250,13 +262,7 @@ func New(cfg Config) (*Sweep, error) {
 			run.CommandFingerprint(transport.ClientCommand),
 		}
 	}
-	campaignIdentity := run.HashValue(struct {
-		Config             Config               `json:"config"`
-		Binaries           map[string][2]string `json:"binaries"`
-		OrchestratorSHA256 string               `json:"orchestrator_sha256,omitempty"`
-		EnvironmentSHA256  string               `json:"environment_sha256"`
-		DoctorSHA256       string               `json:"doctor_sha256,omitempty"`
-	}{identityConfig, binaries, run.OrchestratorFingerprint(), run.EnvironmentFingerprint(), doctorReportFingerprint(cfg.DoctorReport)})
+	campaignIdentity := sweepCampaignIdentity(cfg, binaries)
 	s := &Sweep{cfg: cfg, cache: map[string]PointRecord{}, attempts: map[string]int{}, campaignIdentity: campaignIdentity}
 	if err := s.loadResume(); err != nil {
 		return nil, err
@@ -267,6 +273,19 @@ func New(cfg Config) (*Sweep, error) {
 	}
 	s.log = f
 	return s, nil
+}
+
+func sweepCampaignIdentity(cfg Config, binaries map[string][2]string) string {
+	identityConfig := cfg
+	identityConfig.OutputDir = ""
+	identityConfig.DoctorReport = ""
+	return run.HashValue(struct {
+		Config             Config               `json:"config"`
+		Binaries           map[string][2]string `json:"binaries"`
+		OrchestratorSHA256 string               `json:"orchestrator_sha256,omitempty"`
+		EnvironmentSHA256  string               `json:"environment_sha256"`
+		DoctorSHA256       string               `json:"doctor_sha256,omitempty"`
+	}{identityConfig, binaries, run.OrchestratorFingerprint(), run.EnvironmentFingerprint(), doctorReportFingerprint(cfg.DoctorReport)})
 }
 
 func (s *Sweep) Close() error { return s.log.Close() }
@@ -363,26 +382,27 @@ func (s *Sweep) runPoint(ctx context.Context, cell cellDefinition, conns int) (P
 	comparisonID := comparisonIdentity(s.cfg, cell)
 	baseRunDir := filepath.Join(s.cfg.OutputDir, "runs", transport, testName, fmt.Sprintf("c%d", conns))
 	cfg := run.RunConfig{
-		Transport:         transport,
-		Workload:          cell.Workload,
-		Scenario:          cell.Scenario,
-		ServerCommand:     s.cfg.Transports[transport].ServerCommand,
-		ClientCommand:     s.cfg.Transports[transport].ClientCommand,
-		ClientProcs:       s.cfg.Transports[transport].ClientProcs,
-		TotalConns:        conns,
-		Warmup:            s.cfg.Warmup,
-		SteadyWarmup:      s.cfg.SteadyWarmup,
-		SteadyMinWarmup:   s.cfg.Transports[transport].SteadyMinWarmup,
-		Duration:          s.cfg.Duration,
-		Drain:             s.cfg.Drain,
-		DeadlineNS:        s.cfg.DeadlineNS,
-		StalenessPeriodNS: s.cfg.StalenessPeriodNS,
-		Netem:             s.cfg.Netem,
-		NetemGateOff:      false,
-		ServerCPUs:        s.cfg.ServerCPUs,
-		ClientCPUs:        s.cfg.ClientCPUs,
-		SchedIsMeasurand:  s.cfg.Transports[transport].SchedIsMeasurand,
-		OutputDir:         baseRunDir,
+		Transport:          transport,
+		ClassMappingSHA256: s.cfg.Transports[transport].ClassMappingSHA256,
+		Workload:           cell.Workload,
+		Scenario:           cell.Scenario,
+		ServerCommand:      s.cfg.Transports[transport].ServerCommand,
+		ClientCommand:      s.cfg.Transports[transport].ClientCommand,
+		ClientProcs:        s.cfg.Transports[transport].ClientProcs,
+		TotalConns:         conns,
+		Warmup:             s.cfg.Warmup,
+		SteadyWarmup:       s.cfg.SteadyWarmup,
+		SteadyMinWarmup:    s.cfg.Transports[transport].SteadyMinWarmup,
+		Duration:           s.cfg.Duration,
+		Drain:              s.cfg.Drain,
+		DeadlineNS:         s.cfg.DeadlineNS,
+		StalenessPeriodNS:  s.cfg.StalenessPeriodNS,
+		Netem:              s.cfg.Netem,
+		NetemGateOff:       false,
+		ServerCPUs:         s.cfg.ServerCPUs,
+		ClientCPUs:         s.cfg.ClientCPUs,
+		SchedIsMeasurand:   s.cfg.Transports[transport].SchedIsMeasurand,
+		OutputDir:          baseRunDir,
 	}
 	cfg, err := cfg.Prepare()
 	if err != nil {

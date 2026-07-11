@@ -94,8 +94,13 @@ typedef struct {
 
 static void print_describe(void) {
   puts("{\"transport\":\"raw_udp\","
-       "\"class_mapping\":{\"loss_tolerant\":\"unreliable-udp\","
-       "\"must_deliver\":\"unreliable-udp\"},"
+       "\"class_mapping\":{"
+       "\"loss_tolerant\":{\"primitive\":\"unreliable-udp\","
+       "\"delivery\":\"best_effort\",\"ordering\":\"unordered\","
+       "\"realization\":\"native\"},"
+       "\"must_deliver\":{\"primitive\":\"unreliable-udp\","
+       "\"delivery\":\"best_effort\",\"ordering\":\"unordered\","
+       "\"realization\":\"unsupported\"}},"
        "\"coalescing\":\"none\","
        "\"cc_algo\":\"none\","
        "\"thread_model\":\"single\","

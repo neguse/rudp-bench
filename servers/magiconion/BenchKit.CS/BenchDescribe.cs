@@ -4,7 +4,9 @@ public static class BenchDescribe
 {
     public const string Json =
         "{\"transport\":\"magiconion\"," +
-        "\"class_mapping\":{\"loss_tolerant\":\"grpc-stream(coalesced)\",\"must_deliver\":\"grpc-stream\"}," +
+        "\"class_mapping\":{" +
+        "\"loss_tolerant\":{\"primitive\":\"grpc-stream\",\"delivery\":\"reliable\",\"ordering\":\"ordered\",\"realization\":\"reliable_fallback\"}," +
+        "\"must_deliver\":{\"primitive\":\"grpc-stream\",\"delivery\":\"reliable\",\"ordering\":\"ordered\",\"realization\":\"native\"}}," +
         "\"coalescing\":\"latest-value\"," +
         "\"cc_algo\":\"kernel-tcp(cubic)\"," +
         "\"thread_model\":\"internal_worker\"," +

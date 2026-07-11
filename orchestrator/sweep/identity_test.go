@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,6 +51,12 @@ func comparisonFixture() (Config, cellDefinition) {
 	return cfg, cellDefinition{Transport: "raw", Scenario: scenario}
 }
 
+func TestComparisonIdentityContractVersion(t *testing.T) {
+	if comparisonIdentityVersion != 4 {
+		t.Fatalf("comparisonIdentityVersion = %d, want 4 for structured class_mapping contract", comparisonIdentityVersion)
+	}
+}
+
 func TestComparisonIdentityExcludesReplicateFactors(t *testing.T) {
 	cfg, cell := comparisonFixture()
 	want := comparisonIdentity(cfg, cell)
@@ -83,6 +90,12 @@ func TestComparisonIdentityTracksComparableTreatment(t *testing.T) {
 			t := c.Transports["raw"]
 			t.ClientCommand.Args = append([]string(nil), t.ClientCommand.Args...)
 			t.ClientCommand.Args = append(t.ClientCommand.Args, "--changed")
+			c.Transports = map[string]TransportSpec{"raw": t}
+			return c
+		},
+		"class mapping": func(c Config) Config {
+			t := c.Transports["raw"]
+			t.ClassMappingSHA256 = "changed"
 			c.Transports = map[string]TransportSpec{"raw": t}
 			return c
 		},
@@ -120,6 +133,53 @@ func TestComparisonIdentityTracksComparableTreatment(t *testing.T) {
 	if comparisonIdentity(workloadCfg, cellDefinition{Transport: "raw", Workload: "echo"}) ==
 		comparisonIdentity(workloadCfg, cellDefinition{Transport: "raw", Workload: "reliable_echo"}) {
 		t.Fatal("workload change did not change comparison identity")
+	}
+}
+
+func TestCampaignIdentityTracksClassMapping(t *testing.T) {
+	cfg, _ := comparisonFixture()
+	binaries := map[string][2]string{"raw": {"server", "client"}}
+	base := sweepCampaignIdentity(cfg, binaries)
+	transport := cfg.Transports["raw"]
+	transport.ClassMappingSHA256 = "mapping"
+	cfg.Transports = map[string]TransportSpec{"raw": transport}
+	if got := sweepCampaignIdentity(cfg, binaries); got == base {
+		t.Fatal("class_mapping hash did not change campaign identity")
+	}
+}
+
+func TestSweepNewPreflightsClassMapping(t *testing.T) {
+	description := `{"transport":"raw","class_mapping":{"loss_tolerant":{"primitive":"udp","delivery":"best_effort","ordering":"unordered","realization":"native"},"must_deliver":{"primitive":"udp","delivery":"best_effort","ordering":"unordered","realization":"unsupported"}}}`
+	script := filepath.Join(t.TempDir(), "describe.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' '"+description+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	command := run.CommandConfig{Path: script}
+	base := Config{
+		OutputDir: t.TempDir(),
+		Transports: map[string]TransportSpec{"raw": {
+			ServerCommand: command, ClientCommand: command, ClientProcs: 1,
+		}},
+	}
+	s, err := New(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := s.cfg.Transports["raw"].ClassMappingSHA256
+	if actual == "" {
+		t.Fatal("preflight did not bind class_mapping hash")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	wrong := base
+	wrong.OutputDir = t.TempDir()
+	transport := wrong.Transports["raw"]
+	transport.ClassMappingSHA256 = strings.Repeat("0", 64)
+	wrong.Transports = map[string]TransportSpec{"raw": transport}
+	if _, err := New(wrong); err == nil || !strings.Contains(err.Error(), "class_mapping_sha256") {
+		t.Fatalf("expected hash mismatch error, got %v", err)
 	}
 }
 

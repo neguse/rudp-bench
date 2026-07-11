@@ -28,7 +28,9 @@ public static class LnlDescribe
             .ToString(CultureInfo.InvariantCulture);
 
         return "{\"transport\":\"litenetlib\"," +
-            "\"class_mapping\":{\"loss_tolerant\":\"unreliable\",\"must_deliver\":\"reliable-ordered\"}," +
+            "\"class_mapping\":{" +
+            "\"loss_tolerant\":{\"primitive\":\"unreliable\",\"delivery\":\"best_effort\",\"ordering\":\"unordered\",\"realization\":\"native\"}," +
+            "\"must_deliver\":{\"primitive\":\"reliable-ordered\",\"delivery\":\"reliable\",\"ordering\":\"ordered\",\"realization\":\"native\"}}," +
             "\"coalescing\":\"none\"," +
             "\"cc_algo\":\"none\"," +
             "\"thread_model\":\"server: internal_worker (NetManager.Start spawns a receive thread + " +

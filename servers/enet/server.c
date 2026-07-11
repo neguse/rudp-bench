@@ -82,8 +82,13 @@ static void on_signal(int signo) {
 
 static void print_describe(void) {
   puts("{\"transport\":\"enet\","
-       "\"class_mapping\":{\"loss_tolerant\":\"unreliable-unsequenced\","
-       "\"must_deliver\":\"reliable\"},"
+       "\"class_mapping\":{"
+       "\"loss_tolerant\":{\"primitive\":\"unreliable-unsequenced\","
+       "\"delivery\":\"best_effort\",\"ordering\":\"unordered\","
+       "\"realization\":\"native\"},"
+       "\"must_deliver\":{\"primitive\":\"reliable\","
+       "\"delivery\":\"reliable\",\"ordering\":\"ordered\","
+       "\"realization\":\"native\"}},"
        "\"coalescing\":\"none\","
        "\"cc_algo\":\"enet-packet-throttle(scale=32,default=32,accel=32,decel=0,interval=5000ms)\","
        "\"thread_model\":\"single\","

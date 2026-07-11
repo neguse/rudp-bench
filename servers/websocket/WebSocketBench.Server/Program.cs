@@ -789,7 +789,9 @@ internal static class BenchDescribeWs
     {
         var sb = new StringBuilder(1024);
         sb.Append("{\"transport\":\"websocket\",")
-            .Append("\"class_mapping\":{\"loss_tolerant\":\"reliable-stream\",\"must_deliver\":\"reliable-stream\"},")
+            .Append("\"class_mapping\":{")
+            .Append("\"loss_tolerant\":{\"primitive\":\"reliable-stream\",\"delivery\":\"reliable\",\"ordering\":\"ordered\",\"realization\":\"reliable_fallback\"},")
+            .Append("\"must_deliver\":{\"primitive\":\"reliable-stream\",\"delivery\":\"reliable\",\"ordering\":\"ordered\",\"realization\":\"native\"}},")
             .Append("\"coalescing\":\"none\",")
             .Append("\"cc_algo\":\"").Append(JsonEscape(CcAlgo())).Append("\",")
             .Append("\"thread_model\":\"async/task-based\",")

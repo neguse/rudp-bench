@@ -38,6 +38,36 @@ def validate_describe(server_bin, client_bin):
                 raise AssertionError(f"{binary}: --describe missing {key}")
         if set(doc["class_mapping"]) != {"loss_tolerant", "must_deliver"}:
             raise AssertionError(f"{binary}: invalid class_mapping")
+        for class_name, mapping in doc["class_mapping"].items():
+            if not isinstance(mapping, dict):
+                raise AssertionError(
+                    f"{binary}: class_mapping.{class_name} is not an object"
+                )
+            if set(mapping) != {"primitive", "delivery", "ordering", "realization"}:
+                raise AssertionError(
+                    f"{binary}: class_mapping.{class_name} schema mismatch"
+                )
+            if not isinstance(mapping["primitive"], str) or not mapping["primitive"]:
+                raise AssertionError(
+                    f"{binary}: class_mapping.{class_name}.primitive is empty"
+                )
+            if mapping["delivery"] not in {"best_effort", "reliable"}:
+                raise AssertionError(
+                    f"{binary}: class_mapping.{class_name}.delivery is invalid"
+                )
+            if mapping["ordering"] not in {"unordered", "ordered"}:
+                raise AssertionError(
+                    f"{binary}: class_mapping.{class_name}.ordering is invalid"
+                )
+            if mapping["realization"] not in {
+                "native",
+                "emulated",
+                "reliable_fallback",
+                "unsupported",
+            }:
+                raise AssertionError(
+                    f"{binary}: class_mapping.{class_name}.realization is invalid"
+                )
         if int(doc["max_payload_bytes"]) < 64:
             raise AssertionError(f"{binary}: max_payload_bytes too small")
         if set(doc["scenarios"]) != {
@@ -56,6 +86,8 @@ def validate_describe(server_bin, client_bin):
         descriptions.append(doc)
     if descriptions[0]["transport"] != descriptions[1]["transport"]:
         raise AssertionError("server/client transport descriptions differ")
+    if descriptions[0]["class_mapping"] != descriptions[1]["class_mapping"]:
+        raise AssertionError("server/client class mappings differ")
 
 
 def class_delivery(metrics, name):

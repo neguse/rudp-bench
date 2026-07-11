@@ -96,19 +96,19 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 	var extraReasons, sutFailureReasons []string
 	treatment := collectTreatment(ctx, cfg)
 	result.Treatment = &treatment
-	treatmentValidation := classifyScenarioTreatment(treatment, cfg)
-	for _, reason := range treatmentValidation.Invalid {
+	treatmentInvalid, treatmentUnsupported := ValidateScenarioTreatmentContract(&treatment, cfg)
+	for _, reason := range treatmentInvalid {
 		extraReasons = append(extraReasons, "treatment contract: "+reason)
-	}
-	if len(treatmentValidation.Unsupported) > 0 {
-		result.Outcome = OutcomeUnsupported
-		result.OutcomeReasons = append([]string(nil), treatmentValidation.Unsupported...)
-		result.Verdict = VerdictInvalid
-		result.InvalidReasons = nil
-		return persistRunResult(result, resultPath, summaryPath)
 	}
 	if len(extraReasons) > 0 {
 		return finishRunResult(result, GateInput{ExtraReasons: extraReasons}, resultPath, summaryPath)
+	}
+	if len(treatmentUnsupported) > 0 {
+		result.Outcome = OutcomeUnsupported
+		result.OutcomeReasons = append([]string(nil), treatmentUnsupported...)
+		result.Verdict = VerdictInvalid
+		result.InvalidReasons = nil
+		return persistRunResult(result, resultPath, summaryPath)
 	}
 	var netemEnabled bool
 	var netemPair netops.PairSpec

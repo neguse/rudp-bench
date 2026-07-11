@@ -2,7 +2,7 @@ package sweep
 
 import "github.com/neguse/rudp-bench/orchestrator/run"
 
-const comparisonIdentityVersion = 3
+const comparisonIdentityVersion = 4
 
 // comparisonIdentity identifies one capacity cell's comparable treatment. It
 // intentionally excludes replicate-specific values while retaining everything

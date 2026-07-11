@@ -7,6 +7,9 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from describe_contract import validate_describe_pair
+
 
 HIST_BINS = 16 * 28
 
@@ -306,6 +309,7 @@ def main():
         return 2
 
     server_bin, client_bin = sys.argv[1], sys.argv[2]
+    validate_describe_pair(server_bin, client_bin)
     last_error = None
     for attempt in range(20):
         port = 49152 + ((os.getpid() + attempt) % 10000)

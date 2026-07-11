@@ -106,7 +106,8 @@ func (c *CommandConfig) UnmarshalJSON(data []byte) error {
 }
 
 type RunConfig struct {
-	Transport string `json:"transport"`
+	Transport          string `json:"transport"`
+	ClassMappingSHA256 string `json:"class_mapping_sha256,omitempty"`
 	// Workload は docs/profiles.md のセル名(r{pps}p{bytes} / echo /
 	// reliable_echo)。指定時は orchestrator が共通フラグ(--rate-* /
 	// --payload-* / --broadcast-*)を client_command に付与し、duration

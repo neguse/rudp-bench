@@ -236,6 +236,84 @@ func (sd *SweepData) CapacityTable(onlyAnchors bool) string {
 	return b.String()
 }
 
+// ClassMappingTable renders the endpoint-advertised traffic-class semantics
+// from active-campaign result evidence. A transport must advertise one stable
+// mapping across every point represented by the sweep.
+func (sd *SweepData) ClassMappingTable() (string, error) {
+	records := map[string]run.ClassMappingRecord{}
+	identities := map[string]string{}
+	keys := make([]string, 0, len(sd.Points))
+	for key := range sd.Points {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		point := sd.Points[key]
+		data, err := os.ReadFile(filepath.Join(point.RunDir, "result.json"))
+		if err != nil {
+			return "", fmt.Errorf("%s mapping evidence: %w", point.RunDir, err)
+		}
+		var result run.Result
+		if err := json.Unmarshal(data, &result); err != nil {
+			return "", fmt.Errorf("%s/result.json mapping evidence: %w", point.RunDir, err)
+		}
+		if result.Transport != "" && result.Transport != point.Transport {
+			return "", fmt.Errorf("%s/result.json mapping evidence: transport=%q, want %q", point.RunDir, result.Transport, point.Transport)
+		}
+		identity, err := validateClassMappingEvidence(result.Treatment, point.Transport)
+		if err != nil {
+			return "", fmt.Errorf("%s/result.json mapping evidence: %w", point.RunDir, err)
+		}
+		record := result.Treatment.ClassMapping
+		if previous, ok := identities[point.Transport]; ok && previous != identity {
+			return "", fmt.Errorf("transport %q has inconsistent class_mapping evidence across sweep points", point.Transport)
+		}
+		identities[point.Transport] = identity
+		records[point.Transport] = record
+	}
+
+	var b strings.Builder
+	b.WriteString("| transport | loss_tolerant | must_deliver | server/client |\n")
+	b.WriteString("|---|---|---|---|\n")
+	for _, transport := range orderedTransports(sd.Cells) {
+		record, ok := records[transport]
+		if !ok {
+			b.WriteString(fmt.Sprintf("| %s | unavailable | unavailable | unavailable |\n", transport))
+			continue
+		}
+		match := "mismatch"
+		if record.Match {
+			match = "match"
+		}
+		b.WriteString(fmt.Sprintf("| %s | %s | %s | %s (`%s` / `%s`) |\n",
+			transport,
+			formatClassMapping(record.Server[run.ClassLossTolerant]),
+			formatClassMapping(record.Server[run.ClassMustDeliver]),
+			match, shortHash(record.ServerSHA256), shortHash(record.ClientSHA256)))
+	}
+	b.WriteString("\n*class cell: `primitive; delivery; ordering; realization`. Hashes are canonical server/client class_mapping SHA-256 prefixes.*\n")
+	return b.String(), nil
+}
+
+func validateClassMappingEvidence(treatment *run.TreatmentRecord, transport string) (string, error) {
+	if reasons := run.ValidateTreatmentClassMappingEvidence(treatment, transport); len(reasons) > 0 {
+		return "", fmt.Errorf("%s", strings.Join(reasons, "; "))
+	}
+	return run.HashValue(treatment.ClassMapping), nil
+}
+
+func formatClassMapping(spec run.ClassMappingSpec) string {
+	primitive := strings.ReplaceAll(spec.Primitive, "|", "\\|")
+	return fmt.Sprintf("`%s; %s; %s; %s`", primitive, spec.Delivery, spec.Ordering, spec.Realization)
+}
+
+func shortHash(value string) string {
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
+}
+
 // AnchorVerdicts は anchor セルの絶対予算判定(capacity 点の staleness p99 を
 // profiles.md の予算と比較)を生成する。probed 点からの近似であることを明記。
 func (sd *SweepData) AnchorVerdicts() string {
@@ -330,10 +408,19 @@ func UpdateDoc(docPath string, sweepDirs, boundaryDirs []string) error {
 			return fmt.Errorf("multiple sweep inputs use regime %q; aggregate blocks before report generation", sd.Regime)
 		}
 		seenRegimes[sd.Regime] = true
-		if err := apply(map[string]string{
+		sections := map[string]string{
 			"capacity-" + sd.Regime: sd.CapacityTable(sd.Regime != "wired"),
 			"anchors-" + sd.Regime:  sd.AnchorVerdicts(),
-		}); err != nil {
+		}
+		mappingSection := "mapping-" + sd.Regime
+		if strings.Contains(md, "<!-- generated:"+mappingSection+" -->") {
+			table, err := sd.ClassMappingTable()
+			if err != nil {
+				return err
+			}
+			sections[mappingSection] = table
+		}
+		if err := apply(sections); err != nil {
 			return err
 		}
 	}
