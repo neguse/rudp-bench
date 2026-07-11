@@ -86,6 +86,27 @@ func writeSummary(path string, result *Result) error {
 				traffic.NeverReceivedFlows, traffic.Cause)
 		}
 	}
+	if cost := result.Cost; cost != nil {
+		for _, role := range []*ProcessCost{cost.Server, cost.Clients} {
+			if role == nil {
+				continue
+			}
+			fmt.Fprintf(f, "cost[%s]: procs=%d cpu_ns=%d cpu_util=%.4f max_rss_bytes=%d\n",
+				role.Role, role.Processes, role.CPUTimeNS, role.CPUUtilization, role.MaxRSSBytes)
+		}
+		fmt.Fprintf(f, "cost: delivered_unique=%d server_cpu_per_delivery_ns=%.1f conns=%d\n",
+			cost.DeliveredUnique, cost.ServerCPUPerDeliveryNS, cost.TotalConns)
+		if wire := cost.Wire; wire != nil {
+			fmt.Fprintf(f, "wire[client_egress]: sent_bytes=%d sent_packets=%d app_bytes=%d app_messages=%d byte_amp=%.3f pkt_per_msg=%.3f\n",
+				wire.ClientEgressSentBytes, wire.ClientEgressSentPackets,
+				wire.AppClientEgressBytes, wire.AppClientEgressMessages,
+				wire.ClientByteAmplification, wire.ClientPacketsPerMessage)
+			fmt.Fprintf(f, "wire[server_egress]: sent_bytes=%d sent_packets=%d app_bytes=%d app_messages=%d byte_amp=%.3f pkt_per_msg=%.3f\n",
+				wire.ServerEgressSentBytes, wire.ServerEgressSentPackets,
+				wire.AppServerEgressBytes, wire.AppServerEgressMessages,
+				wire.ServerByteAmplification, wire.ServerPacketsPerMessage)
+		}
+	}
 	if result.Netem != nil && result.Netem.Enabled {
 		fmt.Fprintf(f, "client_udp_drop_delta: InErrors=%d RcvbufErrors=%d\n",
 			result.Netem.UDPDelta.InErrors,

@@ -300,7 +300,11 @@ reference開始には少なくとも次が残る。
 - ~~blockへdoctorと前後baseline drift gateを統合する~~（2026-07-12 実装済み —
   reference modeはPASS doctor + baseline blockを必須とし、drift外れは
   `block_invalid`としてaggregateから拒否される。許容幅の凍結値はpilotで決める）
-- topology schemaの必要範囲とRQ4/RQ5のcost/mechanism出力を実装する
+- ~~RQ4/RQ5のcost/mechanism出力~~（2026-07-12 実装 — run resultへ`cost`を出力:
+  window内のrole別CPU/RSS、delivered_unique当たりserver CPU、qdisc counterと
+  application payloadから求めたwire amplification。増分memory/connectionは
+  block横断で導出する）。topology schemaの拡張はADR-0004 v1 presetの範囲では
+  不要（非対称pub/sub・複数room等はv2 presetの前に実装する）
 - deterministic `loss_seed`のknown-packet trace gateを実装する
 
 これらが完了するまで今回の値はno-loss implementation smokeに限定し、solution推薦や

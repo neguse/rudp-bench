@@ -38,6 +38,7 @@ type Result struct {
 	ScenarioEvaluation *ScenarioEvaluation `json:"scenario_evaluation,omitempty"`
 	Treatment          *TreatmentRecord    `json:"treatment,omitempty"`
 	Samples            []sampler.Series    `json:"samples,omitempty"`
+	Cost               *CostSummary        `json:"cost,omitempty"`
 	Netem              *NetemResult        `json:"netem,omitempty"`
 	Artifacts          map[string]string   `json:"artifacts,omitempty"`
 }

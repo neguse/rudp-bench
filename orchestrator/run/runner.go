@@ -845,6 +845,7 @@ func finishRunResult(result *Result, gateInput GateInput, resultPath, summaryPat
 	}
 	gateInput.SUTFailureReasons = gate.SUTFailureReasons
 	result.Outcome, result.OutcomeReasons = classifyRunOutcome(result, gateInput)
+	result.Cost = ComputeCost(result)
 	return persistRunResult(result, resultPath, summaryPath)
 }
 
