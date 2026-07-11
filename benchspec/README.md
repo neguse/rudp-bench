@@ -313,3 +313,7 @@ reference peer が server/client 実装を検査する:
 7. class マッピングが `--describe` の申告どおり(loss 注入時の挙動で判別)
 8. must-deliver: loss 下で欠落・重複・payload 破損なし
 9. control channel: hello → ready → sched_ack → done の順序と時刻整合
+
+loss下の判定には、事前probeだけでなくeffective measurement window内でloss指定方向ごとの
+dropが実際に発生した機械証拠を必要とする。random netemはqdisc counterで検査できる。
+deterministic losstraceはwindow内drop counterが未統合の間、conformance証拠として扱わない。

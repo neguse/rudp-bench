@@ -90,6 +90,9 @@ type Server struct {
 
 	serverReadyOnce sync.Once
 	serverReadyCh   chan struct{}
+
+	measurementWindowOnce sync.Once
+	measurementWindowCh   chan ScheduleMessage
 }
 
 // ServerReady は role=server の参加者から ready を受信した時点で close される。
@@ -97,6 +100,13 @@ type Server struct {
 // (起動が遅い server に client が先に接続を試みて即死するレースの防止)。
 func (s *Server) ServerReady() <-chan struct{} {
 	return s.serverReadyCh
+}
+
+// MeasurementWindow reports the effective measurement schedule exactly once.
+// For steady warmup this is sent only after the provisional schedule has either
+// been replaced by a steady window or committed at the warmup cap.
+func (s *Server) MeasurementWindow() <-chan ScheduleMessage {
+	return s.measurementWindowCh
 }
 
 func NewServer(cfg Config) (*Server, error) {
@@ -120,11 +130,12 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("chmod control socket: %w", err)
 	}
 	return &Server{
-		cfg:           cfg,
-		ln:            ln,
-		removeSocket:  true,
-		conns:         make(map[int]net.Conn),
-		serverReadyCh: make(chan struct{}),
+		cfg:                 cfg,
+		ln:                  ln,
+		removeSocket:        true,
+		conns:               make(map[int]net.Conn),
+		serverReadyCh:       make(chan struct{}),
+		measurementWindowCh: make(chan ScheduleMessage, 1),
 	}, nil
 }
 
@@ -134,11 +145,18 @@ func newServerWithListener(cfg Config, ln net.Listener) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		cfg:           cfg,
-		ln:            ln,
-		conns:         make(map[int]net.Conn),
-		serverReadyCh: make(chan struct{}),
+		cfg:                 cfg,
+		ln:                  ln,
+		conns:               make(map[int]net.Conn),
+		serverReadyCh:       make(chan struct{}),
+		measurementWindowCh: make(chan ScheduleMessage, 1),
 	}, nil
+}
+
+func (s *Server) publishMeasurementWindow(schedule ScheduleMessage) {
+	s.measurementWindowOnce.Do(func() {
+		s.measurementWindowCh <- schedule
+	})
 }
 
 func listenUnix(path string) (*net.UnixListener, error) {
@@ -233,6 +251,7 @@ func (s *Server) Run(ctx context.Context) (*Result, error) {
 			// あってエラーではない。暫定窓のまま計測に入る(結果に開示される)。
 			if stage == StageWindow {
 				state.steadyReached = false
+				s.publishMeasurementWindow(state.schedule)
 				resetTimer(timer, s.cfg.DoneTimeout)
 				stage = StageDone
 				continue
@@ -298,6 +317,9 @@ func (s *Server) advanceStageIfReady(state *runState, stage Stage, timer *time.T
 			}
 		}
 		state.scheduleSent = true
+		if !s.cfg.SteadyWarmup {
+			s.publishMeasurementWindow(state.schedule)
+		}
 		resetTimer(timer, s.cfg.AckTimeout)
 		return StageAck, nil
 	case StageAck:
@@ -338,6 +360,7 @@ func (s *Server) advanceStageIfReady(state *runState, stage Stage, timer *time.T
 		if startNS >= state.schedule.StartAtNS {
 			// 上限直前に定常が成立しても暫定窓のまま行く(窓の前倒しにならない)
 			state.steadyReached = false
+			s.publishMeasurementWindow(state.schedule)
 			resetTimer(timer, s.cfg.DoneTimeout)
 			return StageDone, nil
 		}
@@ -358,6 +381,7 @@ func (s *Server) advanceStageIfReady(state *runState, stage Stage, timer *time.T
 		state.schedule.DrainUntilNS = window.DrainUntilNS
 		state.windowSent = true
 		state.steadyReached = true
+		s.publishMeasurementWindow(state.schedule)
 		resetTimer(timer, s.cfg.AckTimeout)
 		return StageWindowAck, nil
 	case StageWindowAck:

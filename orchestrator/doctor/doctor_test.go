@@ -41,6 +41,38 @@ func TestGovernorCheckTargetsBenchCPUs(t *testing.T) {
 	}
 }
 
+func TestIRQAffinityConflictsUsesEffectiveMask(t *testing.T) {
+	root := t.TempDir()
+	writeIRQ := func(number, requested string, effective *string) {
+		t.Helper()
+		dir := filepath.Join(root, number)
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "smp_affinity_list"), []byte(requested+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if effective != nil {
+			if err := os.WriteFile(filepath.Join(dir, "effective_affinity_list"), []byte(*effective+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	zero := "0"
+	empty := ""
+	eleven := "11"
+	writeIRQ("0", "0-15", &zero)
+	writeIRQ("2", "0-15", &empty)
+	writeIRQ("54", "3,11", &eleven)
+	writeIRQ("55", "4", nil) // Older kernels: fall back to the requested mask.
+
+	got := irqAffinityConflicts(root, "3-7,11-15")
+	want := []string{"54:11", "55:4"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("conflicts = %v, want %v", got, want)
+	}
+}
+
 func TestCaptureSourceSnapshotPreservesDirtyWorktree(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not available")

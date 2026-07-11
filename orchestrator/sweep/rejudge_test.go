@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/neguse/rudp-bench/orchestrator/control"
+	"github.com/neguse/rudp-bench/orchestrator/netops"
 	"github.com/neguse/rudp-bench/orchestrator/run"
 )
 
@@ -182,6 +184,63 @@ func TestRejudgeRejectsPersistedMetricsAggregateMismatch(t *testing.T) {
 	}
 	if len(capacityDoc.Cells) != 1 || !capacityDoc.Cells[0].Censored || !capacityDoc.Cells[0].MeasurementInvalid || capacityDoc.Cells[0].BreakConns != 0 {
 		t.Fatalf("invalid measurement became a numeric break: %+v", capacityDoc.Cells)
+	}
+}
+
+func TestRejudgeInvalidatesLossRunWithoutInWindowQdiscEvidence(t *testing.T) {
+	dir := t.TempDir()
+	runDir := filepath.Join(dir, "run")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	schedule := control.ScheduleMessage{Type: control.TypeSchedule, StartAtNS: 100, StopAtNS: 200, DrainUntilNS: 220}
+	result := run.Result{
+		Version: 2, Verdict: run.VerdictValid, Outcome: run.OutcomePass,
+		Config: run.RunConfig{
+			Workload: "reliable_echo", TotalConns: 1,
+			Netem: &run.NetemRegime{ClientEgress: netops.Netem{LossPercent: 1}},
+		},
+		Control: &control.Result{Schedule: schedule},
+	}
+	resultData, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "result.json"), resultData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := PointRecord{
+		Transport: "raw", Workload: "reliable_echo", Regime: "loss", Conns: 1,
+		RunDir: runDir, RunIdentity: "run", CampaignIdentity: "campaign",
+		ComparisonIdentity: "comparison", Verdict: run.VerdictValid, Outcome: run.OutcomePass,
+		Judgment: Judgment{Outcome: run.OutcomePass, OK: true},
+	}
+	line, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "results.jsonl"), append(line, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	capacity := `{"seed":1,"cells":[{"transport":"raw","workload":"reliable_echo","regime":"loss","campaign_identity":"campaign","comparison_identity":"comparison","capacity":1,"evaluated_points":1}]}`
+	if err := os.WriteFile(filepath.Join(dir, "capacity.json"), []byte(capacity), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Rejudge(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "results.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got PointRecord
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Outcome != run.OutcomeCensored || !got.MeasurementInvalid || !got.Judgment.Censored ||
+		!strings.Contains(got.Judgment.Cause, "netem loss evidence: missing") {
+		t.Fatalf("loss evidence omission was not measurement_invalid: %+v", got)
 	}
 }
 

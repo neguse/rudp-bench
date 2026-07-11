@@ -1,14 +1,13 @@
 # 2026-07-11 Scenario No-Loss Smoke
 
 - Status: **no-loss implementation smoke only**
-- Executed: 2026-07-11 05:27 UTC
+- Executed: 2026-07-11 06:40--06:42 UTC
 - Host: `smolcenter` / Linux `7.0.14-arch1-1` / amd64
-- Source: commit `a0fac12b22dcf669fc98a9a3b10dc6a654f98c1c` plus dirty patch
-  `a03266c1b8917ba8ebe4eac7ffeb64419cac075cc8c60d521fb8f8587c0da6b4`
+- Source: clean commit `11bfd169b11c4c04cdcd70b1207553c37ae18d27`
 - Campaign identity:
-  `e38fe05390b6e68b05c91b9ba8e235e9b85dc50db6d453b0564e9d4898de7c85`
+  `32f34e20e9c92029dcad781253684f029f364b998f8d643ecd26db7db961b002`
 - Local raw bundle (gitignore対象):
-  `results-v2/conformance-sessions/20260711T052725Z-2051907`
+  `results-v2/conformance-sessions/20260711T064045Z-2139892`
 
 このrunが確認するのはADR-0002のRQ0/RQ1の一部だけである。6 solutionが低負荷・
 no-lossで`authoritative_state`と`room_relay`のscenario/accounting subsetを実行できた。
@@ -33,62 +32,51 @@ loss時のclass mappingとmust-deliver動作は未検証であり、完全なcon
 
 ## Calibration And Doctor
 
-一括実行のterminalには、ENet、4 connections、LT/MD各50 Hz/connectionで4 sと12 sを
-比較し、両classともdelivery 1.0000、offered slot rate 200.00/sでPASSと表示された。
-しかし当時のscriptは生runとlogを保存していない。この値は第三者が監査できないため、
-本recordの有効なcalibration evidenceおよびRQ0成立根拠から除外する。以後は
-`CALIBRATION_DIR`指定によりshort/long bundleと`summary.json`を保存する。
+duration invarianceは4 sと12 sを比較し、LT/MD両classでdelivery 1.0、offered slot rate
+200.00/s、差分0だった。tolerance 0.005に対してPASSし、short/long bundleと
+`duration-invariance/summary.json`をsession内に保存した。
 
 raw UDP baselineは`PASS / VALID`だった。delivery 1.0、3 expected flows、
 staleness p99 10.24 ms、両participantの`invalid_payload=0`を確認した。
 
-Doctorは`FAIL`だった。主な阻害条件は次の2件である。
+Doctorは`FAIL`だった。FAIL checkは次の2件だけである。
 
 - clocksourceが期待した`tsc`ではなく`hpet`。利用可能一覧も`hpet, acpi_pm`
-- IRQ `0, 2, 54-58`のaffinityがbenchmark CPUと交差
+- requested affinity上でIRQ `0, 2, 54-58`がbenchmark CPUと交差
+
+raw Doctor artifactはrequested affinityを判定したため、IRQ 0と2もFAIL detailへ含めた。実行後に
+`effective_affinity_list`を監査すると、IRQ 0はCPU 0のみ、IRQ 2は実効配送先なしで、この2件は
+誤検知だった。一方、NVMe IRQ 54-58は実際にbenchmark CPU 11-15へ配送されていたため、IRQ隔離の
+FAIL自体は有効である。以後のDoctor判定はeffective affinityを基準にする。
+
+kernel logではboot中にTSCへ切り替えた後、clocksource watchdogがHPET比
+`-3.387825 ms / 507 ms`のskewを検出してTSCをunstableと判定し、HPETへfallbackしていた。
+kernel command lineによるTSC強制はなく、CPUには`constant_tsc`と`nonstop_tsc`がある。
+正式測定では`tsc=reliable`等で検査を隠さず、BIOS/firmware/kernel側の原因を解消する。
 
 CPU layout、benchmark CPUのperformance governor、PID 1とsystem/user/init sliceの隔離、
 nofile、残留netem/netns、必須toolはPASSした。DoctorがFAILのため、このhost状態の値を
 reference performance dataへ昇格させない。
 
-実行時sourceはclean commitではなく、Doctorに残ったのはcommitとdirty source hashだけで、
-tracked patch本文とuntracked source archiveは保存されなかった。現在のworktreeは実行後に
-変化しており、このhashから実行時sourceを復元できない。そのため本runは観測値の内部整合を
-確認するsmoke recordであり、再現可能な公開証跡ではない。以後のDoctorはdirty実行時に
-status、binary patch、untracked tarとfile hash manifestをreport横へ保存する。
-
-このsessionは完了時のartifact manifestも出力していない。本recordが正式対象として列挙する
-のは`doctor.json`、`environment-baseline/result.json`、`solutions/results.jsonl`、
-`solutions/capacity.json`と各run bundleだけである。後付けのsandbox再試行はsession外へ分離した。
-以後の一括runnerは校正を含む正式artifactのSHA-256を`session-manifest.json`へ保存する。
+source state checkはclean commit `11bfd16`でPASSした。完了manifestは12 result cellを記録し、
+duration summary、Doctor、baseline、実行config、results、capacityのSHA-256を
+`session-manifest.json`に保存した。raw bundle自体はgitignore対象であり、この文書には追加しない。
 
 ## Results
 
-実行時binaryは全12 cellを初回attemptで`PASS / VALID`と記録し、各cellは固有acquisition
-IDを持つ。しかし実行後の監査で、managed 3 solutionのauthoritative resultにlegacy
-class aggregateとtraffic seriesの不一致が見つかった。現行validatorで元bundleをコピーして
-再判定したcontract分類は`PASS=9 / INVALID=3`である。再測不能な過去のINVALIDをSUTの
-capacity breakへ数えないため、rejudge output上は3件を`CENSORED / measurement_invalid`
-として保存する。
-
-INVALID 3件でもprimary判定に使うtraffic series自体はdelivery 1.0、MD deadline hit 1.0を
-示すが、同一file内のaccounting contractが矛盾するため合格証拠には採用しない。表のp99も
-性能比較値ではなく、invalid rowでは参考値に限る。
+全12 cellを初回attemptで`PASS / VALID`と記録し、12件すべてが固有acquisition IDを持つ。
+全traffic seriesでdelivery 1.0、MD deadline hit 1.0となり、contract validatorはclass aggregate、
+traffic aggregate、histogram、top-level stalenessの一致を確認した。表のp99はこの低負荷smokeの
+観測値であり、性能順位やcapacity比較には使用しない。
 
 | solution | authoritative input/state p99 (ms) | room p99 (ms) | current outcome (auth / room) |
 |---|---:|---:|---|
 | ENet | 77.824 / 40.960 | 51.200 | PASS / PASS |
 | GameNetworkingSockets | 77.824 / 51.200 | 51.200 | PASS / PASS |
-| LiteNetLib | 77.824 / 51.200 | 49.152 | INVALID / PASS |
-| MagicOnion | 69.632 / 45.056 | 40.960 | INVALID / PASS |
+| LiteNetLib | 77.824 / 47.104 | 49.152 | PASS / PASS |
+| MagicOnion | 69.632 / 43.008 | 51.200 | PASS / PASS |
 | MsQuic | 77.824 / 45.056 | 51.200 | PASS / PASS |
-| WebSocket | 69.632 / 45.056 | 51.200 | INVALID / PASS |
-
-3件の共通原因は`must_deliver class deadline_hit=6, traffic sum=12`である。managed metricsが
-class aggregateをglobal deadline、traffic seriesをtraffic固有deadlineで別々に数えていた。
-C/C#実装はresolved traffic deadlineを共通判定源に修正し、orchestratorもclass count/histogram
-とtraffic合計、top-level stalenessの一致を必須化した。修正後binaryによるsocket runは
-再実施していないため、このrecordから3件をPASSへ戻さない。
+| WebSocket | 69.632 / 43.008 | 40.960 | PASS / PASS |
 
 全12 runのno-loss traffic seriesについて、次は観測できた。
 
@@ -99,16 +87,32 @@ C/C#実装はresolved traffic deadlineを共通判定源に修正し、orchestra
 - room relayのexpected receiver flowsは3 x 3 = 9
 - offered slot、traffic key、flow cardinality、staleness sample coverageがschemaと一致
 
-ただしmanaged authoritative 3件は上記aggregate不整合によりrun全体がINVALIDである。
+## Superseded Run And Fix
+
+同日05:27 UTCの修正前run
+`results-v2/conformance-sessions/20260711T052725Z-2051907`は、実行時binaryでは12 PASSを
+記録したが、監査後の現行contract分類では9 PASS / 3 INVALIDだった。INVALIDはLiteNetLib、
+MagicOnion、WebSocketの`authoritative_state`で、共通矛盾は
+`must_deliver class deadline_hit=6, traffic sum=12`だった。rejudge保存上は数値的なSUT breakと
+混同しないよう3件を`CENSORED / measurement_invalid`として扱った。
+
+原因はmanaged metricsがclass aggregateをglobal deadline、traffic seriesをtraffic固有deadlineで
+別々に判定したことにある。C/C#実装はresolved traffic deadlineを共通判定源に修正し、
+orchestratorもaggregate一致を必須化した。上表と12 / 12の判定は、この修正を含むclean commit
+`11bfd16`でsocket workloadを再実行した結果であり、旧INVALIDを後からPASSへ書き換えたものではない。
+
+旧runのsourceはcommit `a0fac12`とdirty source hash
+`a03266c1b8917ba8ebe4eac7ffeb64419cac075cc8c60d521fb8f8587c0da6b4`だった。patch本文、
+duration bundle、完了manifestが残っていないため、旧runは再現可能な証跡としても使用しない。
 
 未通過のconformance項目は、loss注入による`--describe`どおりのclass mapping判別と、
 must-deliverのloss下での欠落・重複・payload破損検査である。
 
 ## Interpretation
 
-現時点で有効なのはnative 3 solutionの2 use-caseとmanaged 3 solutionのroom relayに対する、
-計9 cellのno-loss smokeである。managed authoritativeは修正後再実行まで未確認とする。
-「これならこれ」を決めるには、全cellをclean sourceで再実行し、残るloss conformanceを通し、
-DoctorをPASSさせ、reference preset、network regime、resource budget、pilot precision、
+現時点で有効なのは6 solution x 2 use-case、計12 cellのno-loss low-load smokeである。
+これは実装と会計契約の確認であり、「これならこれ」やsolution推薦の証拠ではない。
+推薦へ進むには、残るloss conformanceを通し、DoctorをPASSさせ、reference preset、
+network regime、resource budget、pilot precision、
 confirmatory stopping ruleを合意してからRQ2-RQ5を測る必要がある。非対称publisher/subscriber、
 複数room、interest、churn、CPU/useful-op、memory/connection、wire amplificationも未測定である。

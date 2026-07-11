@@ -86,5 +86,21 @@ type NetemResult struct {
 	ServerUDPAfter   netops.UDPStats  `json:"server_udp_after,omitempty"`
 	ServerUDPDelta   netops.UDPStats  `json:"server_udp_delta,omitempty"`
 
-	Gate *netops.NetemGateReport `json:"gate,omitempty"`
+	Gate         *netops.NetemGateReport `json:"gate,omitempty"`
+	LossEvidence *NetemLossEvidence      `json:"loss_evidence,omitempty"`
+}
+
+// NetemLossEvidence records qdisc counters sampled strictly inside the
+// effective control schedule. A positive counter delta therefore cannot be
+// attributed solely to setup probes, warmup, or drain traffic.
+type NetemLossEvidence struct {
+	Version   int                       `json:"version"`
+	Mode      string                    `json:"mode"`
+	Supported bool                      `json:"supported"`
+	Scope     string                    `json:"scope"`
+	Schedule  control.ScheduleMessage   `json:"schedule"`
+	Before    *netops.QdiscPairSnapshot `json:"before,omitempty"`
+	After     *netops.QdiscPairSnapshot `json:"after,omitempty"`
+	Delta     *netops.QdiscPairDelta    `json:"delta,omitempty"`
+	Errors    []string                  `json:"errors,omitempty"`
 }

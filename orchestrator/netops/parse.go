@@ -10,19 +10,20 @@ import (
 )
 
 type QdiscStats struct {
-	Kind        string
-	Limit       int
-	DelayMS     float64
-	JitterMS    float64
-	LossPercent float64
+	Kind        string  `json:"kind"`
+	Root        bool    `json:"root,omitempty"`
+	Limit       int     `json:"limit,omitempty"`
+	DelayMS     float64 `json:"delay_ms,omitempty"`
+	JitterMS    float64 `json:"jitter_ms,omitempty"`
+	LossPercent float64 `json:"loss_pct,omitempty"`
 	// gemodel 検出時のみ非ゼロ: p/(p+r) と 1/r から再構成した値
-	LossBurstLen float64
-	Rate         string
-	SentBytes    uint64
-	SentPackets  uint64
-	Dropped      uint64
-	Overlimits   uint64
-	Requeues     uint64
+	LossBurstLen float64 `json:"loss_burst_len,omitempty"`
+	Rate         string  `json:"rate,omitempty"`
+	SentBytes    uint64  `json:"sent_bytes"`
+	SentPackets  uint64  `json:"sent_packets"`
+	Dropped      uint64  `json:"dropped"`
+	Overlimits   uint64  `json:"overlimits"`
+	Requeues     uint64  `json:"requeues"`
 }
 
 var sentLineRE = regexp.MustCompile(`Sent\s+(\d+)\s+bytes\s+(\d+)\s+pkt\s+\(dropped\s+(\d+),\s+overlimits\s+(\d+)\s+requeues\s+(\d+)\)`)
@@ -102,6 +103,8 @@ func ValidateNetemEcho(expected Netem, actual QdiscStats) error {
 func parseQdiscFields(fields []string, stat *QdiscStats) {
 	for i := 0; i < len(fields); i++ {
 		switch fields[i] {
+		case "root":
+			stat.Root = true
 		case "limit":
 			if i+1 < len(fields) {
 				stat.Limit, _ = strconv.Atoi(fields[i+1])

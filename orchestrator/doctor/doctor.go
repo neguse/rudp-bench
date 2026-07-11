@@ -573,12 +573,30 @@ func equalCPUSet(a, b string) bool {
 }
 
 func benchCPUIRQs(benchCPUs string) []string {
-	paths, _ := filepath.Glob("/proc/irq/[0-9]*/smp_affinity_list")
+	return irqAffinityConflicts("/proc/irq", benchCPUs)
+}
+
+func irqAffinityConflicts(irqRoot, benchCPUs string) []string {
+	dirs, _ := filepath.Glob(filepath.Join(irqRoot, "[0-9]*"))
 	var conflicts []string
-	for _, path := range paths {
-		affinity := readTrimmed(path)
+	for _, dir := range dirs {
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		// smp_affinity_list is the requested mask. Managed and legacy IRQs can
+		// expose a broad requested mask while the kernel routes them to a much
+		// smaller effective set, so gate the CPUs that can actually receive it.
+		affinityBytes, err := os.ReadFile(filepath.Join(dir, "effective_affinity_list"))
+		if err != nil {
+			affinityBytes, err = os.ReadFile(filepath.Join(dir, "smp_affinity_list"))
+		}
+		if err != nil {
+			continue
+		}
+		affinity := strings.TrimSpace(string(affinityBytes))
 		if affinity != "" && rig.Intersects(affinity, benchCPUs) {
-			conflicts = append(conflicts, filepath.Base(filepath.Dir(path))+":"+affinity)
+			conflicts = append(conflicts, filepath.Base(dir)+":"+affinity)
 		}
 	}
 	sort.Strings(conflicts)

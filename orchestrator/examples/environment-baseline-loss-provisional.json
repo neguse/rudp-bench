@@ -1,0 +1,57 @@
+{
+  "transport": "raw_udp",
+  "server_command": [
+    "build-v2-rawudp/raw_udp_server",
+    "--port",
+    "42916"
+  ],
+  "client_command": [
+    "build-v2-rawudp/raw_udp_client",
+    "--host",
+    "10.200.0.1",
+    "--port",
+    "42916",
+    "--conns",
+    "{conns}",
+    "--proc-index",
+    "{proc_index}",
+    "--origin-base",
+    "{origin_id_start}"
+  ],
+  "client_procs": 1,
+  "total_conns": 3,
+  "scenario": {
+    "name": "environment-baseline-provisional-loss",
+    "kind": "environment_baseline",
+    "client_input": {
+      "traffic_id": 1,
+      "loss_tolerant": {
+        "rate_hz": 100,
+        "payload_bytes": 64,
+        "staleness_p99_ns": 300000000,
+        "min_delivery_ratio": 0.95
+      },
+      "must_deliver": {
+        "rate_hz": 0,
+        "payload_bytes": 0
+      }
+    }
+  },
+  "netem": {
+    "server_egress": {
+      "delay_ms": 25,
+      "loss_pct": 1
+    },
+    "client_egress": {
+      "delay_ms": 25,
+      "loss_pct": 1
+    }
+  },
+  "warmup": "25s",
+  "duration": "30s",
+  "drain": "5s",
+  "staleness_period_ns": 10000000,
+  "server_cpus": "7,15",
+  "client_cpus": "3,4,5,6,11,12,13,14",
+  "output_dir": "results-v2/environment-baseline-loss-provisional"
+}

@@ -9,6 +9,7 @@ SESSION="${SESSION:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 SESSION_DIR="results-v2/conformance-sessions/$SESSION"
 DOCTOR_REPORT="$SESSION_DIR/doctor.json"
 SWEEP_CONFIG="$SESSION_DIR/sweep-config.json"
+BUNDLE_MANIFEST="$SESSION_DIR/bundle-manifest.json"
 
 mkdir -p "$SESSION_DIR"
 CALIBRATION_DIR="$SESSION_DIR/duration-invariance" \
@@ -49,6 +50,8 @@ jq -s -e '
   ([.[].acquisition_id] | unique | length) == 12
 ' "$SESSION_DIR/solutions/results.jsonl" >/dev/null
 
+python3 scripts/session_bundle_manifest.py create "$SESSION_DIR"
+
 sha256_file() {
   sha256sum "$1" | awk '{print $1}'
 }
@@ -61,8 +64,9 @@ jq -n \
   --arg sweep_config_sha256 "$(sha256_file "$SWEEP_CONFIG")" \
   --arg results_sha256 "$(sha256_file "$SESSION_DIR/solutions/results.jsonl")" \
   --arg capacity_sha256 "$(sha256_file "$SESSION_DIR/solutions/capacity.json")" \
+  --arg bundle_manifest_sha256 "$(sha256_file "$BUNDLE_MANIFEST")" \
   '{
-    version: 1,
+    version: 2,
     kind: "no_loss_scenario_smoke",
     status: "completed",
     generated_at: $generated_at,
@@ -73,8 +77,11 @@ jq -n \
       "environment-baseline/result.json": $baseline_sha256,
       "sweep-config.json": $sweep_config_sha256,
       "solutions/results.jsonl": $results_sha256,
-      "solutions/capacity.json": $capacity_sha256
+      "solutions/capacity.json": $capacity_sha256,
+      "bundle-manifest.json": $bundle_manifest_sha256
     }
   }' >"$SESSION_DIR/session-manifest.json"
+
+python3 scripts/session_bundle_manifest.py verify "$SESSION_DIR"
 
 printf 'no-loss scenario smoke session: %s\n' "$SESSION_DIR"

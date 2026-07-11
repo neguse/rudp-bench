@@ -76,7 +76,7 @@ qdisc netem 8001: root refcnt 2 limit 1000 delay 10ms  2ms loss 0.1% rate 100mbi
 		t.Fatalf("stats len = %d", len(stats))
 	}
 	got := stats[0]
-	if got.Kind != "netem" || got.Limit != 1000 || got.DelayMS != 10 || got.JitterMS != 2 || got.LossPercent != 0.1 || got.Rate != "100mbit" {
+	if got.Kind != "netem" || !got.Root || got.Limit != 1000 || got.DelayMS != 10 || got.JitterMS != 2 || got.LossPercent != 0.1 || got.Rate != "100mbit" {
 		t.Fatalf("parsed qdisc = %+v", got)
 	}
 	if got.SentBytes != 123456 || got.SentPackets != 789 || got.Dropped != 3 || got.Overlimits != 4 || got.Requeues != 5 {
@@ -84,6 +84,53 @@ qdisc netem 8001: root refcnt 2 limit 1000 delay 10ms  2ms loss 0.1% rate 100mbi
 	}
 	if err := netops.ValidateNetemEcho(netops.Netem{DelayMS: 10, JitterMS: 2, LossPercent: 0.1, Rate: "100mbit", Limit: 1000}, got); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDeltaQdiscPairPreservesDirectionalCounters(t *testing.T) {
+	serverBefore := netops.QdiscStats{Kind: "netem", SentBytes: 100, SentPackets: 10, Dropped: 1, Overlimits: 2, Requeues: 3}
+	clientBefore := netops.QdiscStats{Kind: "netem", SentBytes: 200, SentPackets: 20, Dropped: 4, Overlimits: 5, Requeues: 6}
+	serverAfter := netops.QdiscStats{Kind: "netem", SentBytes: 150, SentPackets: 17, Dropped: 3, Overlimits: 5, Requeues: 7}
+	clientAfter := netops.QdiscStats{Kind: "netem", SentBytes: 280, SentPackets: 29, Dropped: 9, Overlimits: 11, Requeues: 13}
+	before := netops.QdiscPairSnapshot{
+		ServerEgress: netops.QdiscSample{Stats: &serverBefore},
+		ClientEgress: netops.QdiscSample{Stats: &clientBefore},
+	}
+	after := netops.QdiscPairSnapshot{
+		ServerEgress: netops.QdiscSample{Stats: &serverAfter},
+		ClientEgress: netops.QdiscSample{Stats: &clientAfter},
+	}
+	delta := netops.DeltaQdiscPair(before, after)
+	if len(delta.Errors) != 0 {
+		t.Fatalf("delta errors = %v", delta.Errors)
+	}
+	if got := delta.ServerEgress; got == nil || got.SentBytes != 50 || got.SentPackets != 7 || got.Dropped != 2 || got.Overlimits != 3 || got.Requeues != 4 {
+		t.Fatalf("server delta = %+v", got)
+	}
+	if got := delta.ClientEgress; got == nil || got.SentBytes != 80 || got.SentPackets != 9 || got.Dropped != 5 || got.Overlimits != 6 || got.Requeues != 7 {
+		t.Fatalf("client delta = %+v", got)
+	}
+}
+
+func TestDeltaQdiscPairRejectsReadFailureAndCounterRegression(t *testing.T) {
+	beforeStats := netops.QdiscStats{Kind: "netem", SentPackets: 10, Dropped: 2}
+	afterStats := netops.QdiscStats{Kind: "netem", SentPackets: 9, Dropped: 3}
+	delta := netops.DeltaQdiscPair(
+		netops.QdiscPairSnapshot{
+			ServerEgress: netops.QdiscSample{Error: "permission denied"},
+			ClientEgress: netops.QdiscSample{Stats: &beforeStats},
+		},
+		netops.QdiscPairSnapshot{
+			ServerEgress: netops.QdiscSample{Stats: &afterStats},
+			ClientEgress: netops.QdiscSample{Stats: &afterStats},
+		},
+	)
+	if delta.ServerEgress != nil || delta.ClientEgress != nil {
+		t.Fatalf("invalid deltas must be absent: %+v", delta)
+	}
+	joined := strings.Join(delta.Errors, "\n")
+	if !strings.Contains(joined, "permission denied") || !strings.Contains(joined, "counters regressed") {
+		t.Fatalf("delta errors = %v", delta.Errors)
 	}
 }
 

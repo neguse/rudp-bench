@@ -111,11 +111,13 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		return finishRunResult(result, GateInput{ExtraReasons: extraReasons}, resultPath, summaryPath)
 	}
 	var netemEnabled bool
+	var netemPair netops.PairSpec
 	var udpDelta, serverUDPDelta netops.UDPStats
 	var teardown []netops.Command
 	if cfg.Netem != nil {
 		netemEnabled = true
 		pair := cfg.Netem.pairSpec()
+		netemPair = pair
 		setup, err := netops.BuildSetupCommands(pair)
 		if err != nil {
 			extraReasons = append(extraReasons, fmt.Sprintf("build netns setup commands: %v", err))
@@ -131,6 +133,9 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 			Pair:             pair,
 			SetupCommands:    setup,
 			TeardownCommands: teardown,
+		}
+		if configuredLoss(cfg.Netem) && deterministicLoss(cfg.Netem) {
+			result.Netem.LossEvidence = unsupportedDeterministicLossEvidence()
 		}
 		if err := netops.RunCommands(runCtx, setup, netops.RunOptions{}); err != nil {
 			extraReasons = append(extraReasons, fmt.Sprintf("netns setup failed: %v", err))
@@ -207,6 +212,13 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		r, err := ctrl.Run(runCtx)
 		controlCh <- controlEvent{result: r, err: err}
 	}()
+	var lossEvidenceCh chan *NetemLossEvidence
+	if configuredLoss(cfg.Netem) && !deterministicLoss(cfg.Netem) {
+		lossEvidenceCh = make(chan *NetemLossEvidence, 1)
+		go func() {
+			lossEvidenceCh <- collectRandomNetemLossEvidence(runCtx, ctrl.MeasurementWindow(), netemPair)
+		}()
+	}
 
 	var handles []processHandle
 	waitCh := make(chan waitEvent, cfg.ClientProcs+1)
@@ -298,6 +310,9 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		result.Control = controlResult.result
 		if controlResult.err != nil && !errors.Is(controlResult.err, context.Canceled) {
 			extraReasons = append(extraReasons, fmt.Sprintf("control barrier failed: %v", controlResult.err))
+		}
+		if lossEvidenceCh != nil {
+			result.Netem.LossEvidence = <-lossEvidenceCh
 		}
 		return finishRunResult(result, GateInput{
 			Control:            result.Control,
@@ -396,6 +411,9 @@ func Run(ctx context.Context, cfg RunConfig) (*Result, error) {
 		result.Samples = sortedSeries(samples.series)
 	}
 
+	if lossEvidenceCh != nil {
+		result.Netem.LossEvidence = <-lossEvidenceCh
+	}
 	if cfg.Netem != nil && result.Netem != nil {
 		pair := cfg.Netem.pairSpec()
 		after, err := readNetnsUDPStats(context.Background(), pair.ClientNS)
@@ -757,6 +775,9 @@ func teardownNetem(cmds []netops.Command) {
 
 func finishRunResult(result *Result, gateInput GateInput, resultPath, summaryPath string) (*Result, error) {
 	gateInput.Config = &result.Config
+	if result.Netem != nil {
+		gateInput.LossEvidence = result.Netem.LossEvidence
+	}
 	gate := EvaluateGate(gateInput)
 	result.Verdict = gate.Verdict
 	result.InvalidReasons = gate.Reasons

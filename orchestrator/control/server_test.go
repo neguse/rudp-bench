@@ -52,6 +52,7 @@ func TestLifecycleRoundTrip(t *testing.T) {
 	if result.result.Schedule.StartAtNS <= 0 || result.result.Schedule.StopAtNS <= result.result.Schedule.StartAtNS || result.result.Schedule.DrainUntilNS <= result.result.Schedule.StopAtNS {
 		t.Fatalf("schedule times not increasing: %+v", result.result.Schedule)
 	}
+	assertMeasurementWindow(t, srv, result.result.Schedule)
 	if got := len(result.result.Participants); got != 3 {
 		t.Fatalf("participants = %d, want 3", got)
 	}
@@ -196,6 +197,7 @@ func TestSteadyWarmupWindow(t *testing.T) {
 		t.Fatalf("warmup_actual = %dns, want (0, %dns)",
 			result.result.WarmupActualNS, cfg.Warmup.Nanoseconds())
 	}
+	assertMeasurementWindow(t, srv, result.result.Schedule)
 }
 
 // 定常未達のまま warmup 上限に達した場合、window は送られず暫定窓のまま
@@ -250,6 +252,19 @@ func TestSteadyWarmupCapFallback(t *testing.T) {
 	if result.result.WarmupActualNS != cfg.Warmup.Nanoseconds() {
 		t.Fatalf("warmup_actual = %dns, want %dns (暫定窓のまま)",
 			result.result.WarmupActualNS, cfg.Warmup.Nanoseconds())
+	}
+	assertMeasurementWindow(t, srv, result.result.Schedule)
+}
+
+func assertMeasurementWindow(t *testing.T, srv *Server, want ScheduleMessage) {
+	t.Helper()
+	select {
+	case got := <-srv.MeasurementWindow():
+		if got != want {
+			t.Fatalf("measurement window = %+v, want %+v", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("measurement window notification was not published")
 	}
 }
 

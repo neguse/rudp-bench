@@ -17,6 +17,7 @@ type GateInput struct {
 	NetemEnabled       bool
 	UDPDropDelta       netops.UDPStats
 	ServerUDPDropDelta netops.UDPStats
+	LossEvidence       *NetemLossEvidence
 	ExtraReasons       []string
 	SUTFailureReasons  []string
 	Config             *RunConfig
@@ -79,6 +80,7 @@ func EvaluateGate(input GateInput) GateResult {
 	if input.NetemEnabled && (input.ServerUDPDropDelta.InErrors != 0 || input.ServerUDPDropDelta.RcvbufErrors != 0) {
 		sutReasons = append(sutReasons, fmt.Sprintf("server netns UDP drop delta non-zero: InErrors=%d RcvbufErrors=%d", input.ServerUDPDropDelta.InErrors, input.ServerUDPDropDelta.RcvbufErrors))
 	}
+	reasons = append(reasons, ValidateNetemLossEvidence(input.Config, input.Control, input.LossEvidence)...)
 
 	verdict := VerdictValid
 	if len(reasons) > 0 {
@@ -90,6 +92,150 @@ func EvaluateGate(input GateInput) GateResult {
 		AttemptedRatio:    attempted,
 		SUTFailureReasons: dedupeStrings(sutReasons),
 	}
+}
+
+// ValidateNetemLossEvidence validates random-netem qdisc counter evidence
+// independently of the setup ping/iperf preflight. Counter deltas are
+// recomputed from the snapshots and must be wholly contained in the effective
+// measurement schedule.
+func ValidateNetemLossEvidence(cfg *RunConfig, controlResult *control.Result, evidence *NetemLossEvidence) []string {
+	if cfg == nil || !configuredLoss(cfg.Netem) {
+		return nil
+	}
+	prefix := func(reason string) string { return "netem loss evidence: " + reason }
+	if deterministicLoss(cfg.Netem) {
+		return []string{prefix("deterministic losstrace drop accounting is unsupported and unverified")}
+	}
+	if evidence == nil {
+		return []string{prefix("missing for configured random loss")}
+	}
+	var reasons []string
+	if evidence.Version != 1 {
+		reasons = append(reasons, prefix(fmt.Sprintf("version=%d, want 1", evidence.Version)))
+	}
+	if evidence.Mode != lossEvidenceModeRandomNetem {
+		reasons = append(reasons, prefix(fmt.Sprintf("mode=%q, want %q", evidence.Mode, lossEvidenceModeRandomNetem)))
+	}
+	if !evidence.Supported {
+		reasons = append(reasons, prefix("random netem qdisc accounting marked unsupported"))
+	}
+	if evidence.Scope != lossEvidenceScopeEffectiveInner {
+		reasons = append(reasons, prefix(fmt.Sprintf("scope=%q does not prove in-window loss", evidence.Scope)))
+	}
+	for _, reason := range evidence.Errors {
+		reasons = append(reasons, prefix(reason))
+	}
+	if controlResult == nil {
+		reasons = append(reasons, prefix("control schedule is unavailable"))
+	} else if evidence.Schedule != controlResult.Schedule {
+		reasons = append(reasons, prefix("captured schedule does not match effective control schedule"))
+	}
+	if evidence.Before == nil || evidence.After == nil {
+		if evidence.Before == nil {
+			reasons = append(reasons, prefix("before snapshot is missing"))
+		}
+		if evidence.After == nil {
+			reasons = append(reasons, prefix("after snapshot is missing"))
+		}
+		return dedupeStrings(reasons)
+	}
+	before, after := *evidence.Before, *evidence.After
+	reasons = append(reasons, validateQdiscSnapshotBounds(evidence.Schedule, before, after, prefix)...)
+
+	computed := netops.DeltaQdiscPair(before, after)
+	for _, reason := range computed.Errors {
+		reasons = append(reasons, prefix(reason))
+	}
+	if evidence.Delta == nil {
+		reasons = append(reasons, prefix("counter delta is missing"))
+	} else {
+		for _, reason := range evidence.Delta.Errors {
+			reasons = append(reasons, prefix("stored delta: "+reason))
+		}
+		if !sameQdiscDelta(evidence.Delta.ServerEgress, computed.ServerEgress) ||
+			!sameQdiscDelta(evidence.Delta.ClientEgress, computed.ClientEgress) {
+			reasons = append(reasons, prefix("stored counter delta does not match snapshots"))
+		}
+	}
+
+	pair := cfg.Netem.pairSpec()
+	checks := []struct {
+		name      string
+		namespace string
+		device    string
+		expected  netops.Netem
+		before    netops.QdiscSample
+		after     netops.QdiscSample
+		delta     *netops.QdiscCounterDelta
+	}{
+		{"server_egress", pair.ServerNS, pair.ServerVeth, cfg.Netem.ServerEgress, before.ServerEgress, after.ServerEgress, computed.ServerEgress},
+		{"client_egress", pair.ClientNS, pair.ClientVeth, cfg.Netem.ClientEgress, before.ClientEgress, after.ClientEgress, computed.ClientEgress},
+	}
+	for _, check := range checks {
+		phases := []struct {
+			name   string
+			sample netops.QdiscSample
+		}{{"before", check.before}, {"after", check.after}}
+		for _, phase := range phases {
+			sample := phase.sample
+			if sample.Namespace != check.namespace || sample.Device != check.device {
+				reasons = append(reasons, prefix(fmt.Sprintf("%s %s source=%s/%s, want %s/%s",
+					check.name, phase.name, sample.Namespace, sample.Device, check.namespace, check.device)))
+			}
+			if sample.Error != "" {
+				reasons = append(reasons, prefix(fmt.Sprintf("%s %s read failed: %s", check.name, phase.name, sample.Error)))
+				continue
+			}
+			if sample.Stats == nil {
+				reasons = append(reasons, prefix(fmt.Sprintf("%s %s stats are missing", check.name, phase.name)))
+				continue
+			}
+			if err := netops.ValidateNetemEcho(check.expected, *sample.Stats); err != nil {
+				reasons = append(reasons, prefix(fmt.Sprintf("%s %s qdisc mismatch: %v", check.name, phase.name, err)))
+			}
+		}
+		if check.expected.LossPercent > 0 {
+			if check.delta == nil {
+				reasons = append(reasons, prefix(check.name+" counter delta unavailable for configured loss"))
+			} else if check.delta.Dropped == 0 {
+				reasons = append(reasons, prefix(check.name+" observed dropped delta is zero for configured loss"))
+			}
+		}
+	}
+	return dedupeStrings(reasons)
+}
+
+func validateQdiscSnapshotBounds(schedule control.ScheduleMessage, before, after netops.QdiscPairSnapshot, prefix func(string) string) []string {
+	var reasons []string
+	if before.CaptureStartNS < schedule.StartAtNS {
+		reasons = append(reasons, prefix(fmt.Sprintf("before snapshot started outside measurement window: %d < %d", before.CaptureStartNS, schedule.StartAtNS)))
+	}
+	if before.CaptureFinishNS < before.CaptureStartNS {
+		reasons = append(reasons, prefix("before snapshot timing is inverted"))
+	}
+	if before.CaptureFinishNS > after.CaptureStartNS {
+		reasons = append(reasons, prefix("qdisc snapshot intervals overlap or are reversed"))
+	}
+	if after.CaptureStartNS < schedule.StartAtNS || after.CaptureFinishNS < after.CaptureStartNS {
+		reasons = append(reasons, prefix("after snapshot timing is outside or inverted"))
+	}
+	if after.CaptureFinishNS > schedule.StopAtNS {
+		reasons = append(reasons, prefix(fmt.Sprintf("after snapshot finished outside measurement window: %d > %d", after.CaptureFinishNS, schedule.StopAtNS)))
+	}
+	for _, sample := range []netops.QdiscSample{before.ServerEgress, before.ClientEgress, after.ServerEgress, after.ClientEgress} {
+		if sample.CaptureStartNS < schedule.StartAtNS || sample.CaptureFinishNS > schedule.StopAtNS ||
+			sample.CaptureFinishNS < sample.CaptureStartNS {
+			reasons = append(reasons, prefix(fmt.Sprintf("%s/%s sample timing is outside or inverted", sample.Namespace, sample.Device)))
+		}
+	}
+	return reasons
+}
+
+func sameQdiscDelta(a, b *netops.QdiscCounterDelta) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 type authoritativeProgress struct {

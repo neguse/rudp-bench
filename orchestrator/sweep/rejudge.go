@@ -75,11 +75,20 @@ func Rejudge(dir string, schedMeasurand map[string]bool) error {
 		if schedMeasurand[rec.Transport] {
 			res.Config.SchedIsMeasurand = true
 		}
+		var contractInvalid []string
 		if err := run.ValidateMergedMetricsConsistency(res.Metrics); err != nil {
+			contractInvalid = append(contractInvalid, "metrics contract: "+err.Error())
+		}
+		var lossEvidence *run.NetemLossEvidence
+		if res.Netem != nil {
+			lossEvidence = res.Netem.LossEvidence
+		}
+		contractInvalid = append(contractInvalid, run.ValidateNetemLossEvidence(&res.Config, res.Control, lossEvidence)...)
+		if len(contractInvalid) > 0 {
 			res.Verdict = run.VerdictInvalid
-			res.InvalidReasons = append(res.InvalidReasons, "metrics contract: "+err.Error())
+			res.InvalidReasons = append(res.InvalidReasons, contractInvalid...)
 			res.Outcome = run.OutcomeInvalid
-			res.OutcomeReasons = []string{"metrics contract: " + err.Error()}
+			res.OutcomeReasons = append([]string(nil), contractInvalid...)
 		}
 		old := rec.Judgment
 		rec.SourceResultSHA256 = run.HashBytes(data)

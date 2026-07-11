@@ -94,6 +94,98 @@ func TestEvaluateGateServerUDPDropIsSUTFailure(t *testing.T) {
 	}
 }
 
+func TestValidateNetemLossEvidenceRequiresDirectionalInWindowDrops(t *testing.T) {
+	cfg, controlResult, evidence := validNetemLossEvidenceFixture()
+	if reasons := ValidateNetemLossEvidence(&cfg, controlResult, evidence); len(reasons) != 0 {
+		t.Fatalf("valid evidence rejected: %v", reasons)
+	}
+
+	serverAfter := *evidence.After.ServerEgress.Stats
+	serverAfter.Dropped = evidence.Before.ServerEgress.Stats.Dropped
+	evidence.After.ServerEgress.Stats = &serverAfter
+	delta := netops.DeltaQdiscPair(*evidence.Before, *evidence.After)
+	evidence.Delta = &delta
+	reasons := ValidateNetemLossEvidence(&cfg, controlResult, evidence)
+	if !reasonsContain(reasons, "server_egress observed dropped delta is zero") {
+		t.Fatalf("zero directional drop reasons = %v", reasons)
+	}
+}
+
+func TestValidateNetemLossEvidenceRejectsUnreadableOrOutOfWindowSnapshots(t *testing.T) {
+	cfg, controlResult, evidence := validNetemLossEvidenceFixture()
+	evidence.Before.CaptureStartNS = controlResult.Schedule.StartAtNS - 1
+	evidence.After.ClientEgress.Error = "permission denied"
+	evidence.After.ClientEgress.Stats = nil
+	delta := netops.DeltaQdiscPair(*evidence.Before, *evidence.After)
+	evidence.Delta = &delta
+	reasons := ValidateNetemLossEvidence(&cfg, controlResult, evidence)
+	for _, want := range []string{"outside measurement window", "permission denied", "client_egress counter delta unavailable"} {
+		if !reasonsContain(reasons, want) {
+			t.Fatalf("reasons %v do not contain %q", reasons, want)
+		}
+	}
+}
+
+func TestValidateNetemLossEvidenceOnlyRequiresDropOnConfiguredDirection(t *testing.T) {
+	cfg, controlResult, evidence := validNetemLossEvidenceFixture()
+	cfg.Netem.ServerEgress = netops.Netem{}
+	serverBefore := netops.QdiscStats{Kind: "noqueue", Root: true, SentPackets: 10}
+	serverAfter := netops.QdiscStats{Kind: "noqueue", Root: true, SentPackets: 20}
+	evidence.Before.ServerEgress.Stats = &serverBefore
+	evidence.After.ServerEgress.Stats = &serverAfter
+	delta := netops.DeltaQdiscPair(*evidence.Before, *evidence.After)
+	evidence.Delta = &delta
+	if reasons := ValidateNetemLossEvidence(&cfg, controlResult, evidence); len(reasons) != 0 {
+		t.Fatalf("unconfigured server direction required a drop: %v", reasons)
+	}
+}
+
+func TestValidateNetemLossEvidenceMarksDeterministicTraceUnverified(t *testing.T) {
+	cfg, controlResult, _ := validNetemLossEvidenceFixture()
+	cfg.Netem.ClientEgress.LossSeed = 99
+	reasons := ValidateNetemLossEvidence(&cfg, controlResult, unsupportedDeterministicLossEvidence())
+	if !reasonsContain(reasons, "deterministic losstrace drop accounting is unsupported") {
+		t.Fatalf("deterministic evidence reasons = %v", reasons)
+	}
+}
+
+func validNetemLossEvidenceFixture() (RunConfig, *control.Result, *NetemLossEvidence) {
+	schedule := control.ScheduleMessage{Type: control.TypeSchedule, StartAtNS: 100, StopAtNS: 1_000, DrainUntilNS: 1_100}
+	cfg := RunConfig{Netem: &NetemRegime{
+		ServerNS: "srv", ClientNS: "cli", ServerVeth: "vs", ClientVeth: "vc",
+		ServerEgress: netops.Netem{LossPercent: 1},
+		ClientEgress: netops.Netem{LossPercent: 2},
+	}}
+	serverBefore := netops.QdiscStats{Kind: "netem", Root: true, Limit: 10_000, LossPercent: 1, SentPackets: 100, Dropped: 4, Overlimits: 2}
+	clientBefore := netops.QdiscStats{Kind: "netem", Root: true, Limit: 10_000, LossPercent: 2, SentPackets: 200, Dropped: 8, Overlimits: 3}
+	serverAfter := serverBefore
+	serverAfter.SentPackets = 180
+	serverAfter.Dropped = 5
+	serverAfter.Overlimits = 4
+	clientAfter := clientBefore
+	clientAfter.SentPackets = 350
+	clientAfter.Dropped = 11
+	clientAfter.Overlimits = 7
+	before := netops.QdiscPairSnapshot{
+		CaptureStartNS:  110,
+		CaptureFinishNS: 160,
+		ServerEgress:    netops.QdiscSample{Namespace: "srv", Device: "vs", CaptureStartNS: 110, CaptureFinishNS: 130, Stats: &serverBefore},
+		ClientEgress:    netops.QdiscSample{Namespace: "cli", Device: "vc", CaptureStartNS: 135, CaptureFinishNS: 155, Stats: &clientBefore},
+	}
+	after := netops.QdiscPairSnapshot{
+		CaptureStartNS:  800,
+		CaptureFinishNS: 850,
+		ServerEgress:    netops.QdiscSample{Namespace: "srv", Device: "vs", CaptureStartNS: 800, CaptureFinishNS: 820, Stats: &serverAfter},
+		ClientEgress:    netops.QdiscSample{Namespace: "cli", Device: "vc", CaptureStartNS: 825, CaptureFinishNS: 845, Stats: &clientAfter},
+	}
+	delta := netops.DeltaQdiscPair(before, after)
+	return cfg, &control.Result{Schedule: schedule}, &NetemLossEvidence{
+		Version: 1, Mode: lossEvidenceModeRandomNetem, Supported: true,
+		Scope: lossEvidenceScopeEffectiveInner, Schedule: schedule,
+		Before: &before, After: &after, Delta: &delta,
+	}
+}
+
 func controlResultWithMargin(margin int64) *control.Result {
 	return &control.Result{
 		Valid: true,
