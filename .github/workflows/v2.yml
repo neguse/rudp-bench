@@ -78,6 +78,20 @@ jobs:
       - name: calibration duration invariance
         run: ./calibration/duration_invariance.sh
 
+      # 軽量 loopback ベンチ(共有 runner の診断値。SUT の FAIL/INVALID では
+      # 落とさない — CI の合否は上の smoke が担う)。結果は artifact のみ
+      - name: light bench (diagnostic)
+        run: ./scripts/run-ci-bench.sh
+
+      - name: upload bench results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-bench
+          path: results-v2/ci-bench/
+          retention-days: 30
+          if-no-files-found: ignore
+
   native-solution-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 45
