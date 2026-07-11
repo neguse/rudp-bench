@@ -54,7 +54,7 @@ func TestLoadSessionConfigIsStrict(t *testing.T) {
 	}
 }
 
-func TestCheckedInLocalSessionConfigUsesFrozenProbeAndSevenTransports(t *testing.T) {
+func TestCheckedInLocalSessionConfigUsesFrozenProbeAndEightTransports(t *testing.T) {
 	config, err := LoadSessionConfig("../examples/class-mapping-conformance-local.json")
 	if err != nil {
 		t.Fatal(err)
@@ -62,13 +62,13 @@ func TestCheckedInLocalSessionConfigUsesFrozenProbeAndSevenTransports(t *testing
 	if config.Probe != DefaultConfig(1) {
 		t.Fatalf("checked-in probe drifted: %+v", config.Probe)
 	}
-	if len(config.Transports) != 7 {
-		t.Fatalf("transport count=%d, want 7", len(config.Transports))
+	if len(config.Transports) != 8 {
+		t.Fatalf("transport count=%d, want 8", len(config.Transports))
 	}
 	if !config.Transports["raw_udp"].Diagnostic {
 		t.Fatal("raw_udp must remain a diagnostic measurement floor")
 	}
-	for _, name := range []string{"raw_udp", "enet", "msquic", "gns", "magiconion", "websocket", "litenetlib"} {
+	for _, name := range []string{"raw_udp", "enet", "kcp", "msquic", "gns", "magiconion", "websocket", "litenetlib"} {
 		if _, ok := config.Transports[name]; !ok {
 			t.Fatalf("checked-in config is missing transport %q", name)
 		}
