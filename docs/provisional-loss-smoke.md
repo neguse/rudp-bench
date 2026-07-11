@@ -49,3 +49,11 @@ sudo -E scripts/run-provisional-loss-smoke.sh
 
 sessionは`results-v2/provisional-loss-smoke-sessions/<UTC timestamp>-<pid>`へ出力される。
 初回の実測値を見て条件を事後変更しても、この設定をconformanceやpresetとは呼ばない。
+
+## Measurement Record
+
+2026-07-11にclean commit `5c52aab`で完走したsessionの条件、Doctor、前後baseline、
+traffic別metrics、方向別loss evidence、manifest hashは
+[`2026-07-11-provisional-loss-smoke.md`](measurements/2026-07-11-provisional-loss-smoke.md)に記録した。
+4セルは初回attemptで`PASS / VALID`だったが、これは本書どおりpipeline smokeの結果であり、
+class-mapping conformance、推薦、性能比較へ昇格させない。
