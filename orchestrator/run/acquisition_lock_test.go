@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -27,6 +28,22 @@ func TestAcquisitionLockSerializesAndHonorsCancellation(t *testing.T) {
 		t.Fatalf("acquire after release: %v", err)
 	}
 	if err := second.close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAcquisitionLockOpensPreexistingFileWithoutCreate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "acquisition.lock")
+	// A read-only pre-existing lock rejects O_CREAT-with-write paths and
+	// approximates fs.protected_regular denying O_CREAT on another user's file.
+	if err := os.WriteFile(path, nil, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireAcquisitionLockAt(context.Background(), path)
+	if err != nil {
+		t.Fatalf("acquire pre-existing lock: %v", err)
+	}
+	if err := lock.close(); err != nil {
 		t.Fatal(err)
 	}
 }

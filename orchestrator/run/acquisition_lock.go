@@ -20,7 +20,14 @@ func acquireAcquisitionLock(ctx context.Context) (*acquisitionLock, error) {
 }
 
 func acquireAcquisitionLockAt(ctx context.Context, path string) (*acquisitionLock, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o666)
+	// fs.protected_regular denies O_CREAT on an existing file owned by another
+	// user inside a sticky world-writable directory (/tmp), even for root.
+	// Open an existing lock without O_CREAT so root and unprivileged runs can
+	// share the same lock file.
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if errors.Is(err, unix.ENOENT) {
+		fd, err = unix.Open(path, unix.O_RDONLY|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o666)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open rig-global acquisition lock: %w", err)
 	}
