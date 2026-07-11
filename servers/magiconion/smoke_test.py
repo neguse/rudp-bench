@@ -67,7 +67,7 @@ def assert_metrics_shape(metrics):
     assert_class_shape(metrics, "loss_tolerant")
     assert_class_shape(metrics, "must_deliver")
     assert_hist_shape(metrics["staleness_ns"], "staleness_ns")
-    if set(metrics["raw"].keys()) != {"slots", "submitted", "recv_measured", "recv_unmeasured"}:
+    if set(metrics["raw"].keys()) != {"slots", "submitted", "recv_measured", "recv_unmeasured", "timestamp_order_violations"}:
         raise AssertionError(f"raw keys mismatch: {metrics['raw'].keys()}")
     if not metrics["traffic"]:
         raise AssertionError("traffic series is empty")
