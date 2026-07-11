@@ -27,6 +27,15 @@
   accepted な ADR は巻き返さない(変更は supersede する新 ADR)。マトリクス外の測定・
   枠外の実験を場当たりで始めない。
 
+## rig 運用(2026-07-12 決定・ユーザー指示)
+
+- smolcenter(現 PC)は 24 時間ゲームサーバ同居のため **smoke・計測器開発専用**。
+  doctor FAIL(clocksource=hpet 等)は容認するが、その値は reference へ昇格させない。
+- **信頼できる数値(reference campaign)は専用の外部環境で取る。**
+- clocksource 是正(ledger #21)は smolcenter では行わない。
+  reference rig の選定要件(clocksource=tsc、CPU 隔離、再起動自由、bare metal)へ移管。
+- host fingerprint が異なる rig の値は同じ比較に集約しない(ADR-0002 のとおり)。
+
 ## v1/v2
 
 v1(`harness/`, `adapters/`, `cmd/rudp-benchctl`, `scripts/`)は凍結中 — 手を入れない。
