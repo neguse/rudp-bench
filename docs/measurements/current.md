@@ -15,6 +15,12 @@ random loss下での暫定pipeline確認は
 clean commit `5c52aab`で前後baselineとENet/WebSocketの4セルが`PASS / VALID`だったが、
 class-mapping conformance、reference、推薦、性能比較には使用しない。
 
+fixed class-mapping probe（directional loss下のLT/MD semantics検査）は
+[`2026-07-12-class-mapping-conformance.md`](2026-07-12-class-mapping-conformance.md)に
+記録した。clean commit `e313a33`で候補6 solutionの全36 caseがPASS、raw_udpは
+開示どおりLT PASS / MD UNSUPPORTEDだった。DoctorがFAIL（smoke rig方針）のため
+Promotable=falseであり、昇格可能なconformance証跡はreference rig受入後に再取得する。
+
 以下は旧broadcast-centric条件のlegacy canonical recordであり、新scenarioの比較表、
 solution推薦、build-vs-buy判断には使用しない。
 
