@@ -277,18 +277,19 @@ custom prototype も既存 solution と同じ conformance、security、loss / co
 ## Current Execution Gate
 
 2026-07-11にpayload corruption、authoritative input反映進捗、global tick独立性、
-staleness coverageを含む強化後のgateで再実行した。raw UDPのenvironment baselineと、
-6 solution x 2 use-caseを実走した。実行時binaryは12 cellをPASSとしたが、現行の
-class/traffic aggregate consistency gateで再判定すると9 PASS / 3 INVALIDである。INVALIDは
-managed 3 solutionのauthoritativeで、修正後の再実行が必要となる。loss時のclass mappingと
-must-deliver検査も未実施で、完全なconformanceではない。結果と適用限界は
+staleness coverageを含む強化後のgateで実走した。managed 3 solutionのauthoritativeは
+class/traffic aggregate consistencyの矛盾でINVALIDとなったが、deadline判定源を統一する
+修正の後、clean commit `11bfd16`で6 solution x 2 use-caseの12 cellを再実行し全PASSを
+記録した。結果と適用限界は
 [measurement record](../measurements/2026-07-11-scenario-conformance.md)に固定した。
+loss時のclass mappingとmust-deliver検査はFixed Class-Mapping Probe（前掲）で行う。
 
-同時に実行したhome rigのdoctorは`clocksource=hpet`（期待値`tsc`）とbenchmark CPUへ
-交差するIRQ affinityでFAILした。reference開始には少なくとも次が残る。
+home rigのdoctorは`clocksource=hpet`（期待値`tsc`）とbenchmark CPUへ交差する
+IRQ affinityでFAILする。home rigは24時間サーバ同居のためsmoke専用とし
+（ルートCLAUDE.md「rig運用」2026-07-12決定）、この2件はhome rigでは是正しない。
+reference開始には少なくとも次が残る。
 
-- clocksourceとIRQ affinityを是正し、doctorをPASSさせる
-- managed authoritative 3 cellを修正後binaryで再実行する
+- reference rig（EC2 c8g、target silicon一致）を調達し、doctorをPASSさせる
 - loss注入でclass mappingとmust-deliver semanticsのconformanceを完了する
 - clean sourceから校正を含むrunを再実行し、source/calibration bundleを永続化する
 - reference preset、pilot precision、confirmatory stopping ruleを合意・凍結する
