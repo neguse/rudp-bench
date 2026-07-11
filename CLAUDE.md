@@ -39,6 +39,9 @@
 - reference rig は **EC2 c8g.metal-24xl(96 vCPU / 192 GiB)を campaign 単位で時間借り**。
   campaign 中はインスタンスを保持(host fingerprint 維持)、終了後 terminate。
   screening は spot 可、confirmatory は on-demand。
+- rig のリージョンは target(ap-northeast-1)に合わせず、**安価な US リージョン
+  (us-west-2 等)でよい**(2026-07-12 ユーザー承認。ベンチは veth/netns 完結で
+  リージョンは測定に影響しない。silicon 一致が要件)。
 - clocksource 是正(ledger #21)は smolcenter では行わない。
   reference rig の選定要件(clocksource=tsc、CPU 隔離、再起動自由、bare metal)へ移管。
 - host fingerprint が異なる rig の値は同じ比較に集約しない(ADR-0002 のとおり)。
