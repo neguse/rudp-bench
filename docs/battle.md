@@ -86,10 +86,9 @@ echo workload の追加は TODO 参照。
 5. ~~litenetlib~~(済 — ≥128 / 72 / ≥64、2 セル farm censored)
 6. ~~magiconion~~(済 — ≥128 / 97 / 81、p1000 首位)
 7. ~~websocket~~(済 — 251 / 141 / 127、wired-v3 3 冠)
-8. **clocksource 修正セッション**(ledger #21、ユーザー判断 GO 済みの
-   方針 A: 全ライブラリを同一条件で揃えた後に実施)—
-   dmesg で TSC 無効化理由確認 → boot param/BIOS → 再起動 →
-   ceiling 再測 → 必要なら全 transport 再測。全天井が一律に上がる見込み
+8. ~~clocksource 修正セッション~~(**2026-07-12 供養** — home rig は 24h サーバ
+   同居のため直さず smoke 専用に格下げ。tsc 級の時刻源は reference rig
+   (EC2 c8g、`docs/reference-rig.md`)の受入要件へ移管。ledger #21 参照)
 9. **echo workload の追加**(v1 で見えていた「接続数スケール」軸が
    現表に無い — gns/litenetlib は echo で強豪だった。fanout 表と別列で)
 10. **gns Nagle A/B**(lt の NoNagle 選択が fanout で gns を不当に
@@ -97,7 +96,8 @@ echo workload の追加は TODO 参照。
 11. **loss1 regime の対戦表**(enet throttle 無効化 #11/#12 の効果検証は
    loss 下でしか見えない。wired-v3 表が揃った後に同型のセッションで)
 12. r20p1000 級の「天井律速」セルの真値化: farm 増強(procs/コア)か
-    天井そのものの改善(#21 で上がる可能性)後に再測
+    天井そのものの改善後に再測。reference rig(c8g.metal-24xl、96 コア)は
+    farm コアが home 比 6 倍のため、移行で構造的に解消する見込み
 13. litenetlib の farm censored 2 セル(r20p128 c256 / r60p200 c128)の真値化:
     farm の pump drain スループットが構造限界(rcvbuf 4MB 化でも drops 残存)。
     farm 増強か LNL vendor 化(SocketBufferSize 定数の変更)が必要
