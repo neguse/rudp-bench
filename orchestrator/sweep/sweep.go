@@ -108,9 +108,6 @@ func LoadConfig(path string) (Config, error) {
 		if cfg.Conns.Min != 0 && cfg.Conns.Min != 1 {
 			return cfg, fmt.Errorf("reference capacity search must start at conns.min=1 to avoid left censoring")
 		}
-		if cfg.Netem != nil && (cfg.Netem.ClientEgress.LossSeed != 0 || cfg.Netem.ServerEgress.LossSeed != 0) {
-			return cfg, fmt.Errorf("reference mode does not yet accept loss_seed: deterministic trace delivery needs a known-packet conformance gate")
-		}
 	default:
 		return cfg, fmt.Errorf("measurement_mode must be conformance, screening, pilot, or reference")
 	}

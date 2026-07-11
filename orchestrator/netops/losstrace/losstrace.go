@@ -20,6 +20,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	bits2 "math/bits"
 	"math/rand"
 	"net"
 	"os"
@@ -160,6 +161,57 @@ func ResetCounter(dev string, pinDir string) error {
 		return fmt.Errorf("reset counter: %w", err)
 	}
 	return nil
+}
+
+// ReadCounter は egress プログラムが観測したパケット数(attach または
+// ResetCounter 以降)を pinned state map から読む。bpffs の pin は netns
+// スコープでないため、どの netns からでも読める。
+func ReadCounter(dev string, pinDir string) (uint64, error) {
+	m, err := ebpf.LoadPinnedMap(statePinPath(pinDir, dev), nil)
+	if err != nil {
+		return 0, fmt.Errorf("load pinned state map: %w", err)
+	}
+	defer m.Close()
+	var value uint64
+	if err := m.Lookup(uint32(0), &value); err != nil {
+		return 0, fmt.Errorf("read counter: %w", err)
+	}
+	return value, nil
+}
+
+// CountDropsInRange はパケット連番の半開区間 [from, to) のうち trace が
+// drop する数を返す。連番は trace 長で巡回する(eBPF 側の idx & mask と同じ)。
+func CountDropsInRange(words []uint64, from, to uint64) (uint64, error) {
+	bits := uint64(len(words)) * 64
+	if bits == 0 || bits&(bits-1) != 0 {
+		return 0, fmt.Errorf("trace length must be a positive power of two, got %d bits", bits)
+	}
+	if to < from {
+		return 0, fmt.Errorf("invalid packet range [%d, %d)", from, to)
+	}
+	span := to - from
+	var total uint64
+	for _, word := range words {
+		total += uint64(bits2.OnesCount64(word))
+	}
+	drops := (span / bits) * total
+	start := from & (bits - 1)
+	for counted := uint64(0); counted < span%bits; {
+		idx := (start + counted) & (bits - 1)
+		word := words[idx>>6]
+		offset := idx & 63
+		chunk := uint64(64 - offset)
+		if remaining := span%bits - counted; chunk > remaining {
+			chunk = remaining
+		}
+		mask := ^uint64(0)
+		if chunk < 64 {
+			mask = (uint64(1)<<chunk - 1)
+		}
+		drops += uint64(bits2.OnesCount64((word >> offset) & mask))
+		counted += chunk
+	}
+	return drops, nil
 }
 
 type programMaps struct {

@@ -90,3 +90,51 @@ func TestGenerateValidation(t *testing.T) {
 		t.Fatal("100%% loss should fail")
 	}
 }
+
+func TestCountDropsInRange(t *testing.T) {
+	// 128-bit trace: word0 has bits 0 and 64..127 pattern via word1.
+	words := []uint64{0b1011, 0xF000000000000000}
+	// total popcount = 3 + 4 = 7
+	cases := []struct {
+		from, to uint64
+		want     uint64
+	}{
+		{0, 0, 0},
+		{0, 4, 3},        // bits 0,1,3
+		{1, 4, 2},        // bits 1,3
+		{4, 64, 0},       // clear区間
+		{60, 128, 4},     // word1 上位 4 bit
+		{0, 128, 7},      // 1 周
+		{0, 256, 14},     // 2 周
+		{124, 132, 4 + 3}, // 巡回: 124-127 の 4 bit + 0-3 の 3 bit
+	}
+	for _, c := range cases {
+		got, err := CountDropsInRange(words, c.from, c.to)
+		if err != nil {
+			t.Fatalf("[%d,%d): %v", c.from, c.to, err)
+		}
+		if got != c.want {
+			t.Fatalf("[%d,%d) = %d, want %d", c.from, c.to, got, c.want)
+		}
+	}
+	if _, err := CountDropsInRange([]uint64{1, 2, 3}, 0, 1); err == nil {
+		t.Fatal("non power-of-two trace accepted")
+	}
+	if _, err := CountDropsInRange(words, 5, 4); err == nil {
+		t.Fatal("inverted range accepted")
+	}
+}
+
+func TestCountDropsMatchesGenerate(t *testing.T) {
+	words, realized, err := Generate(42, 1.0, 0, 1<<12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := CountDropsInRange(words, 0, 1<<12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if float64(full)/float64(1<<12)*100 != realized {
+		t.Fatalf("popcount %d does not match realized rate %g", full, realized)
+	}
+}

@@ -250,11 +250,13 @@ func TestValidateNetemLossEvidenceOnlyRequiresDropOnConfiguredDirection(t *testi
 	}
 }
 
-func TestValidateNetemLossEvidenceMarksDeterministicTraceUnverified(t *testing.T) {
+func TestValidateNetemLossEvidenceRejectsMixedDeterministicRun(t *testing.T) {
 	cfg, controlResult, _ := validNetemLossEvidenceFixture()
+	// client は seed 済み、server は random のままの混在 run は
+	// deterministic 会計で server 側を証明できない
 	cfg.Netem.ClientEgress.LossSeed = 99
-	reasons := ValidateNetemLossEvidence(&cfg, controlResult, unsupportedDeterministicLossEvidence())
-	if !reasonsContain(reasons, "deterministic losstrace drop accounting is unsupported") {
+	reasons := ValidateNetemLossEvidence(&cfg, controlResult, nil)
+	if !reasonsContain(reasons, "missing for configured deterministic loss") {
 		t.Fatalf("deterministic evidence reasons = %v", reasons)
 	}
 }

@@ -102,8 +102,10 @@ capacity sweepは`measurement_mode`を`conformance`、`screening`、`pilot`、
 clean source tree、`conns.min=1`、そして`baseline` block（前後のenvironment baselineと
 drift許容幅）を必須とする。blockはbaseline→cells→baselineの順で実行され、driftが
 許容幅を外れた場合は全cellが`block_invalid`となり数値aggregateから拒否される。
-drift許容幅はpilotの観測から凍結する値で、configが宣言する。`loss_seed`は
-known-packet trace gateが入るまでreferenceでは使用できない。
+drift許容幅はpilotの観測から凍結する値で、configが宣言する。`loss_seed`を指定した
+deterministic loss runは、losstrace packet counterのwindow内サンプルと再生成した
+traceのpopcountによるknown-packet drop会計を`loss_evidence.deterministic`へ保存し、
+gateがtrace hash・drop数・window境界を再検証する。randomとseedの混在は拒否される。
 
 低負荷の3 scenarioはraw adapterでそのまま実行できる。
 

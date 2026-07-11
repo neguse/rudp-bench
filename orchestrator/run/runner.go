@@ -141,9 +141,6 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 			SetupCommands:    setup,
 			TeardownCommands: teardown,
 		}
-		if configuredLoss(cfg.Netem) && deterministicLoss(cfg.Netem) {
-			result.Netem.LossEvidence = unsupportedDeterministicLossEvidence()
-		}
 		setupCompleted := 0
 		for _, command := range setup {
 			if err := netops.RunCommands(runCtx, []netops.Command{command}, netops.RunOptions{}); err != nil {
@@ -248,11 +245,17 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 		controlCh <- controlEvent{result: r, err: err}
 	}()
 	var lossEvidenceCh chan *NetemLossEvidence
-	if configuredLoss(cfg.Netem) && !deterministicLoss(cfg.Netem) {
+	if configuredLoss(cfg.Netem) {
 		lossEvidenceCh = make(chan *NetemLossEvidence, 1)
-		go func() {
-			lossEvidenceCh <- collectRandomNetemLossEvidence(runCtx, ctrl.MeasurementWindow(), netemPair)
-		}()
+		if deterministicLoss(cfg.Netem) {
+			go func() {
+				lossEvidenceCh <- collectDeterministicLossEvidence(runCtx, ctrl.MeasurementWindow(), netemPair, cfg.Netem)
+			}()
+		} else {
+			go func() {
+				lossEvidenceCh <- collectRandomNetemLossEvidence(runCtx, ctrl.MeasurementWindow(), netemPair)
+			}()
+		}
 	}
 
 	var handles []processHandle

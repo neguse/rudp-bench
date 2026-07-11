@@ -118,6 +118,31 @@ type ProcessResult struct {
 	Error         string   `json:"error,omitempty"`
 }
 
+// DeterministicLossEvidence は losstrace の packet counter を measurement
+// window 内側でサンプルした known-packet drop 会計。trace は seed から決定的に
+// 再生成でき、counter 区間 [before, after) の trace popcount が window 内の
+// drop 数と一致する(eBPF プログラムは trace どおりに drop する)。
+type DeterministicLossEvidence struct {
+	CaptureBeforeStartNS  int64                       `json:"capture_before_start_ns"`
+	CaptureBeforeFinishNS int64                       `json:"capture_before_finish_ns"`
+	CaptureAfterStartNS   int64                       `json:"capture_after_start_ns"`
+	CaptureAfterFinishNS  int64                       `json:"capture_after_finish_ns"`
+	ServerEgress          *DeterministicLossDirection `json:"server_egress,omitempty"`
+	ClientEgress          *DeterministicLossDirection `json:"client_egress,omitempty"`
+}
+
+type DeterministicLossDirection struct {
+	Namespace       string  `json:"namespace"`
+	Dev             string  `json:"dev"`
+	TraceBits       int     `json:"trace_bits"`
+	CounterBefore   uint64  `json:"counter_before"`
+	CounterAfter    uint64  `json:"counter_after"`
+	Packets         uint64  `json:"packets"`
+	ExpectedDrops   uint64  `json:"expected_drops"`
+	RealizedLossPct float64 `json:"realized_loss_pct"`
+	TraceSHA256     string  `json:"trace_sha256"`
+}
+
 type NetemResult struct {
 	Enabled          bool             `json:"enabled"`
 	Pair             netops.PairSpec  `json:"pair"`
@@ -140,10 +165,11 @@ type NetemResult struct {
 // effective control schedule. A positive counter delta therefore cannot be
 // attributed solely to setup probes, warmup, or drain traffic.
 type NetemLossEvidence struct {
-	Version   int                       `json:"version"`
-	Mode      string                    `json:"mode"`
-	Supported bool                      `json:"supported"`
-	Scope     string                    `json:"scope"`
+	Version       int                        `json:"version"`
+	Mode          string                     `json:"mode"`
+	Supported     bool                       `json:"supported"`
+	Deterministic *DeterministicLossEvidence `json:"deterministic,omitempty"`
+	Scope         string                     `json:"scope"`
 	Schedule  control.ScheduleMessage   `json:"schedule"`
 	Before    *netops.QdiscPairSnapshot `json:"before,omitempty"`
 	After     *netops.QdiscPairSnapshot `json:"after,omitempty"`

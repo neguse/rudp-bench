@@ -160,6 +160,12 @@ func lossTraceMountCommand() Command {
 			" && mount -t bpf bpf " + lossTraceBpffs + "; }"}}
 }
 
+// ReadLossTraceCounter は指定 egress の trace パケットカウンタを読む。
+// pin はホスト側 bpffs にあるため netns に入る必要はない。
+func ReadLossTraceCounter(ns, dev string) (uint64, error) {
+	return losstrace.ReadCounter(dev, lossTracePinDir(ns))
+}
+
 // LossTraceReset は決定的 loss 注入のパケットカウンタを 0 に戻す。
 // netem gate(ping/iperf3)等が消費した trace 位置をリセットし、計測本体が
 // 毎 run 同じ位置から trace を再生するようにする。pin はホスト側 bpffs に

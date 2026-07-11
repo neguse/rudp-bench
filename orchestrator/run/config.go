@@ -312,6 +312,19 @@ func (cfg RunConfig) validate() error {
 	if cfg.Netem != nil && (cfg.Netem.LinkMTUBytes < 0 || cfg.Netem.LinkMTUBytes > 65535) {
 		errs = append(errs, fmt.Errorf("netem.link_mtu_bytes must be between 1 and 65535 when specified"))
 	}
+	if cfg.Netem != nil {
+		for name, egress := range map[string]netops.Netem{
+			"server_egress": cfg.Netem.ServerEgress,
+			"client_egress": cfg.Netem.ClientEgress,
+		} {
+			if egress.LossSeed != 0 && egress.LossPercent <= 0 {
+				errs = append(errs, fmt.Errorf("netem.%s.loss_seed requires loss_pct > 0", name))
+			}
+			if deterministicLoss(cfg.Netem) && egress.LossPercent > 0 && egress.LossSeed == 0 {
+				errs = append(errs, fmt.Errorf("netem.%s mixes random loss into a deterministic run; seed every lossy egress or none", name))
+			}
+		}
+	}
 	if cfg.ControlTimeout.Duration < 0 || cfg.SamplerInterval.Duration < 0 || cfg.ProcessExitTimeout.Duration < 0 {
 		errs = append(errs, fmt.Errorf("timeouts and sampler_interval must be >= 0"))
 	}

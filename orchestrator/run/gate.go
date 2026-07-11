@@ -7,6 +7,7 @@ import (
 
 	"github.com/neguse/rudp-bench/orchestrator/control"
 	"github.com/neguse/rudp-bench/orchestrator/netops"
+	"github.com/neguse/rudp-bench/orchestrator/netops/losstrace"
 )
 
 type GateInput struct {
@@ -145,7 +146,7 @@ func ValidateNetemLossEvidence(cfg *RunConfig, controlResult *control.Result, ev
 	}
 	prefix := func(reason string) string { return "netem loss evidence: " + reason }
 	if deterministicLoss(cfg.Netem) {
-		return []string{prefix("deterministic losstrace drop accounting is unsupported and unverified")}
+		return validateDeterministicLossEvidence(cfg, controlResult, evidence, prefix)
 	}
 	if evidence == nil {
 		return []string{prefix("missing for configured random loss")}
@@ -239,6 +240,116 @@ func ValidateNetemLossEvidence(cfg *RunConfig, controlResult *control.Result, ev
 			} else if check.delta.Dropped == 0 {
 				reasons = append(reasons, prefix(check.name+" observed dropped delta is zero for configured loss"))
 			}
+		}
+	}
+	return dedupeStrings(reasons)
+}
+
+// validateDeterministicLossEvidence requires known-packet accounting: the
+// losstrace counter samples must sit wholly inside the effective measurement
+// window, and the regenerated trace must drop at least one packet in the
+// sampled range for every seeded direction.
+func validateDeterministicLossEvidence(cfg *RunConfig, controlResult *control.Result, evidence *NetemLossEvidence, prefix func(string) string) []string {
+	if evidence == nil {
+		return []string{prefix("missing for configured deterministic loss")}
+	}
+	var reasons []string
+	if evidence.Version != 1 {
+		reasons = append(reasons, prefix(fmt.Sprintf("version=%d, want 1", evidence.Version)))
+	}
+	if evidence.Mode != lossEvidenceModeDeterministicTrace {
+		reasons = append(reasons, prefix(fmt.Sprintf("mode=%q, want %q", evidence.Mode, lossEvidenceModeDeterministicTrace)))
+	}
+	if !evidence.Supported {
+		reasons = append(reasons, prefix("deterministic trace accounting marked unsupported"))
+	}
+	if evidence.Scope != lossEvidenceScopeEffectiveInner {
+		reasons = append(reasons, prefix(fmt.Sprintf("scope=%q does not prove in-window loss", evidence.Scope)))
+	}
+	for _, reason := range evidence.Errors {
+		reasons = append(reasons, prefix(reason))
+	}
+	if controlResult == nil {
+		reasons = append(reasons, prefix("control schedule is unavailable"))
+	} else if evidence.Schedule != controlResult.Schedule {
+		reasons = append(reasons, prefix("captured schedule does not match effective control schedule"))
+	}
+	det := evidence.Deterministic
+	if det == nil {
+		reasons = append(reasons, prefix("deterministic counter samples are missing"))
+		return dedupeStrings(reasons)
+	}
+	if det.CaptureBeforeStartNS < evidence.Schedule.StartAtNS {
+		reasons = append(reasons, prefix(fmt.Sprintf("before sample started outside measurement window: %d < %d", det.CaptureBeforeStartNS, evidence.Schedule.StartAtNS)))
+	}
+	if det.CaptureAfterFinishNS > evidence.Schedule.StopAtNS {
+		reasons = append(reasons, prefix(fmt.Sprintf("after sample finished outside measurement window: %d > %d", det.CaptureAfterFinishNS, evidence.Schedule.StopAtNS)))
+	}
+	if det.CaptureBeforeFinishNS >= det.CaptureAfterStartNS {
+		reasons = append(reasons, prefix("counter samples overlap"))
+	}
+
+	pair := cfg.Netem.pairSpec()
+	checks := []struct {
+		name      string
+		namespace string
+		device    string
+		expected  netops.Netem
+		record    *DeterministicLossDirection
+	}{
+		{"server_egress", pair.ServerNS, pair.ServerVeth, cfg.Netem.ServerEgress, det.ServerEgress},
+		{"client_egress", pair.ClientNS, pair.ClientVeth, cfg.Netem.ClientEgress, det.ClientEgress},
+	}
+	for _, check := range checks {
+		if check.expected.LossPercent <= 0 {
+			continue
+		}
+		if check.expected.LossSeed == 0 {
+			reasons = append(reasons, prefix(check.name+" mixes random loss into a deterministic run"))
+			continue
+		}
+		record := check.record
+		if record == nil {
+			reasons = append(reasons, prefix(check.name+" counter record is missing for configured loss"))
+			continue
+		}
+		if record.Namespace != check.namespace || record.Dev != check.device {
+			reasons = append(reasons, prefix(fmt.Sprintf("%s source=%s/%s, want %s/%s",
+				check.name, record.Namespace, record.Dev, check.namespace, check.device)))
+		}
+		if record.TraceBits != traceBitsOrDefault(check.expected) {
+			reasons = append(reasons, prefix(fmt.Sprintf("%s trace_bits=%d does not match configured %d",
+				check.name, record.TraceBits, traceBitsOrDefault(check.expected))))
+		}
+		if record.CounterAfter < record.CounterBefore {
+			reasons = append(reasons, prefix(check.name+" counter went backwards"))
+			continue
+		}
+		if record.Packets != record.CounterAfter-record.CounterBefore {
+			reasons = append(reasons, prefix(check.name+" stored packet count does not match counters"))
+		}
+		if record.Packets == 0 {
+			reasons = append(reasons, prefix(check.name+" observed no packets in the measurement window"))
+		}
+		if record.ExpectedDrops == 0 {
+			reasons = append(reasons, prefix(check.name+" expected drop count is zero for configured loss"))
+		}
+		words, realized, err := losstrace.Generate(check.expected.LossSeed, check.expected.LossPercent,
+			check.expected.LossBurstLen, record.TraceBits)
+		if err != nil {
+			reasons = append(reasons, prefix(fmt.Sprintf("%s trace regeneration failed: %v", check.name, err)))
+			continue
+		}
+		if HashValue(words) != record.TraceSHA256 {
+			reasons = append(reasons, prefix(check.name+" stored trace hash does not match the regenerated trace"))
+		}
+		if realized != record.RealizedLossPct {
+			reasons = append(reasons, prefix(check.name+" stored realized loss rate does not match the regenerated trace"))
+		}
+		if drops, countErr := losstrace.CountDropsInRange(words, record.CounterBefore, record.CounterAfter); countErr != nil {
+			reasons = append(reasons, prefix(fmt.Sprintf("%s trace drop recount failed: %v", check.name, countErr)))
+		} else if drops != record.ExpectedDrops {
+			reasons = append(reasons, prefix(check.name+" stored expected drops do not match the regenerated trace"))
 		}
 	}
 	return dedupeStrings(reasons)
