@@ -1,6 +1,6 @@
 # ADR-0002: Benchmark の測定方法
 
-- Status: **Proposed**
+- Status: **Accepted**（2026-07-12 owner 承認。Open Decisions は ADR-0004 で決定）
 - Date: 2026-07-10
 - 依存: ADR-0000, ADR-0001
 - Decision owner: project owner
@@ -268,6 +268,8 @@ custom prototype も既存 solution と同じ conformance、security、loss / co
 上回る便益を示せない場合、自作を推薦しない。
 
 ## Open Decisions Before Acceptance
+
+以下の 4 点は [ADR-0004](0004-reference-preset.md) で決定した（2026-07-12）。
 
 - reference preset の topology と数値
 - 実用上意味のある最小差と、必要 precision

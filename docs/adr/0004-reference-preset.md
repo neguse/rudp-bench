@@ -1,6 +1,6 @@
 # ADR-0004: reference preset と confirmatory protocol の凍結値
 
-- Status: **Proposed（個別数値は owner 回答済み — 全体の accept 待ち）**
+- Status: **Accepted**（2026-07-12 owner 承認）
 - Date: 2026-07-12
 - 依存: ADR-0000, ADR-0001, ADR-0002
 - Decision owner: project owner
