@@ -48,7 +48,8 @@ if [[ "${RUDP_BENCH_PROVISIONAL_LOSS_SCOPE:-0}" != 1 ]]; then
     /bin/bash "$SCRIPT"
 fi
 
-SESSION_DIR="results-v2/provisional-loss-smoke-sessions/$SESSION"
+SESSION_ROOT="results-v2/provisional-loss-smoke-sessions"
+SESSION_DIR="$SESSION_ROOT/$SESSION"
 DOCTOR_REPORT="$SESSION_DIR/doctor.json"
 BASELINE_CONFIG="orchestrator/examples/environment-baseline-loss-provisional.json"
 SWEEP_TEMPLATE="orchestrator/examples/sweep-scenario-loss-provisional.json"
@@ -64,6 +65,8 @@ cleanup_netns() {
 cleanup_netns
 trap cleanup_netns EXIT
 
+mkdir -p "$SESSION_ROOT"
+chown "$SUDO_UID:$SUDO_GID" "$SESSION_ROOT"
 mkdir -p "$SESSION_DIR"
 chown "$SUDO_UID:$SUDO_GID" "$SESSION_DIR"
 

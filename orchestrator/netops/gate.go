@@ -1,10 +1,11 @@
 package netops
 
 import (
-	"math"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -23,13 +24,13 @@ import (
 // -R で server→client を測る。ping の RTT は両方向の delay 合計。
 
 type NetemGateReport struct {
-	PingAvgMS       float64 `json:"ping_avg_ms"`
-	ExpectedRTTMS   float64 `json:"expected_rtt_ms"`
-	LossC2SPct      float64 `json:"loss_c2s_pct"`
-	LossS2CPct      float64 `json:"loss_s2c_pct"`
-	ExpectedC2SPct  float64 `json:"expected_c2s_pct"`
-	ExpectedS2CPct  float64 `json:"expected_s2c_pct"`
-	Failures        []string `json:"failures,omitempty"`
+	PingAvgMS      float64  `json:"ping_avg_ms"`
+	ExpectedRTTMS  float64  `json:"expected_rtt_ms"`
+	LossC2SPct     float64  `json:"loss_c2s_pct"`
+	LossS2CPct     float64  `json:"loss_s2c_pct"`
+	ExpectedC2SPct float64  `json:"expected_c2s_pct"`
+	ExpectedS2CPct float64  `json:"expected_s2c_pct"`
+	Failures       []string `json:"failures,omitempty"`
 }
 
 func (r NetemGateReport) OK() bool { return len(r.Failures) == 0 }
@@ -121,13 +122,19 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 	// (2000 pkt 級: 1% なら期待 20 損失、σ≈4.4)。server は netns 内で -1(1接続で終了)
 	srv := exec.CommandContext(ctx, "ip", "netns", "exec", spec.ServerNS,
 		"iperf3", "-s", "-1", "-B", serverAddr, "--json")
+	var srvOut bytes.Buffer
+	srv.Stdout = &srvOut
+	srv.Stderr = &srvOut
 	if err := srv.Start(); err != nil {
 		return report, fmt.Errorf("iperf3 server: %w", err)
 	}
-	time.Sleep(500 * time.Millisecond)  // listener 起動待ち(client にリトライがない)
+	srvReaped := false
+	time.Sleep(500 * time.Millisecond) // listener 起動待ち(client にリトライがない)
 	defer func() {
-		_ = srv.Process.Kill()
-		_ = srv.Wait()
+		if !srvReaped {
+			_ = srv.Process.Kill()
+			_ = srv.Wait()
+		}
 	}()
 
 	runClient := func(reverse bool) (float64, error) {
@@ -145,9 +152,9 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 				time.Sleep(time.Second)
 			}
 			cmd := exec.CommandContext(ctx, "ip", args...)
-			out, err := cmd.Output()
+			out, err := cmd.CombinedOutput()
 			if err != nil {
-				lastErr = fmt.Errorf("iperf3 client(reverse=%v): %w", reverse, err)
+				lastErr = fmt.Errorf("iperf3 client(reverse=%v): %w (%s)", reverse, err, strings.TrimSpace(string(out)))
 				continue
 			}
 			return ParseIperfLossPct(string(out))
@@ -160,6 +167,11 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 	if err != nil {
 		return report, err
 	}
+	if err := srv.Wait(); err != nil {
+		srvReaped = true
+		return report, fmt.Errorf("iperf3 server: %w (%s)", err, strings.TrimSpace(srvOut.String()))
+	}
+	srvReaped = true
 	report.LossC2SPct = loss
 	// 決定的 loss 注入(loss_seed)では iperf3 のサンプル窓が固定 trace の
 	// どこに当たるかで実測率が大きくぶれる(3%×burst16 はバースト間隔
@@ -176,18 +188,29 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 	// s→c は別セッション(iperf3 -s -1 は1接続で終わるため再起動)
 	srv2 := exec.CommandContext(ctx, "ip", "netns", "exec", spec.ServerNS,
 		"iperf3", "-s", "-1", "-B", serverAddr, "--json")
+	var srv2Out bytes.Buffer
+	srv2.Stdout = &srv2Out
+	srv2.Stderr = &srv2Out
 	if err := srv2.Start(); err != nil {
 		return report, fmt.Errorf("iperf3 server(2): %w", err)
 	}
+	srv2Reaped := false
 	time.Sleep(500 * time.Millisecond)
 	defer func() {
-		_ = srv2.Process.Kill()
-		_ = srv2.Wait()
+		if !srv2Reaped {
+			_ = srv2.Process.Kill()
+			_ = srv2.Wait()
+		}
 	}()
 	loss, err = runClient(true)
 	if err != nil {
 		return report, err
 	}
+	if err := srv2.Wait(); err != nil {
+		srv2Reaped = true
+		return report, fmt.Errorf("iperf3 server(2): %w (%s)", err, strings.TrimSpace(srv2Out.String()))
+	}
+	srv2Reaped = true
 	report.LossS2CPct = loss
 	if spec.ServerEgress.LossSeed == 0 {
 		if err := checkLoss(loss, report.ExpectedS2CPct, spec.ServerEgress.LossBurstLen, "s2c"); err != nil {
