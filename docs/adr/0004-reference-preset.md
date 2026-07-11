@@ -1,6 +1,6 @@
 # ADR-0004: reference preset と confirmatory protocol の凍結値
 
-- Status: **Proposed（たたき台 — 全数値が owner 合意待ち）**
+- Status: **Proposed（個別数値は owner 回答済み — 全体の accept 待ち）**
 - Date: 2026-07-12
 - 依存: ADR-0000, ADR-0001, ADR-0002
 - Decision owner: project owner
@@ -23,10 +23,12 @@ v2 以降とし、v1 で「近い」と装わない。
 
 - payload は splitmix64-v1、wire compression なし
 - warmup 25 s / measurement 60 s / drain 5 s（conformance 系 run は 20 s を維持）
-- network regime は 3 種:
+- network regime は 2 種:
   - `lan`: delay 1 ms、loss 0%（同一リージョン内の下限確認）
   - `wan`: delay 25 ms、random loss 1%（既存 smoke と同値。国内 WAN 相当）
-  - `rough`: delay 50 ms、jitter 10 ms、random loss 3%（モバイル/劣化回線相当）
+  - 第 3 regime（劣化回線）は不採用（2026-07-12 owner 回答: 提案した
+    `rough` は実 workload の何を代表するのか不明。追加する場合は実回線の
+    実測から導出した条件で別途合意する）
 - LT SLO: delivery ratio >= 0.95、staleness p99 <= 300 ms、starvation 0
 - MD SLO: eventual delivery 1.0、200 ms deadline hit >= 0.95
 - SLO は用途の絶対値であり、regime によって緩めない（ADR-0002）
@@ -35,7 +37,15 @@ v2 以降とし、v1 で「近い」と装わない。
 
 - client input: LT 30 Hz / 64 B（既存 smoke の 13 Hz は診断用。preset は
   現代のアクションゲームの入力レートに合わせる）
-- server state: LT 20 Hz / 256 B/client（per-client personalized）
+- server state: LT 20 Hz、payload は **2 preset 点**（per-client personalized）:
+  - `state-1000`: 1000 B/client = 20 KB/s（MTU 1500 内。conformance probe と同値）
+  - `state-4000`: 4000 B/client = 80 KB/s（**MTU 超** — 2026-07-12 owner 指示。
+    transport の fragmentation / 分割再構成の挙動差を見る。datagram 上限で
+    送れない mapping は `UNSUPPORTED` として開示する）
+  - 実ゲームの公開実測から導出（owner 指示で Minecraft/ARK を参照）:
+    ARK(ASA)は 1 player あたり通常 100-150 Kbps・スパイク 300 Kbps（30 Hz
+    ≈ 400 B-1.2 KB/update）、Minecraft は 32-100 KB/s（chunk 配信込み）。
+    2 点はこの帯域の代表値と上限側に対応する
 - 制御系: 双方向 MD 10 Hz / 64 B
 - 探索単位: clients/server。screening は 2 倍刻み、confirmatory は境界 ±10%
 
@@ -47,8 +57,9 @@ v2 以降とし、v1 で「近い」と装わない。
 
 ### Resource budget
 
-- SUT server プロセスは **4 vCPU 相当の cgroup quota**（GameLift の
-  c8g.xlarge 相当を production の代表サイズと仮定 — **owner 確認事項**）
+- SUT server プロセスは **2 vCPU 相当の cgroup quota**（GameLift の
+  c8g.large 相当。2026-07-12 owner 回答: マルチコア対応で大きくすれば
+  増えるのは自明であり、小さい budget でコア当たり効率を比べる）
 - 補助として 1 vCPU 条件を診断列に置く（コア当たり効率の開示用）
 - client farm は測定器であり、budget 外（十分性は ADR-0002 の farm gate で検証）
 
@@ -87,14 +98,16 @@ v2 以降とし、v1 で「近い」と装わない。
 
 capability は測定と独立に記録し、capacity 表と同じ場所で開示する。
 
-## Open Questions（owner 判断待ち）
+## Resolved Questions（2026-07-12 owner 回答、ask inbox #4-#8）
 
-1. resource budget の代表サイズ: 4 vCPU（c8g.xlarge 相当）でよいか
-2. `authoritative-state` の state payload 256 B/client は想定 workload に近いか
-   （実ゲームの delta snapshot は数百 B〜数 KB まで幅がある）
-3. `rough` regime を v1 に含めるか、v2 に送るか（測定時間が 1.5 倍になる）
-4. echo workload（v1 バトルで見えていた接続数スケール軸）を preset に含めるか、
-   diagnostics に留めるか
+1. resource budget: **2 vCPU 相当**（マルチコアで伸びるのは自明。小さい budget で
+   コア当たり効率を比べる）
+2. state payload: **Minecraft/ARK の公開実測から導出**し、MTU 内 1000 B と
+   MTU 超 4000 B の 2 preset 点にする（MTU 超の fragmentation 挙動も見たい）
+3. 劣化回線 regime: **不採用**（実 workload の何を代表するか不明な条件を置かない。
+   追加するなら実回線の実測から導出して別途合意）
+4. echo workload: **diagnostics に留める**（公式表の軸は用途 scenario。
+   区分表は inbox #8 のコメント参照）
 
 ## Consequences
 

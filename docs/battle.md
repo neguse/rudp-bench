@@ -76,6 +76,11 @@ echo workload の追加は TODO 参照。
 - **「proc_index=0」の INVALID は server の可能性がある**(server の hello
   も proc_index=0)。invalid メッセージに role= を追加済みだが、古いログを
   読むときは注意
+- **session 実行中に build 出力(orchestrator・adapter binary)を再ビルドしない**。
+  identity は attempt ごとに再計算・照合されるため、途中の rebuild 以降の全
+  attempt が run_identity 不一致で invalid になる(2026-07-12 の class-mapping
+  session で実証 — 再ビルド時刻 01:29:59 以降に開始した attempt だけが全滅)。
+  session 中の並行作業は docs・テスト(別 build dir)に限る
 
 ## TODO キュー(バトル)
 
