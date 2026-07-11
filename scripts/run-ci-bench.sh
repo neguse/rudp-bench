@@ -53,6 +53,10 @@ command_json() {
       server="build-v2-enet/enet_server"
       client="build-v2-enet/enet_client"
       ;;
+    kcp)
+      server="build-v2-kcp/kcp_server"
+      client="build-v2-kcp/kcp_client"
+      ;;
     litenetlib)
       server="servers/litenetlib/LiteNetLibBench.Server/bin/Release/net10.0/LiteNetLibBench.Server"
       client="servers/litenetlib/LiteNetLibBench.Client/bin/Release/net10.0/LiteNetLibBench.Client"
@@ -98,7 +102,7 @@ SUMMARY="$OUT/ci-bench-summary.md"
 
 port=43001
 failures=0
-for transport in raw_udp enet litenetlib websocket magiconion; do
+for transport in raw_udp enet kcp litenetlib websocket magiconion; do
   for scenario_name in auth room; do
     scenario_var="scenario_$scenario_name"
     dir="$OUT/$transport-$scenario_name"

@@ -15,7 +15,7 @@ jobs:
 
       # v2 が必要とする submodule のみ(全 recursive は v1 の資産で重い)
       - name: Init required submodules
-        run: git submodule update --init third_party/enet
+        run: git submodule update --init third_party/enet third_party/kcp
 
       - uses: actions/setup-go@v5
         with:
@@ -47,6 +47,12 @@ jobs:
           cmake -S servers/enet -B build-v2-enet
           cmake --build build-v2-enet -j
           ctest --test-dir build-v2-enet --output-on-failure
+
+      - name: kcp transport build + smoke
+        run: |
+          cmake -S servers/kcp -B build-v2-kcp
+          cmake --build build-v2-kcp -j
+          ctest --test-dir build-v2-kcp -R kcp_loopback_smoke --output-on-failure
 
       - name: raw transport build + three-scenario no-loss smoke
         run: |

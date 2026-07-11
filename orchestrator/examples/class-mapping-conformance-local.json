@@ -19,47 +19,108 @@
   },
   "transports": {
     "raw_udp": {
-      "server_command": ["build-v2-rawudp/raw_udp_server", "--port", "42916"],
+      "server_command": [
+        "build-v2-rawudp/raw_udp_server",
+        "--port",
+        "42916"
+      ],
       "client_command": [
-        "build-v2-rawudp/raw_udp_client", "--host", "10.200.0.1", "--port", "42916",
-        "--conns", "{conns}", "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+        "build-v2-rawudp/raw_udp_client",
+        "--host",
+        "10.200.0.1",
+        "--port",
+        "42916",
+        "--conns",
+        "{conns}",
+        "--proc-index",
+        "{proc_index}",
+        "--origin-base",
+        "{origin_id_start}"
       ],
       "client_procs": 1,
       "diagnostic": true
     },
     "enet": {
-      "server_command": ["build-v2-enet/enet_server", "--port", "42917"],
+      "server_command": [
+        "build-v2-enet/enet_server",
+        "--port",
+        "42917"
+      ],
       "client_command": [
-        "build-v2-enet/enet_client", "--host", "10.200.0.1", "--port", "42917",
-        "--conns", "{conns}", "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+        "build-v2-enet/enet_client",
+        "--host",
+        "10.200.0.1",
+        "--port",
+        "42917",
+        "--conns",
+        "{conns}",
+        "--proc-index",
+        "{proc_index}",
+        "--origin-base",
+        "{origin_id_start}"
       ],
       "client_procs": 1
     },
     "msquic": {
-      "server_command": ["build-v2-msquic/msquic_server", "--port", "42919"],
+      "server_command": [
+        "build-v2-msquic/msquic_server",
+        "--port",
+        "42919"
+      ],
       "client_command": [
-        "build-v2-msquic/msquic_client", "--host", "10.200.0.1", "--port", "42919",
-        "--conns", "{conns}", "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+        "build-v2-msquic/msquic_client",
+        "--host",
+        "10.200.0.1",
+        "--port",
+        "42919",
+        "--conns",
+        "{conns}",
+        "--proc-index",
+        "{proc_index}",
+        "--origin-base",
+        "{origin_id_start}"
       ],
       "client_procs": 1
     },
     "gns": {
-      "server_command": ["build-v2-gns/gns_server", "--port", "42921"],
+      "server_command": [
+        "build-v2-gns/gns_server",
+        "--port",
+        "42921"
+      ],
       "client_command": [
-        "build-v2-gns/gns_client", "--host", "10.200.0.1", "--port", "42921",
-        "--conns", "{conns}", "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+        "build-v2-gns/gns_client",
+        "--host",
+        "10.200.0.1",
+        "--port",
+        "42921",
+        "--conns",
+        "{conns}",
+        "--proc-index",
+        "{proc_index}",
+        "--origin-base",
+        "{origin_id_start}"
       ],
       "client_procs": 1
     },
     "magiconion": {
       "server_command": [
         "servers/magiconion/MagicOnionBench.Server/bin/Release/net10.0/MagicOnionBench.Server",
-        "--port", "42931"
+        "--port",
+        "42931"
       ],
       "client_command": [
         "servers/magiconion/MagicOnionBench.Client/bin/Release/net10.0/MagicOnionBench.Client",
-        "--host", "10.200.0.1", "--port", "42931", "--conns", "{conns}",
-        "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+        "--host",
+        "10.200.0.1",
+        "--port",
+        "42931",
+        "--conns",
+        "{conns}",
+        "--proc-index",
+        "{proc_index}",
+        "--origin-base",
+        "{origin_id_start}"
       ],
       "client_procs": 1,
       "sched_is_measurand": true
@@ -67,12 +128,21 @@
     "websocket": {
       "server_command": [
         "servers/websocket/WebSocketBench.Server/bin/Release/net10.0/WebSocketBench.Server",
-        "--port", "42933"
+        "--port",
+        "42933"
       ],
       "client_command": [
         "servers/websocket/WebSocketBench.Client/bin/Release/net10.0/WebSocketBench.Client",
-        "--host", "10.200.0.1", "--port", "42933", "--conns", "{conns}",
-        "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+        "--host",
+        "10.200.0.1",
+        "--port",
+        "42933",
+        "--conns",
+        "{conns}",
+        "--proc-index",
+        "{proc_index}",
+        "--origin-base",
+        "{origin_id_start}"
       ],
       "client_procs": 1,
       "sched_is_measurand": true
@@ -80,12 +150,42 @@
     "litenetlib": {
       "server_command": [
         "servers/litenetlib/LiteNetLibBench.Server/bin/Release/net10.0/LiteNetLibBench.Server",
-        "--port", "42941"
+        "--port",
+        "42941"
       ],
       "client_command": [
         "servers/litenetlib/LiteNetLibBench.Client/bin/Release/net10.0/LiteNetLibBench.Client",
-        "--host", "10.200.0.1", "--port", "42941", "--conns", "{conns}",
-        "--proc-index", "{proc_index}", "--origin-base", "{origin_id_start}"
+        "--host",
+        "10.200.0.1",
+        "--port",
+        "42941",
+        "--conns",
+        "{conns}",
+        "--proc-index",
+        "{proc_index}",
+        "--origin-base",
+        "{origin_id_start}"
+      ],
+      "client_procs": 1
+    },
+    "kcp": {
+      "server_command": [
+        "build-v2-kcp/kcp_server",
+        "--port",
+        "42923"
+      ],
+      "client_command": [
+        "build-v2-kcp/kcp_client",
+        "--host",
+        "10.200.0.1",
+        "--port",
+        "42923",
+        "--conns",
+        "{conns}",
+        "--proc-index",
+        "{proc_index}",
+        "--origin-base",
+        "{origin_id_start}"
       ],
       "client_procs": 1
     }

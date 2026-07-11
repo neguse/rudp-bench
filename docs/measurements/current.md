@@ -20,6 +20,8 @@ fixed class-mapping probe（directional loss下のLT/MD semantics検査）は
 記録した。clean commit `e313a33`で候補6 solutionの全36 caseがPASS、raw_udpは
 開示どおりLT PASS / MD UNSUPPORTEDだった。DoctorがFAIL（smoke rig方針）のため
 Promotable=falseであり、昇格可能なconformance証跡はreference rig受入後に再取得する。
+後から追加した第7候補KCP（LT=raw sidechannel / MD=KCP ARQ）の単独probeは
+[`2026-07-12-class-mapping-kcp.md`](2026-07-12-class-mapping-kcp.md)で6/6 PASS。
 
 以下は旧broadcast-centric条件のlegacy canonical recordであり、新scenarioの比較表、
 solution推薦、build-vs-buy判断には使用しない。
