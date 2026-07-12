@@ -18,6 +18,7 @@ if (!config.Valid)
     Console.Error.WriteLine("usage: WebSocketBench.Server --port PORT");
     return 1;
 }
+var rampConfig = BenchRampConfig.FromEnvironment(config.Scenario?.TotalConns ?? 1);
 
 using var stopCts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
@@ -132,7 +133,21 @@ try
                 ServerConfig.DevDrainNs));
     }
 
-    if (schedule is { } activeSchedule && config.Scenario is { } activeScenario)
+    if (rampConfig is { } ramp && schedule is { } rampSchedule && config.Scenario is { } rampScenario)
+    {
+        await RunRampServerAsync(
+            rampScenario,
+            ramp,
+            rampSchedule,
+            connections,
+            scenarioMetrics!,
+            metricsGate,
+            progress,
+            control,
+            MetricsPathOrDefault(),
+            stopCts.Token).ConfigureAwait(false);
+    }
+    else if (schedule is { } activeSchedule && config.Scenario is { } activeScenario)
     {
         var roster = devRoster ?? await FreezeRosterAsync(
             connections,
@@ -220,6 +235,155 @@ if (await Task.WhenAny(stop, Task.Delay(2000)).ConfigureAwait(false) != stop)
     Environment.Exit(0);
 }
 return 0;
+
+static async Task RunRampServerAsync(
+    BenchScenarioConfig scenario,
+    BenchRampConfig ramp,
+    BenchSchedule schedule,
+    ConcurrentDictionary<uint, ConnState> connections,
+    BenchMetrics metrics,
+    object metricsGate,
+    BenchAuthoritativeProgressTracker? progress,
+    BenchControl? control,
+    string metricsPath,
+    CancellationToken cancellationToken)
+{
+    BenchPlan? statePlan = scenario.Kind == BenchScenarioKind.AuthoritativeState
+        ? new BenchPlan(
+            scenario.ServerState!.Value.Streams(BenchDirection.ServerToClient),
+            schedule.StartAtNs,
+            schedule.StartAtNs,
+            schedule.StopAtNs)
+        : null;
+    var phaseIndex = 0;
+    try
+    {
+        foreach (var target in ramp.Targets(scenario.TotalConns))
+        {
+            var phaseStart = ramp.PhaseStartNs(schedule.StartAtNs, phaseIndex);
+            var resetDeadline = BenchClock.AddSaturating(phaseStart, ramp.GuardNs);
+            var sampleEnd = BenchClock.AddSaturating(resetDeadline, ramp.SampleNs);
+            var phaseEnd = BenchClock.AddSaturating(sampleEnd, ramp.DrainNs);
+            await DriveRampServerAsync(
+                scenario, connections, statePlan, metrics, metricsGate, progress,
+                schedule, phaseStart, ramp, cancellationToken).ConfigureAwait(false);
+
+            lock (metricsGate)
+            {
+                metrics.Reset();
+                metrics.SetObservationWindow(resetDeadline, sampleEnd);
+                if (scenario.Kind == BenchScenarioKind.AuthoritativeState &&
+                    scenario.ClientInput is { RateLt: > 0 } input)
+                {
+                    for (uint originId = 0; originId < (uint)target; originId++)
+                    {
+                        metrics.ExpectLatest(
+                            originId, originId, input.TrafficId,
+                            BenchDirection.ClientToServer, resetDeadline);
+                    }
+                }
+            }
+
+            while (connections.Count < target && BenchClock.NowNs() < resetDeadline)
+            {
+                ramp.ThrowIfStopRequested();
+                cancellationToken.ThrowIfCancellationRequested();
+                var now = BenchClock.NowNs();
+                await DriveRampServerAsync(
+                    scenario, connections, statePlan, metrics, metricsGate, progress,
+                    schedule,
+                    Math.Min(resetDeadline, BenchClock.AddSaturating(now, 1_000_000UL)),
+                    ramp,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            await DriveRampServerAsync(
+                scenario, connections, statePlan, metrics, metricsGate, progress,
+                schedule, resetDeadline, ramp, cancellationToken).ConfigureAwait(false);
+
+            await DriveRampServerAsync(
+                scenario, connections, statePlan, metrics, metricsGate, progress,
+                schedule, phaseEnd, ramp, cancellationToken).ConfigureAwait(false);
+
+            string snapshotJson;
+            lock (metricsGate)
+            {
+                snapshotJson = metrics.ToJson();
+            }
+            await File.WriteAllTextAsync(
+                BenchRampConfig.SnapshotPath(metricsPath, phaseIndex, target),
+                snapshotJson + "\n",
+                new UTF8Encoding(false),
+                CancellationToken.None).ConfigureAwait(false);
+            phaseIndex++;
+            ramp.ThrowIfStopRequested();
+        }
+    }
+    catch (BenchRampStopException)
+    {
+    }
+}
+
+static async Task DriveRampServerAsync(
+    BenchScenarioConfig scenario,
+    ConcurrentDictionary<uint, ConnState> connections,
+    BenchPlan? statePlan,
+    BenchMetrics metrics,
+    object metricsGate,
+    BenchAuthoritativeProgressTracker? progress,
+    BenchSchedule schedule,
+    ulong deadlineNs,
+    BenchRampConfig ramp,
+    CancellationToken cancellationToken)
+{
+    if (deadlineNs > schedule.StopAtNs)
+    {
+        throw new InvalidOperationException("ramp phases exceed the scheduled measurement window");
+    }
+    while (BenchClock.NowNs() < deadlineNs)
+    {
+        ramp.ThrowIfStopRequested();
+        cancellationToken.ThrowIfCancellationRequested();
+        var now = BenchClock.NowNs();
+        var sendThrough = now < deadlineNs ? now : deadlineNs - 1;
+        if (scenario.Kind == BenchScenarioKind.AuthoritativeState)
+        {
+            lock (metricsGate)
+            {
+                metrics.Tick(now);
+            }
+            while (statePlan!.TryNext(sendThrough, out var slot))
+            {
+                progress?.RecordServerStateTick(slot);
+                foreach (var target in connections.Values)
+                {
+                    await SubmitStateAsync(
+                        target,
+                        scenario.ServerState!.Value,
+                        slot,
+                        metrics,
+                        metricsGate,
+                        cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+
+        var next = deadlineNs;
+        if (statePlan is not null && statePlan.PeekNs() < next)
+        {
+            next = statePlan.PeekNs();
+        }
+        await DelayUntilNextAsync(now, next, deadlineNs, cancellationToken).ConfigureAwait(false);
+    }
+}
+
+static string MetricsPathOrDefault()
+{
+    var path = Environment.GetEnvironmentVariable("BENCH_METRICS_OUT");
+    return string.IsNullOrWhiteSpace(path)
+        ? "/tmp/rudp-bench-websocket-server-" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".json"
+        : path;
+}
 
 static bool TryResolveConnectionId(HttpContext context, ServerConfig config, out uint connectionId)
 {

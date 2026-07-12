@@ -27,6 +27,7 @@ if (!config.Valid)
         "--deadline-ns NS --staleness-period-ns NS");
     return 1;
 }
+var rampConfig = BenchRampConfig.FromEnvironment(config.Conns);
 
 using var stopCts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
@@ -92,6 +93,25 @@ try
     if (control is not null)
     {
         await control.HelloAsync("client", "litenetlib", config.ProcIndex, stopCts.Token).ConfigureAwait(false);
+    }
+
+    if (rampConfig is { } ramp)
+    {
+        return await RunRampAsync(
+            config,
+            ramp,
+            managers,
+            peers,
+            connected,
+            plans,
+            originIds,
+            lastInputSeq,
+            lastAppliedInputSeq,
+            metrics,
+            payloadValidation,
+            progress,
+            control,
+            stopCts.Token).ConfigureAwait(false);
     }
 
     for (var i = 0; i < config.Conns; i++)
@@ -394,6 +414,293 @@ finally
     foreach (var manager in managers)
     {
         manager?.Stop();
+    }
+}
+
+static async Task<int> RunRampAsync(
+    ClientConfig config,
+    BenchRampConfig ramp,
+    NetManager[] managers,
+    NetPeer[] peers,
+    bool[] connected,
+    BenchPlan?[] plans,
+    uint[] originIds,
+    ulong[] lastInputSeq,
+    ulong[] lastAppliedInputSeq,
+    BenchMetrics metrics,
+    BenchPayloadValidation payloadValidation,
+    BenchAuthoritativeProgressTracker? progress,
+    BenchControl? control,
+    CancellationToken cancellationToken)
+{
+    void PumpAll(float dtMs)
+    {
+        foreach (var manager in managers)
+        {
+            if (manager is null)
+            {
+                continue;
+            }
+            manager.PollEvents();
+            manager.ManualUpdate(dtMs);
+        }
+    }
+
+    int ActiveConns() => connected.Count(static value => value);
+
+    async Task AddConnectionsAsync(int target, ulong deadlineNs, bool observeStop)
+    {
+        for (var i = 0; i < target; i++)
+        {
+            if (observeStop)
+            {
+                ramp.ThrowIfStopRequested();
+            }
+            if (BenchClock.NowNs() >= deadlineNs)
+            {
+                return;
+            }
+            if (managers[i] is not null)
+            {
+                continue;
+            }
+            var localIndex = i;
+            var localIndexU32 = (uint)i;
+            originIds[i] = config.OriginBase + localIndexU32;
+            var listener = new EventBasedNetListener();
+            listener.PeerConnectedEvent += _ => connected[localIndex] = true;
+            listener.PeerDisconnectedEvent += (_, _) => connected[localIndex] = false;
+            listener.NetworkReceiveEvent += (_, reader, _, _) =>
+            {
+                var recvTsNs = BenchClock.NowNs();
+                var span = new ReadOnlySpan<byte>(reader.RawData, reader.UserDataOffset, reader.UserDataSize);
+                if (BenchPayload.TryRead(span, out var header))
+                {
+                    if (config.Scenario?.Kind == BenchScenarioKind.AuthoritativeState)
+                    {
+                        var state = config.Scenario.ServerState!.Value;
+                        if (header.OriginId != (uint)config.Scenario.TotalConns ||
+                            header.TrafficId != state.TrafficId ||
+                            (header.Flags & BenchConstants.FlagBroadcast) != 0 ||
+                            BenchConstants.DirectionFromFlags(header.Flags) != BenchDirection.ServerToClient ||
+                            !state.Accepts(header.Flags, span.Length) ||
+                            !BenchPayload.TryReadAppliedInputSeq(span, out var appliedInputSeq) ||
+                            appliedInputSeq > lastInputSeq[localIndex] ||
+                            !BenchPayload.ValidateTargetPad(span, originIds[localIndex]))
+                        {
+                            payloadValidation.Invalid();
+                            reader.Recycle();
+                            return;
+                        }
+                        BenchProgress.UpdateMax(ref lastAppliedInputSeq[localIndex], appliedInputSeq);
+                        progress?.RecordStateReceived(localIndex, header, appliedInputSeq);
+                    }
+                    else if (!BenchPayload.ValidateBody(span, header))
+                    {
+                        payloadValidation.Invalid();
+                        reader.Recycle();
+                        return;
+                    }
+                    metrics.OnRecv(localIndexU32, header, recvTsNs);
+                }
+                else
+                {
+                    payloadValidation.Invalid();
+                }
+                reader.Recycle();
+            };
+
+            var manager = new NetManager(listener)
+            {
+                MtuDiscovery = true,
+                UseNativeSockets = true,
+                DisconnectTimeout = 60000,
+                PacketPoolSize = 4096,
+            };
+            if (!manager.StartInManualMode(0))
+            {
+                throw new InvalidOperationException($"NetManager.StartInManualMode failed for conn {i}");
+            }
+            SetReceiveBuffer(manager, 4 * 1024 * 1024);
+            var connectData = new NetDataWriter();
+            connectData.Put(LnlConstants.ConnectKey);
+            connectData.Put(originIds[i]);
+            var peer = manager.Connect(config.Host, config.Port, connectData) ??
+                throw new InvalidOperationException($"NetManager.Connect returned null for conn {i}");
+            managers[i] = manager;
+            peers[i] = peer;
+        }
+
+        var lastPump = BenchClock.NowNs();
+        while (ActiveConns() < target)
+        {
+            if (observeStop)
+            {
+                ramp.ThrowIfStopRequested();
+            }
+            if (BenchClock.NowNs() >= deadlineNs)
+            {
+                return;
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            var now = BenchClock.NowNs();
+            PumpAll((float)(BenchClock.SaturatingSub(now, lastPump) / 1_000_000.0));
+            lastPump = now;
+            await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    await AddConnectionsAsync(ramp.StartConns, ulong.MaxValue, observeStop: false).ConfigureAwait(false);
+    BenchSchedule schedule;
+    if (control is not null)
+    {
+        await control.ReadyAsync(config.Conns, cancellationToken).ConfigureAwait(false);
+        var scheduleTask = control.WaitScheduleAsync(cancellationToken);
+        schedule = await LnlPump.PumpWhileAwaitingAsync(scheduleTask, PumpAll, 5, cancellationToken)
+            .ConfigureAwait(false);
+    }
+    else
+    {
+        var now = BenchClock.NowNs();
+        var duration = ramp.RequiredWindowNs(config.Conns);
+        schedule = new BenchSchedule(now, BenchClock.AddSaturating(now, duration), BenchClock.AddSaturating(now, duration));
+    }
+
+    var streams = BuildStreams(config);
+    for (var i = 0; i < ramp.StartConns; i++)
+    {
+        plans[i] = new BenchPlan(streams, schedule.StartAtNs, schedule.StartAtNs, schedule.StopAtNs);
+    }
+    var metricsPath = MetricsPathOrDefault();
+    var phaseIndex = 0;
+    try
+    {
+        foreach (var target in ramp.Targets(config.Conns))
+        {
+            var phaseStart = ramp.PhaseStartNs(schedule.StartAtNs, phaseIndex);
+            var resetDeadline = BenchClock.AddSaturating(phaseStart, ramp.GuardNs);
+            var sampleEnd = BenchClock.AddSaturating(resetDeadline, ramp.SampleNs);
+            var phaseEnd = BenchClock.AddSaturating(sampleEnd, ramp.DrainNs);
+            await DriveRampTrafficAsync(
+                config, managers, peers, connected, plans, originIds, lastInputSeq, metrics,
+                progress, payloadValidation, schedule, phaseStart, ramp, cancellationToken).ConfigureAwait(false);
+
+            metrics.Reset();
+            metrics.SetObservationWindow(resetDeadline, sampleEnd);
+            config.Scenario?.RegisterExpectedLatestFlows(
+                metrics, (uint)target, config.OriginBase, resetDeadline, (uint)target);
+
+            await AddConnectionsAsync(target, resetDeadline, observeStop: true).ConfigureAwait(false);
+            for (var i = 0; i < target; i++)
+            {
+                plans[i] ??= new BenchPlan(streams, BenchClock.NowNs(), schedule.StartAtNs, schedule.StopAtNs);
+            }
+
+            await DriveRampTrafficAsync(
+                config, managers, peers, connected, plans, originIds, lastInputSeq, metrics,
+                progress, payloadValidation, schedule, resetDeadline, ramp, cancellationToken).ConfigureAwait(false);
+
+            await DriveRampTrafficAsync(
+                config, managers, peers, connected, plans, originIds, lastInputSeq, metrics,
+                progress, payloadValidation, schedule, phaseEnd, ramp, cancellationToken).ConfigureAwait(false);
+
+            await File.WriteAllTextAsync(
+                BenchRampConfig.SnapshotPath(metricsPath, phaseIndex, target),
+                metrics.ToJson() + "\n",
+                new UTF8Encoding(false),
+                CancellationToken.None).ConfigureAwait(false);
+            phaseIndex++;
+            ramp.ThrowIfStopRequested();
+        }
+    }
+    catch (BenchRampStopException)
+    {
+    }
+
+    PumpAll(0f);
+    var metricsJson = metrics.ToJson();
+    await File.WriteAllTextAsync(metricsPath, metricsJson + "\n", new UTF8Encoding(false), CancellationToken.None)
+        .ConfigureAwait(false);
+    var doneJson = progress is null
+        ? BenchProgress.AttachValidationToDoneStats(metricsJson, payloadValidation.Count)
+        : BenchProgress.AttachToDoneStats(metricsJson, progress.ClientSnapshot(), payloadValidation.Count);
+    if (control is not null)
+    {
+        await control.DoneAsync(doneJson, CancellationToken.None).ConfigureAwait(false);
+    }
+    return 0;
+}
+
+static async Task DriveRampTrafficAsync(
+    ClientConfig config,
+    NetManager[] managers,
+    NetPeer[] peers,
+    bool[] connected,
+    BenchPlan?[] plans,
+    uint[] originIds,
+    ulong[] lastInputSeq,
+    BenchMetrics metrics,
+    BenchAuthoritativeProgressTracker? progress,
+    BenchPayloadValidation payloadValidation,
+    BenchSchedule schedule,
+    ulong deadlineNs,
+    BenchRampConfig ramp,
+    CancellationToken cancellationToken)
+{
+    if (deadlineNs > schedule.StopAtNs)
+    {
+        throw new InvalidOperationException("ramp phases exceed the scheduled measurement window");
+    }
+    var lastPump = BenchClock.NowNs();
+    while (BenchClock.NowNs() < deadlineNs)
+    {
+        ramp.ThrowIfStopRequested();
+        cancellationToken.ThrowIfCancellationRequested();
+        var now = BenchClock.NowNs();
+        var sendThrough = now < deadlineNs ? now : deadlineNs - 1;
+        metrics.Tick(now);
+        for (var i = 0; i < plans.Length; i++)
+        {
+            if (!connected[i] || plans[i] is null)
+            {
+                continue;
+            }
+            while (plans[i]!.TryNext(sendThrough, out var slot))
+            {
+                SendSlot(
+                    peers[i], originIds[i], i, slot, config, metrics,
+                    ref lastInputSeq[i], progress, payloadValidation);
+            }
+        }
+        var pumpNow = BenchClock.NowNs();
+        foreach (var manager in managers)
+        {
+            if (manager is null)
+            {
+                continue;
+            }
+            manager.PollEvents();
+            manager.ManualUpdate((float)(BenchClock.SaturatingSub(pumpNow, lastPump) / 1_000_000.0));
+        }
+        lastPump = pumpNow;
+
+        var next = deadlineNs;
+        foreach (var plan in plans)
+        {
+            if (plan is not null && plan.PeekNs() < next)
+            {
+                next = plan.PeekNs();
+            }
+        }
+        now = BenchClock.NowNs();
+        if (now < next && next - now >= 1_000_000UL)
+        {
+            await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await Task.Yield();
+        }
     }
 }
 

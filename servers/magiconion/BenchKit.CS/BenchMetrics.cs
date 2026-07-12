@@ -42,6 +42,12 @@ public sealed class BenchMetrics
             Count++;
         }
 
+        public void Reset()
+        {
+            Count = 0;
+            Array.Clear(Bins);
+        }
+
         public ulong Percentile(double p)
         {
             if (Count == 0)
@@ -128,6 +134,9 @@ public sealed class BenchMetrics
     private ulong rawRecvMeasured;
     private ulong rawRecvUnmeasured;
     private ulong rawTimestampOrderViolations;
+    private bool observationWindowEnabled;
+    private ulong observationStartNs;
+    private ulong observationStopNs = ulong.MaxValue;
 
     public BenchMetrics(BenchMetricsConfig config)
     {
@@ -206,6 +215,11 @@ public sealed class BenchMetrics
 
     public void OnSlot(BenchHeader header, bool submitted)
     {
+        if (observationWindowEnabled &&
+            (header.SchedTsNs <= observationStartNs || header.SchedTsNs > observationStopNs))
+        {
+            return;
+        }
         rawSlots++;
         if (submitted)
         {
@@ -240,6 +254,11 @@ public sealed class BenchMetrics
 
     public void OnRecv(uint localIndex, BenchHeader header, ulong recvTsNs)
     {
+        if (observationWindowEnabled &&
+            (header.SchedTsNs <= observationStartNs || header.SchedTsNs > observationStopNs))
+        {
+            return;
+        }
         if ((header.Flags & BenchConstants.FlagMeasure) == 0)
         {
             rawRecvUnmeasured++;
@@ -328,11 +347,19 @@ public sealed class BenchMetrics
 
     public void Tick(ulong nowNs)
     {
+        if (observationWindowEnabled &&
+            (nowNs < observationStartNs || observationStartNs >= observationStopNs))
+        {
+            return;
+        }
+        // Header accounting uses (start, stop], but periodic staleness samples
+        // remain [start, stop) so the stop-boundary packet cannot race a tick.
+        var sampleThroughNs = Math.Min(nowNs, observationStopNs - 1);
         if (nextStalenessSampleNs == 0)
         {
-            nextStalenessSampleNs = nowNs;
+            nextStalenessSampleNs = Math.Max(nowNs, observationStartNs);
         }
-        while (nextStalenessSampleNs <= nowNs)
+        while (nextStalenessSampleNs <= sampleThroughNs)
         {
             var sampleNs = nextStalenessSampleNs;
             foreach (var pair in latest)
@@ -361,6 +388,54 @@ public sealed class BenchMetrics
 
     public BenchRawCounts RawCounts() =>
         new(rawSlots, rawSubmitted, rawRecvMeasured, rawRecvUnmeasured, rawTimestampOrderViolations);
+
+    // Ramp benchmarks reuse one process while changing the active connection
+    // set. Reset only the observation window; configured traffic/deadlines and
+    // the immutable bounds remain in force. Callers must re-register the
+    // expected latest-value flows for the newly active roster after reset.
+    public void Reset()
+    {
+        classes[BenchConstants.ClassLossTolerant] = new ClassMetrics();
+        classes[BenchConstants.ClassMustDeliver] = new ClassMetrics();
+        staleness.Reset();
+        latest.Clear();
+        seen.Clear();
+
+        foreach (var key in traffic.Keys.ToArray())
+        {
+            traffic[key] = new TrafficMetrics
+            {
+                DeadlineNs = deadlines.TryGetValue(
+                    new DeadlineKey(key.TrafficId, key.Direction), out var deadlineNs)
+                        ? deadlineNs
+                        : config.DeadlineNs,
+            };
+        }
+
+        nextStalenessSampleNs = 0;
+        rawSlots = 0;
+        rawSubmitted = 0;
+        rawRecvMeasured = 0;
+        rawRecvUnmeasured = 0;
+        rawTimestampOrderViolations = 0;
+        observationWindowEnabled = false;
+        observationStartNs = 0;
+        observationStopNs = ulong.MaxValue;
+    }
+
+    public void SetObservationWindow(ulong startNs, ulong stopNs)
+    {
+        if (stopNs <= startNs)
+        {
+            throw new ArgumentOutOfRangeException(nameof(stopNs), "observation window must be non-empty");
+        }
+        // Account headers scheduled in (startNs, stopNs]. OnRecv intentionally
+        // accepts matching headers that arrive later during the drain period.
+        observationWindowEnabled = true;
+        observationStartNs = startNs;
+        observationStopNs = stopNs;
+        nextStalenessSampleNs = 0;
+    }
 
     public BenchClassCounts Counts(bool mustDeliver) => FinalizedCounts(
         classes[mustDeliver ? BenchConstants.ClassMustDeliver : BenchConstants.ClassLossTolerant].Counts);

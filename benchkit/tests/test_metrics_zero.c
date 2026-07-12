@@ -91,6 +91,129 @@ int main(void) {
   CHECK(strstr(buf, "\"loss_tolerant\"") != NULL);
   unlink(json_path);
 
+  // A ramp phase reset retains config/deadlines but discards all accumulated
+  // samples, dedup keys, and expected flows. The same sequence number must be
+  // accepted again in the next phase.
+  CHECK(bk_metrics_set_traffic_deadline(
+            metrics, 9, BK_DIRECTION_SERVER_TO_CLIENT, 7 * period_ns) == 0);
+  const bk_header reset_header = {
+      .seq = 1,
+      .sched_ts_ns = 100 * period_ns,
+      .send_ts_ns = 100 * period_ns,
+      .flags = BK_FLAG_MEASURE | BK_FLAG_MUST_DELIVER |
+               BK_FLAG_DIRECTION(BK_DIRECTION_SERVER_TO_CLIENT),
+      .origin_id = 0,
+      .traffic_id = 9,
+  };
+  bk_metrics_on_slot(metrics, &reset_header, true);
+  bk_metrics_on_recv(metrics, 0, &reset_header, 106 * period_ns);
+  CHECK(bk_metrics_expect_latest(metrics, 0, 0, 8,
+                                 BK_DIRECTION_SERVER_TO_CLIENT,
+                                 reset_header.sched_ts_ns) == 0);
+  bk_metrics_reset(metrics);
+  bk_class_counts reset_counts = {0};
+  bk_metrics_counts(metrics, false, &reset_counts);
+  CHECK(reset_counts.slots == 0);
+  CHECK(reset_counts.delivered_unique == 0);
+  CHECK(reset_counts.expected_flows == 0);
+  bk_metrics_counts(metrics, true, &reset_counts);
+  CHECK(reset_counts.slots == 0);
+  CHECK(reset_counts.delivered_unique == 0);
+  uint64_t raw_slots = 1;
+  uint64_t raw_submitted = 1;
+  uint64_t raw_measured = 1;
+  uint64_t raw_unmeasured = 1;
+  bk_metrics_raw_counts(metrics, &raw_slots, &raw_submitted, &raw_measured,
+                        &raw_unmeasured);
+  CHECK(raw_slots == 0);
+  CHECK(raw_submitted == 0);
+  CHECK(raw_measured == 0);
+  CHECK(raw_unmeasured == 0);
+
+  bk_metrics_on_slot(metrics, &reset_header, true);
+  bk_metrics_on_recv(metrics, 0, &reset_header, 106 * period_ns);
+  bk_metrics_counts(metrics, true, &reset_counts);
+  CHECK(reset_counts.slots == 1);
+  CHECK(reset_counts.delivered_unique == 1);
+  CHECK(reset_counts.duplicates == 0);
+  CHECK(reset_counts.deadline_hit == 1);  // 6ms <= retained 7ms deadline
+
+  // A cohort accepts late arrival of an in-window slot but rejects both slot
+  // and receive accounting for sched timestamps outside the phase.
+  bk_metrics_reset(metrics);
+  CHECK(bk_metrics_set_cohort(metrics, 200 * period_ns,
+                              300 * period_ns) == 0);
+  CHECK(bk_metrics_set_cohort(metrics, 300 * period_ns,
+                              300 * period_ns) == -1);
+  bk_header at_start = reset_header;
+  at_start.seq = 2;
+  at_start.sched_ts_ns = 200 * period_ns;
+  at_start.send_ts_ns = at_start.sched_ts_ns;
+  bk_header before = reset_header;
+  before.seq = 3;
+  before.sched_ts_ns = 199 * period_ns;
+  before.send_ts_ns = before.sched_ts_ns;
+  bk_header inside = reset_header;
+  inside.seq = 4;
+  inside.sched_ts_ns = 250 * period_ns;
+  inside.send_ts_ns = inside.sched_ts_ns;
+  bk_header at_stop = reset_header;
+  at_stop.seq = 5;
+  at_stop.sched_ts_ns = 300 * period_ns;
+  at_stop.send_ts_ns = at_stop.sched_ts_ns;
+  bk_header after = reset_header;
+  after.seq = 6;
+  after.sched_ts_ns = 301 * period_ns;
+  after.send_ts_ns = after.sched_ts_ns;
+  bk_metrics_on_slot(metrics, &before, true);
+  bk_metrics_on_slot(metrics, &at_start, true);
+  bk_metrics_on_slot(metrics, &inside, true);
+  bk_metrics_on_slot(metrics, &at_stop, true);
+  bk_metrics_on_slot(metrics, &after, true);
+  bk_metrics_on_recv(metrics, 0, &before, 310 * period_ns);
+  bk_metrics_on_recv(metrics, 0, &at_start, 310 * period_ns);
+  bk_metrics_on_recv(metrics, 0, &inside, 310 * period_ns);
+  bk_metrics_on_recv(metrics, 0, &at_stop, 310 * period_ns);
+  bk_metrics_on_recv(metrics, 0, &after, 310 * period_ns);
+  bk_metrics_counts(metrics, true, &reset_counts);
+  CHECK(reset_counts.slots == 2);
+  CHECK(reset_counts.delivered_unique == 2);
+  bk_metrics_raw_counts(metrics, &raw_slots, &raw_submitted, &raw_measured,
+                        &raw_unmeasured);
+  CHECK(raw_slots == 2);
+  CHECK(raw_submitted == 2);
+  CHECK(raw_measured == 2);
+
+  // Repeated ticks during the accounting drain clamp to cohort_stop-1. They
+  // must not append staleness samples beyond the three 1ms points in-window.
+  bk_metrics_reset(metrics);
+  CHECK(bk_metrics_set_cohort(metrics, 400 * period_ns,
+                              403 * period_ns) == 0);
+  CHECK(bk_metrics_expect_latest(metrics, 0, 0, 7,
+                                 BK_DIRECTION_ROOM_RELAY,
+                                 400 * period_ns) == 0);
+  bk_metrics_tick(metrics, 400 * period_ns);
+  bk_metrics_tick(metrics, 402 * period_ns);
+  bk_metrics_tick(metrics, 410 * period_ns);
+  bk_metrics_tick(metrics, 420 * period_ns);
+  CHECK(bk_metrics_dump_json(metrics, json_path) == 0);
+  FILE *cohort_json = fopen(json_path, "r");
+  CHECK(cohort_json != NULL);
+  CHECK(fseek(cohort_json, 0, SEEK_END) == 0);
+  const long cohort_size = ftell(cohort_json);
+  CHECK(cohort_size > 0);
+  CHECK(fseek(cohort_json, 0, SEEK_SET) == 0);
+  char *cohort_doc = (char *)malloc((size_t)cohort_size + 1u);
+  CHECK(cohort_doc != NULL);
+  CHECK(fread(cohort_doc, 1, (size_t)cohort_size, cohort_json) ==
+        (size_t)cohort_size);
+  cohort_doc[cohort_size] = '\0';
+  CHECK(fclose(cohort_json) == 0);
+  CHECK(strstr(cohort_doc, "\"count\":3") != NULL);
+  CHECK(strstr(cohort_doc, "\"count\":4") == NULL);
+  free(cohort_doc);
+  unlink(json_path);
+
   bk_metrics_free(metrics);
   fx_transport_free(t);
 

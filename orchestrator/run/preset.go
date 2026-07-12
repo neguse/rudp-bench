@@ -125,6 +125,7 @@ func (cfg *RunConfig) applyPreset() error {
 		"drain":               cfg.Drain.Duration != 0,
 		"staleness_period_ns": cfg.StalenessPeriodNS != 0,
 		"steady_warmup":       cfg.SteadyWarmup,
+		"ramp":                cfg.Ramp != nil,
 	} {
 		if overridden {
 			return fmt.Errorf("preset %q pins %s; remove it from the config", cfg.Preset, field)

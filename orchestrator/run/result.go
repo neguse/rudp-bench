@@ -36,11 +36,25 @@ type Result struct {
 	Processes          []ProcessResult     `json:"processes"`
 	Metrics            *MergedMetrics      `json:"metrics,omitempty"`
 	ScenarioEvaluation *ScenarioEvaluation `json:"scenario_evaluation,omitempty"`
+	Ramp               *RampResult         `json:"ramp,omitempty"`
 	Treatment          *TreatmentRecord    `json:"treatment,omitempty"`
 	Samples            []sampler.Series    `json:"samples,omitempty"`
 	Cost               *CostSummary        `json:"cost,omitempty"`
 	Netem              *NetemResult        `json:"netem,omitempty"`
 	Artifacts          map[string]string   `json:"artifacts,omitempty"`
+}
+
+type RampPoint struct {
+	Index       int                `json:"index"`
+	ActiveConns int                `json:"active_conns"`
+	Evaluation  ScenarioEvaluation `json:"evaluation"`
+}
+
+type RampResult struct {
+	Timeline   []RampPoint `json:"timeline"`
+	ScoreConns int         `json:"score_conns,omitempty"`
+	Censored   bool        `json:"censored"`
+	Cause      string      `json:"cause"`
 }
 
 type TreatmentRecord struct {
@@ -170,9 +184,9 @@ type NetemLossEvidence struct {
 	Supported     bool                       `json:"supported"`
 	Deterministic *DeterministicLossEvidence `json:"deterministic,omitempty"`
 	Scope         string                     `json:"scope"`
-	Schedule  control.ScheduleMessage   `json:"schedule"`
-	Before    *netops.QdiscPairSnapshot `json:"before,omitempty"`
-	After     *netops.QdiscPairSnapshot `json:"after,omitempty"`
-	Delta     *netops.QdiscPairDelta    `json:"delta,omitempty"`
-	Errors    []string                  `json:"errors,omitempty"`
+	Schedule      control.ScheduleMessage    `json:"schedule"`
+	Before        *netops.QdiscPairSnapshot  `json:"before,omitempty"`
+	After         *netops.QdiscPairSnapshot  `json:"after,omitempty"`
+	Delta         *netops.QdiscPairDelta     `json:"delta,omitempty"`
+	Errors        []string                   `json:"errors,omitempty"`
 }

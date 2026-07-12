@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -116,13 +117,18 @@ type RunConfig struct {
 	// Preset は凍結 reference preset 名(preset.go)。指定時は scenario /
 	// netem / warmup / duration / drain / staleness を preset が固定し、
 	// config 側での上書きを拒否する(ADR-0002 / ADR-0004)
-	Preset   string        `json:"preset,omitempty"`
-	Scenario *ScenarioSpec `json:"scenario,omitempty"`
+	Preset        string        `json:"preset,omitempty"`
+	Scenario      *ScenarioSpec `json:"scenario,omitempty"`
 	ServerCommand CommandConfig `json:"server_command"`
 	ClientCommand CommandConfig `json:"client_command"`
 	ClientProcs   int           `json:"client_procs"`
 	TotalConns    int           `json:"total_conns"`
-	Warmup        Duration      `json:"warmup"`
+	// Ramp enables the lightweight, single-process capacity probe. TotalConns
+	// is the censoring ceiling; endpoints start at StartConns and add StepConns
+	// after each guard+sample+drain phase. Duration is derived from the number of
+	// phases so every configured level has exactly one snapshot opportunity.
+	Ramp   *RampConfig `json:"ramp,omitempty"`
+	Warmup Duration    `json:"warmup"`
 	// SteadyWarmup: 定常判定つき warmup(benchspec v2)。true のとき Warmup は
 	// 上限になり、全 client の送受レート定常を検出した時点で計測窓が確定する。
 	// 接続ストーム直後の非定常区間が計測窓に入る二峰性(ledger #14)への対処
@@ -149,6 +155,61 @@ type RunConfig struct {
 	ControlTimeout     Duration `json:"control_timeout,omitempty"`
 	SamplerInterval    Duration `json:"sampler_interval,omitempty"`
 	ProcessExitTimeout Duration `json:"process_exit_timeout,omitempty"`
+}
+
+type RampConfig struct {
+	StartConns int      `json:"start_conns"`
+	StepConns  int      `json:"step_conns"`
+	Guard      Duration `json:"guard"`
+	Sample     Duration `json:"sample"`
+	// Drain is an accounting tail for packets scheduled inside Sample. It is
+	// part of the same observation (not a confirmation window), and must cover
+	// the scenario's largest must-deliver deadline.
+	Drain Duration `json:"drain"`
+}
+
+func (r RampConfig) levels(totalConns int) (int, error) {
+	if r.StartConns <= 0 || r.StartConns > totalConns || r.StepConns <= 0 {
+		return 0, fmt.Errorf("invalid ramp connection range")
+	}
+	remaining := totalConns - r.StartConns
+	// Include the starting level. The final level is clamped to TotalConns.
+	levels := 1 + remaining/r.StepConns
+	if remaining%r.StepConns != 0 {
+		levels++
+	}
+	return levels, nil
+}
+
+func (r RampConfig) duration(totalConns int) (time.Duration, error) {
+	levels, err := r.levels(totalConns)
+	if err != nil {
+		return 0, err
+	}
+	if r.Guard.Duration < 0 || r.Sample.Duration <= 0 || r.Drain.Duration < 0 ||
+		r.Guard.Duration > time.Duration(math.MaxInt64)-r.Sample.Duration {
+		return 0, fmt.Errorf("invalid ramp phase duration")
+	}
+	phase := r.Guard.Duration + r.Sample.Duration
+	if phase > time.Duration(math.MaxInt64)-r.Drain.Duration {
+		return 0, fmt.Errorf("invalid ramp phase duration")
+	}
+	phase += r.Drain.Duration
+	if int64(levels) > math.MaxInt64/int64(phase) {
+		return 0, fmt.Errorf("ramp duration overflows")
+	}
+	return time.Duration(levels) * phase, nil
+}
+
+func (r RampConfig) activeConns(index, totalConns int) int {
+	if index <= 0 {
+		return r.StartConns
+	}
+	remaining := totalConns - r.StartConns
+	if index > remaining/r.StepConns {
+		return totalConns
+	}
+	return r.StartConns + index*r.StepConns
 }
 
 type NetemRegime struct {
@@ -253,6 +314,11 @@ func (cfg *RunConfig) applyWorkload() error {
 }
 
 func (cfg RunConfig) withDefaults() RunConfig {
+	if cfg.Ramp != nil {
+		if duration, err := cfg.Ramp.duration(cfg.TotalConns); err == nil {
+			cfg.Duration.Duration = duration
+		}
+	}
 	if cfg.AttemptedThreshold == 0 {
 		cfg.AttemptedThreshold = defaultAttemptedThreshold
 	}
@@ -285,6 +351,63 @@ func (cfg RunConfig) validate() error {
 	}
 	if cfg.TotalConns <= 0 {
 		errs = append(errs, fmt.Errorf("total_conns must be > 0, got %d", cfg.TotalConns))
+	}
+	if cfg.Ramp != nil {
+		if cfg.ClientProcs != 1 {
+			errs = append(errs, fmt.Errorf("ramp requires client_procs=1, got %d", cfg.ClientProcs))
+		}
+		if cfg.Scenario == nil {
+			errs = append(errs, fmt.Errorf("ramp requires scenario SLOs"))
+		}
+		if cfg.SteadyWarmup {
+			errs = append(errs, fmt.Errorf("ramp and steady_warmup are mutually exclusive"))
+		}
+		if cfg.Ramp.StartConns <= 0 || cfg.Ramp.StartConns > cfg.TotalConns {
+			errs = append(errs, fmt.Errorf("ramp.start_conns must be between 1 and total_conns, got %d", cfg.Ramp.StartConns))
+		}
+		if cfg.Ramp.StepConns <= 0 {
+			errs = append(errs, fmt.Errorf("ramp.step_conns must be > 0, got %d", cfg.Ramp.StepConns))
+		}
+		if cfg.TotalConns > 999999 {
+			errs = append(errs, fmt.Errorf("ramp total_conns=%d exceeds six-digit snapshot contract", cfg.TotalConns))
+		}
+		if cfg.Ramp.Guard.Duration < 0 {
+			errs = append(errs, fmt.Errorf("ramp.guard must be >= 0"))
+		}
+		if cfg.Ramp.Sample.Duration <= 0 {
+			errs = append(errs, fmt.Errorf("ramp.sample must be > 0"))
+		}
+		if cfg.Ramp.Drain.Duration < 0 {
+			errs = append(errs, fmt.Errorf("ramp.drain must be >= 0"))
+		}
+		if cfg.Scenario != nil {
+			maxDeadlineNS := scenarioMaxMustDeliverDeadlineNS(*cfg.Scenario)
+			if maxDeadlineNS > math.MaxInt64 {
+				errs = append(errs, fmt.Errorf("scenario must-deliver deadline_ns=%d exceeds ramp duration range", maxDeadlineNS))
+			} else if cfg.Ramp.Drain.Duration < time.Duration(maxDeadlineNS) {
+				errs = append(errs, fmt.Errorf("ramp.drain=%s must cover maximum must-deliver deadline %s",
+					cfg.Ramp.Drain.Duration, time.Duration(maxDeadlineNS)))
+			}
+		}
+		if duration, err := cfg.Ramp.duration(cfg.TotalConns); err != nil {
+			errs = append(errs, err)
+		} else if cfg.Duration.Duration != duration {
+			errs = append(errs, fmt.Errorf("ramp duration=%s, want derived %s", cfg.Duration.Duration, duration))
+		}
+		if cfg.Scenario != nil && cfg.Ramp.Sample.Duration > 0 {
+			for _, trafficCase := range scenarioMetricCases(*cfg.Scenario) {
+				if trafficCase.spec == nil {
+					continue
+				}
+				for className, classSpec := range enabledTrafficClasses(*trafficCase.spec) {
+					minSlots, _, err := expectedSlotRange(classSpec.RateHz, cfg.Ramp.Sample.Duration, 1)
+					if err != nil || minSlots == 0 {
+						errs = append(errs, fmt.Errorf("ramp.sample %s is too short to guarantee a %s/%s slot at rate %g",
+							cfg.Ramp.Sample.Duration, trafficCase.name, className, classSpec.RateHz))
+					}
+				}
+			}
+		}
 	}
 	if cfg.Duration.Duration < 0 || cfg.Warmup.Duration < 0 || cfg.Drain.Duration < 0 {
 		errs = append(errs, fmt.Errorf("warmup, duration, and drain must be >= 0"))
@@ -329,6 +452,19 @@ func (cfg RunConfig) validate() error {
 		errs = append(errs, fmt.Errorf("timeouts and sampler_interval must be >= 0"))
 	}
 	return joinErrors(errs)
+}
+
+func scenarioMaxMustDeliverDeadlineNS(scenario ScenarioSpec) uint64 {
+	var max uint64
+	for _, trafficCase := range scenarioMetricCases(scenario) {
+		if trafficCase.spec == nil || trafficCase.spec.MustDeliver.RateHz <= 0 {
+			continue
+		}
+		if deadline := trafficCase.spec.MustDeliver.DeadlineNS; deadline > max {
+			max = deadline
+		}
+	}
+	return max
 }
 
 func (n NetemRegime) pairSpec() netops.PairSpec {

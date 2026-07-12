@@ -86,6 +86,14 @@ func writeSummary(path string, result *Result) error {
 				traffic.NeverReceivedFlows, traffic.Cause)
 		}
 	}
+	if ramp := result.Ramp; ramp != nil {
+		fmt.Fprintf(f, "ramp: score_conns=%d censored=%t cause=%s\n",
+			ramp.ScoreConns, ramp.Censored, ramp.Cause)
+		for _, point := range ramp.Timeline {
+			fmt.Fprintf(f, "- ramp index=%d active_conns=%d ok=%t cause=%s\n",
+				point.Index, point.ActiveConns, point.Evaluation.OK, point.Evaluation.Cause)
+		}
+	}
 	if cost := result.Cost; cost != nil {
 		for _, role := range []*ProcessCost{cost.Server, cost.Clients} {
 			if role == nil {

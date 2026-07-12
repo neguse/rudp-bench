@@ -1,5 +1,6 @@
 #include "benchkit.h"
 #include "../scenario_cli.h"
+#include "../ramp.h"
 
 #include <enet/enet.h>
 
@@ -496,7 +497,8 @@ static size_t state_payload_size(const server_config *cfg,
              : cfg->scenario.state.payload_lt;
 }
 
-static void send_state_slot(server_context *ctx, const bk_slot *slot) {
+static void send_state_slot(server_context *ctx, const bk_slot *slot,
+                            uint32_t ramp_target_conns) {
   if ((slot->flags & (BK_FLAG_MEASURE | BK_FLAG_MUST_DELIVER)) ==
       BK_FLAG_MEASURE) {
     ctx->stats->server_state_ticks++;
@@ -507,8 +509,10 @@ static void send_state_slot(server_context *ctx, const bk_slot *slot) {
       (slot->flags & BK_FLAG_MUST_DELIVER) != 0
           ? ENET_PACKET_FLAG_RELIABLE
           : ENET_PACKET_FLAG_UNSEQUENCED;
-  for (uint32_t target = 0; target < ctx->cfg->scenario.total_conns;
-       ++target) {
+  const uint32_t targets = ramp_target_conns != 0
+                               ? ramp_target_conns
+                               : ctx->cfg->scenario.total_conns;
+  for (uint32_t target = 0; target < targets; ++target) {
     ENetPeer *peer = ctx->roster[target];
     bk_header header;
     make_state_header(ctx->cfg, slot, 0, &header);
@@ -538,15 +542,14 @@ static void send_state_slot(server_context *ctx, const bk_slot *slot) {
 }
 
 static void mark_state_unsent(server_context *ctx, bk_plan *plan,
-                              uint64_t cutoff_ns) {
+                              uint64_t cutoff_ns, uint32_t target_conns) {
   bk_slot slot;
   while (bk_plan_next(plan, cutoff_ns, &slot)) {
     if ((slot.flags & (BK_FLAG_MEASURE | BK_FLAG_MUST_DELIVER)) ==
         BK_FLAG_MEASURE) {
       ctx->stats->server_state_ticks++;
     }
-    for (uint32_t target = 0; target < ctx->cfg->scenario.total_conns;
-         ++target) {
+    for (uint32_t target = 0; target < target_conns; ++target) {
       (void)target;
       bk_header header;
       make_state_header(ctx->cfg, &slot, 0, &header);
@@ -566,6 +569,23 @@ static int expect_client_inputs(server_context *ctx,
             ctx->metrics, origin, origin,
             ctx->cfg->scenario.input.traffic_id,
             BK_DIRECTION_CLIENT_TO_SERVER, schedule->start_at_ns) != 0) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static int expect_target_client_inputs(server_context *ctx,
+                                       uint32_t target_conns,
+                                       uint64_t first_sched_ts_ns) {
+  if (ctx->cfg->scenario.input.rate_lt == 0.0) {
+    return 0;
+  }
+  for (uint32_t origin = 0; origin < target_conns; ++origin) {
+    if (bk_metrics_expect_latest(
+            ctx->metrics, origin, origin,
+            ctx->cfg->scenario.input.traffic_id,
+            BK_DIRECTION_CLIENT_TO_SERVER, first_sched_ts_ns) != 0) {
       return -1;
     }
   }
@@ -645,6 +665,11 @@ int main(int argc, char **argv) {
     usage(argv[0]);
     return EXIT_FAILURE;
   }
+  bk_ramp_config ramp;
+  if (bk_ramp_config_load(cfg.scenario.total_conns, &ramp) != 0) {
+    fprintf(stderr, "invalid BENCH_RAMP_* configuration\n");
+    return EXIT_FAILURE;
+  }
 
   if (signal(SIGINT, on_signal) == SIG_ERR ||
       signal(SIGTERM, on_signal) == SIG_ERR) {
@@ -663,7 +688,10 @@ int main(int argc, char **argv) {
   address.host = ENET_HOST_ANY;
   address.port = cfg.port;
 
-  ENetHost *host = enet_host_create(&address, ENET_BENCH_MAX_PEERS, 2, 0, 0);
+  const size_t host_peer_count =
+      ramp.enabled ? (size_t)cfg.scenario.total_conns
+                   : (size_t)ENET_BENCH_MAX_PEERS;
+  ENetHost *host = enet_host_create(&address, host_peer_count, 2, 0, 0);
   if (host == NULL) {
     fprintf(stderr, "enet_host_create server failed on port %" PRIu16 "\n",
             cfg.port);
@@ -767,23 +795,32 @@ int main(int argc, char **argv) {
   bool state_marked_unsent = false;
   int run_rc = 0;
   bk_plan *state_plan = NULL;
+  bk_ramp_phase ramp_phase;
+  if (ramp.enabled) {
+    bk_ramp_phase_begin(&ramp, schedule.start_at_ns, &ramp_phase);
+  }
   while (!g_stop) {
     uint64_t now = bk_now_ns();
-    if (authoritative && !schedule_valid &&
+    if (ramp.enabled && bk_ramp_stop_requested()) {
+      break;
+    }
+    if (authoritative && !ramp.enabled && !schedule_valid &&
         ctx.registered_count == cfg.scenario.total_conns) {
       schedule.start_at_ns = add_ns(now, DEV_WARMUP_NS);
       schedule.stop_at_ns = add_ns(schedule.start_at_ns, DEV_DURATION_NS);
       schedule.drain_until_ns = add_ns(schedule.stop_at_ns, DEV_DRAIN_NS);
       schedule_valid = true;
     }
-    if (authoritative && schedule_valid && !ctx.roster_frozen &&
+    if (authoritative && !ramp.enabled && schedule_valid &&
+        !ctx.roster_frozen &&
         now >= schedule.start_at_ns) {
       fprintf(stderr,
               "authoritative roster incomplete before measurement start\n");
       run_rc = -1;
       break;
     }
-    if (authoritative && schedule_valid && !ctx.roster_frozen &&
+    if (authoritative && !ramp.enabled && schedule_valid &&
+        !ctx.roster_frozen &&
         ctx.registered_count == cfg.scenario.total_conns) {
       bk_stream streams[2];
       int n_streams = 0;
@@ -801,7 +838,70 @@ int main(int argc, char **argv) {
       ctx.roster_frozen = true;
     }
 
-    if (control != NULL && !window_final) {
+    if (authoritative && ramp.enabled && schedule_valid &&
+        state_plan == NULL) {
+      bk_stream streams[2];
+      int n_streams = 0;
+      if (build_state_streams(&cfg, streams, &n_streams) != 0) {
+        run_rc = -1;
+        break;
+      }
+      state_plan = bk_plan_new(streams, n_streams, now,
+                               schedule.start_at_ns, schedule.stop_at_ns);
+      if (state_plan == NULL) {
+        fprintf(stderr, "ramp authoritative state initialization failed\n");
+        run_rc = -1;
+        break;
+      }
+    }
+
+    if (ramp.enabled && now >= ramp_phase.phase_start_ns) {
+      if (!ramp_phase.reset_done && now >= ramp_phase.phase_end_ns) {
+        fprintf(stderr, "ramp phase stalled across reset and phase end\n");
+        run_rc = -1;
+        break;
+      }
+      // Install the phase accounting window at phase start. The cohort still
+      // starts after guard, so packets serviced during guard are ignored.
+      if (!ramp_phase.reset_done) {
+        bk_metrics_reset(metrics);
+        if (bk_metrics_set_cohort(metrics, ramp_phase.reset_at_ns,
+                                  ramp_phase.sample_end_ns) != 0 ||
+            (authoritative &&
+             expect_target_client_inputs(&ctx, ramp_phase.target_conns,
+                                         ramp_phase.reset_at_ns) != 0)) {
+          fprintf(stderr, "ramp expected-flow registration failed\n");
+          run_rc = -1;
+          break;
+        }
+        ramp_phase.sample_conns = ramp_phase.target_conns;
+        ramp_phase.reset_done = 1;
+      }
+      if (now >= ramp_phase.phase_end_ns) {
+        if (state_plan != NULL) {
+          mark_state_unsent(&ctx, state_plan,
+                            ramp_phase.sample_end_ns,
+                            ramp_phase.target_conns);
+        }
+        if (!ramp_phase.reset_done ||
+            bk_ramp_dump_metrics(metrics, ramp_phase.phase,
+                                 ramp_phase.sample_conns) != 0) {
+          fprintf(stderr, "ramp metrics dump failed\n");
+          run_rc = -1;
+          break;
+        }
+        if (bk_ramp_stop_requested()) {
+          break;
+        }
+        if (!bk_ramp_phase_advance(&ramp, cfg.scenario.total_conns,
+                                   &ramp_phase)) {
+          break;
+        }
+        continue;
+      }
+    }
+
+    if (control != NULL && !window_final && !ramp.enabled) {
       if (now >= schedule.start_at_ns) {
         window_final = true;
       } else {
@@ -829,15 +929,18 @@ int main(int argc, char **argv) {
     if (state_plan != NULL && now < schedule.stop_at_ns) {
       bk_slot slot;
       while (bk_plan_next(state_plan, now, &slot)) {
-        send_state_slot(&ctx, &slot);
+        send_state_slot(&ctx, &slot,
+                        ramp.enabled ? ramp_phase.target_conns : 0);
       }
     } else if (state_plan != NULL && !state_marked_unsent) {
       const uint64_t cutoff =
           schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
-      mark_state_unsent(&ctx, state_plan, cutoff);
+      mark_state_unsent(&ctx, state_plan, cutoff,
+                        cfg.scenario.total_conns);
       state_marked_unsent = true;
     }
-    if (control != NULL && now >= schedule.drain_until_ns) {
+    if (!ramp.enabled && control != NULL &&
+        now >= schedule.drain_until_ns) {
       break;
     }
 
@@ -853,6 +956,19 @@ int main(int argc, char **argv) {
         }
       }
     }
+    if (ramp.enabled) {
+      const uint64_t phase_due = ramp_phase.reset_done
+                                     ? ramp_phase.phase_end_ns
+                                     : ramp_phase.phase_start_ns;
+      if (phase_due <= now) {
+        timeout_ms = 0;
+      } else {
+        const uint64_t wait_ms = (phase_due - now) / 1000000ull;
+        if (wait_ms < timeout_ms) {
+          timeout_ms = (enet_uint32)wait_ms;
+        }
+      }
+    }
     if (service_once(&ctx, timeout_ms) != 0) {
       fprintf(stderr, "enet_host_service failed\n");
       run_rc = -1;
@@ -860,10 +976,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (state_plan != NULL && !state_marked_unsent) {
+  if (!ramp.enabled && state_plan != NULL && !state_marked_unsent) {
     const uint64_t cutoff =
         schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
-    mark_state_unsent(&ctx, state_plan, cutoff);
+    mark_state_unsent(&ctx, state_plan, cutoff, cfg.scenario.total_conns);
   }
 
   char stats_json[4096];
@@ -877,7 +993,7 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  if (write_metrics_out(metrics) != 0) {
+  if (!ramp.enabled && write_metrics_out(metrics) != 0) {
     fprintf(stderr, "failed to write BENCH_METRICS_OUT\n");
     run_rc = -1;
   }

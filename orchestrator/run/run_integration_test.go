@@ -116,6 +116,139 @@ func TestRunIntegrationLocalFakeProcesses(t *testing.T) {
 	}
 }
 
+func TestRunIntegrationRampSnapshots(t *testing.T) {
+	templateCfg, templateServerBase, templateClientBase := rampSnapshotFixture(t, 1)
+	writePassingAuthoritativeRampPhase(t, templateCfg, templateServerBase, templateClientBase, 0, 1, false)
+
+	outDir := t.TempDir()
+	helperArgs := []string{"-test.run=TestFakeProcessHelper", "--"}
+	commonEnv := []string{
+		"RUDP_BENCH_FAKE_PROCESS=1",
+		"FAKE_TRANSPORT=fake",
+		"FAKE_EXPECT_RAMP=1",
+	}
+	scenario := authoritativeFixture()
+	cfg := RunConfig{
+		Transport: "fake",
+		Scenario:  &scenario,
+		ServerCommand: CommandConfig{
+			Path: os.Args[0], Args: helperArgs,
+			Env: append(append([]string{}, commonEnv...),
+				"FAKE_ROLE=server", "FAKE_PROC_INDEX=-1", "FAKE_CONNS=0",
+				"FAKE_RAMP_METRICS_TEMPLATE="+rampSnapshotPath(templateServerBase, 0, 1)),
+		},
+		ClientCommand: CommandConfig{
+			Path: os.Args[0], Args: helperArgs,
+			Env: append(append([]string{}, commonEnv...),
+				"FAKE_ROLE=client", "FAKE_PROC_INDEX=0", "FAKE_CONNS=1",
+				"FAKE_ORIGIN_START=0", "FAKE_ORIGIN_END=1",
+				"FAKE_RAMP_METRICS_TEMPLATE="+rampSnapshotPath(templateClientBase, 0, 1)),
+		},
+		ClientProcs:       1,
+		TotalConns:        1,
+		Warmup:            Duration{Duration: 100 * time.Millisecond},
+		StalenessPeriodNS: defaultStalenessPeriodNS,
+		Ramp: &RampConfig{
+			StartConns: 1,
+			StepConns:  2,
+			Guard:      Duration{},
+			Sample:     Duration{Duration: time.Second},
+			Drain:      Duration{Duration: 100 * time.Millisecond},
+		},
+		OutputDir:          outDir,
+		ControlTimeout:     Duration{Duration: 2 * time.Second},
+		SamplerInterval:    Duration{Duration: 10 * time.Millisecond},
+		ProcessExitTimeout: Duration{Duration: 2 * time.Second},
+	}
+
+	result, err := Run(context.Background(), cfg)
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skipf("AF_UNIX sockets are not permitted in this sandbox: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if result.Verdict != VerdictValid || result.Outcome != OutcomeCensored {
+		t.Fatalf("ramp verdict=%s outcome=%s invalid=%v outcome_reasons=%v",
+			result.Verdict, result.Outcome, result.InvalidReasons, result.OutcomeReasons)
+	}
+	if result.Ramp == nil || !result.Ramp.Censored || len(result.Ramp.Timeline) != 1 {
+		t.Fatalf("ramp result=%+v", result.Ramp)
+	}
+	if result.Metrics != nil {
+		t.Fatalf("fixed final metrics unexpectedly populated: %+v", result.Metrics)
+	}
+}
+
+func TestRunIntegrationRampStopsOnlineAtFirstBreak(t *testing.T) {
+	templateCfg, templateServerBase, templateClientBase := rampSnapshotFixture(t, 1)
+	writePassingAuthoritativeRampPhase(t, templateCfg, templateServerBase, templateClientBase, 0, 1, true)
+
+	outDir := t.TempDir()
+	helperArgs := []string{"-test.run=TestFakeProcessHelper", "--"}
+	commonEnv := []string{
+		"RUDP_BENCH_FAKE_PROCESS=1",
+		"FAKE_TRANSPORT=fake",
+		"FAKE_EXPECT_RAMP=1",
+		"FAKE_RAMP_ONLINE=1",
+	}
+	scenario := authoritativeFixture()
+	cfg := RunConfig{
+		Transport: "fake",
+		Scenario:  &scenario,
+		ServerCommand: CommandConfig{
+			Path: os.Args[0], Args: helperArgs,
+			Env: append(append([]string{}, commonEnv...),
+				"FAKE_ROLE=server", "FAKE_PROC_INDEX=-1", "FAKE_CONNS=0",
+				"FAKE_RAMP_METRICS_TEMPLATE="+rampSnapshotPath(templateServerBase, 0, 1)),
+		},
+		ClientCommand: CommandConfig{
+			Path: os.Args[0], Args: helperArgs,
+			Env: append(append([]string{}, commonEnv...),
+				"FAKE_ROLE=client", "FAKE_PROC_INDEX=0", "FAKE_CONNS=3",
+				"FAKE_ORIGIN_START=0", "FAKE_ORIGIN_END=3",
+				"FAKE_RAMP_METRICS_TEMPLATE="+rampSnapshotPath(templateClientBase, 0, 1)),
+		},
+		ClientProcs:       1,
+		TotalConns:        3,
+		Warmup:            Duration{Duration: 100 * time.Millisecond},
+		StalenessPeriodNS: defaultStalenessPeriodNS,
+		Ramp: &RampConfig{
+			StartConns: 1,
+			StepConns:  2,
+			Sample:     Duration{Duration: time.Second},
+			Drain:      Duration{Duration: 100 * time.Millisecond},
+		},
+		OutputDir:          outDir,
+		ControlTimeout:     Duration{Duration: 2 * time.Second},
+		SamplerInterval:    Duration{Duration: 10 * time.Millisecond},
+		ProcessExitTimeout: Duration{Duration: 2 * time.Second},
+	}
+
+	result, err := Run(context.Background(), cfg)
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skipf("AF_UNIX sockets are not permitted in this sandbox: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if result.Verdict != VerdictValid || result.Outcome != OutcomeFail ||
+		result.Ramp == nil || result.Ramp.ScoreConns != 1 || len(result.Ramp.Timeline) != 1 {
+		t.Fatalf("online ramp result=%+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "metrics", "ramp.stop")); err != nil {
+		t.Fatalf("ramp stop marker: %v", err)
+	}
+	for _, base := range []string{
+		filepath.Join(outDir, "metrics", "server.json"),
+		filepath.Join(outDir, "metrics", "client-0.json"),
+	} {
+		if _, err := os.Stat(rampSnapshotPath(base, 1, 3)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unexpected tail snapshot %s: %v", base, err)
+		}
+	}
+}
+
 func TestRunTreatmentInvalidPrecedesUnsupported(t *testing.T) {
 	descriptionEnv := []string{
 		"RUDP_BENCH_FAKE_PROCESS=1",
@@ -232,16 +365,64 @@ func fakeProcessMain() error {
 	if err := enc.Encode(control.SchedAckMessage{Type: control.TypeSchedAck, MarginNS: schedule.StartAtNS - now}); err != nil {
 		return err
 	}
+	if os.Getenv("FAKE_RAMP_ONLINE") == "1" {
+		if err := writeFakeRampSnapshot(); err != nil {
+			return err
+		}
+		stopPath := os.Getenv(rampStopPathEnv)
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if _, err := os.Stat(stopPath); err == nil {
+				break
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("timed out waiting for ramp stop marker %s", stopPath)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		stats := json.RawMessage(fmt.Sprintf(`{"role":%q,"proc_index":%d}`, role, procIndex))
+		return enc.Encode(control.DoneMessage{Type: control.TypeDone, Stats: stats})
+	}
 	if err := sleepUntilMonotonic(schedule.DrainUntilNS); err != nil {
 		return err
 	}
-	if role == "client" {
+	if template := os.Getenv("FAKE_RAMP_METRICS_TEMPLATE"); template != "" {
+		if err := writeFakeRampSnapshot(); err != nil {
+			return err
+		}
+	} else if role == "client" {
 		if err := os.WriteFile(os.Getenv(metricsOutEnv), []byte(fakeMetricsForProc(procIndex)), 0o644); err != nil {
 			return err
 		}
 	}
 	stats := json.RawMessage(fmt.Sprintf(`{"role":%q,"proc_index":%d}`, role, procIndex))
 	return enc.Encode(control.DoneMessage{Type: control.TypeDone, Stats: stats})
+}
+
+func writeFakeRampSnapshot() error {
+	for name, want := range map[string]string{
+		rampStartConnsEnv: "1",
+		rampStepConnsEnv:  "2",
+		rampGuardNSEnv:    "0",
+		rampSampleNSEnv:   "1000000000",
+		rampDrainNSEnv:    "100000000",
+	} {
+		if os.Getenv(name) != want {
+			return fmt.Errorf("%s=%q, want %q", name, os.Getenv(name), want)
+		}
+	}
+	if os.Getenv(rampStopPathEnv) == "" {
+		return fmt.Errorf("%s is empty", rampStopPathEnv)
+	}
+	template := os.Getenv("FAKE_RAMP_METRICS_TEMPLATE")
+	data, err := os.ReadFile(template)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("%s.ramp-%06d-c%06d.json", os.Getenv(metricsOutEnv), 0, 1)
+	return os.WriteFile(path, data, 0o644)
 }
 
 func dialControl(path string) (net.Conn, error) {

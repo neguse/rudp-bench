@@ -27,6 +27,7 @@ if (!config.Valid)
         "--deadline-ns NS --staleness-period-ns NS");
     return 1;
 }
+var rampConfig = BenchRampConfig.FromEnvironment(config.Conns);
 
 AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
 
@@ -70,6 +71,20 @@ try
     if (control is not null)
     {
         await control.HelloAsync("client", "magiconion", config.ProcIndex, stopCts.Token).ConfigureAwait(false);
+    }
+
+    if (rampConfig is { } ramp)
+    {
+        return await RunRampAsync(
+            config,
+            ramp,
+            connections,
+            metrics,
+            metricsGate,
+            payloadValidation,
+            progress,
+            control,
+            stopCts.Token).ConfigureAwait(false);
     }
 
     for (var i = 0; i < config.Conns; i++)
@@ -281,6 +296,227 @@ finally
     foreach (var connection in connections)
     {
         await connection.DisposeAsync().ConfigureAwait(false);
+    }
+}
+
+static async Task<int> RunRampAsync(
+    ClientConfig config,
+    BenchRampConfig ramp,
+    List<ClientConnection> connections,
+    BenchMetrics metrics,
+    object metricsGate,
+    BenchPayloadValidation payloadValidation,
+    BenchAuthoritativeProgressTracker? progress,
+    BenchControl? control,
+    CancellationToken cancellationToken)
+{
+    async Task AddConnectionsAsync(int target, ulong deadlineNs, bool observeStop)
+    {
+        while (connections.Count < target)
+        {
+            if (observeStop)
+            {
+                ramp.ThrowIfStopRequested();
+            }
+            if (BenchClock.NowNs() >= deadlineNs)
+            {
+                return;
+            }
+            var localIndex = connections.Count;
+            var originId = config.OriginBase + (uint)localIndex;
+            var receiver = new BenchReceiver(
+                metrics,
+                metricsGate,
+                (uint)localIndex,
+                originId,
+                config.Scenario,
+                payloadValidation,
+                progress);
+            var handler = new SocketsHttpHandler
+            {
+                EnableMultipleHttp2Connections = true,
+                PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5)
+            };
+            var channel = GrpcChannel.ForAddress(FormatAddress(config.Host, config.Port), new GrpcChannelOptions
+            {
+                HttpHandler = handler,
+                MaxReceiveMessageSize = BenchConstants.MaxPayloadBytes,
+                MaxSendMessageSize = BenchConstants.MaxPayloadBytes
+            });
+            IBenchHub? hub = null;
+            try
+            {
+                hub = await StreamingHubClient
+                    .ConnectAsync<IBenchHub, IBenchHubReceiver>(channel, receiver)
+                    .ConfigureAwait(false);
+                await hub.JoinAsync(originId).ConfigureAwait(false);
+                var connection = new ClientConnection(originId, receiver, hub, channel, handler);
+                connection.SendPipe = new SendPipe(
+                    connection,
+                    config.PayloadLt,
+                    config.PayloadMd,
+                    metrics,
+                    metricsGate,
+                    payloadValidation,
+                    progress);
+                connections.Add(connection);
+            }
+            catch
+            {
+                if (hub is IAsyncDisposable asyncDisposable)
+                {
+                    await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+                }
+                else if (hub is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                }
+                channel.Dispose();
+                handler.Dispose();
+                throw;
+            }
+        }
+    }
+
+    await AddConnectionsAsync(ramp.StartConns, ulong.MaxValue, observeStop: false).ConfigureAwait(false);
+
+    BenchSchedule schedule;
+    if (control is not null)
+    {
+        await control.ReadyAsync(config.Conns, cancellationToken).ConfigureAwait(false);
+        schedule = await control.WaitScheduleAsync(cancellationToken).ConfigureAwait(false);
+    }
+    else
+    {
+        var now = BenchClock.NowNs();
+        var duration = ramp.RequiredWindowNs(config.Conns);
+        schedule = new BenchSchedule(now, BenchClock.AddSaturating(now, duration), BenchClock.AddSaturating(now, duration));
+    }
+
+    var streams = BuildStreams(config);
+    foreach (var connection in connections)
+    {
+        connection.Plan = new BenchPlan(streams, schedule.StartAtNs, schedule.StartAtNs, schedule.StopAtNs);
+    }
+    var metricsPath = MetricsPathOrDefault();
+    var phaseIndex = 0;
+    try
+    {
+        foreach (var target in ramp.Targets(config.Conns))
+        {
+            var phaseStart = ramp.PhaseStartNs(schedule.StartAtNs, phaseIndex);
+            var resetDeadline = BenchClock.AddSaturating(phaseStart, ramp.GuardNs);
+            var sampleEnd = BenchClock.AddSaturating(resetDeadline, ramp.SampleNs);
+            var phaseEnd = BenchClock.AddSaturating(sampleEnd, ramp.DrainNs);
+            await DriveRampTrafficAsync(
+                connections, metrics, metricsGate, schedule, phaseStart, ramp, cancellationToken)
+                .ConfigureAwait(false);
+
+            lock (metricsGate)
+            {
+                metrics.Reset();
+                metrics.SetObservationWindow(resetDeadline, sampleEnd);
+                config.Scenario?.RegisterExpectedLatestFlows(
+                    metrics, (uint)target, config.OriginBase, resetDeadline, (uint)target);
+            }
+
+            await AddConnectionsAsync(target, resetDeadline, observeStop: true).ConfigureAwait(false);
+            foreach (var connection in connections)
+            {
+                connection.Plan ??= new BenchPlan(
+                    streams,
+                    BenchClock.NowNs(),
+                    schedule.StartAtNs,
+                    schedule.StopAtNs);
+            }
+
+            await DriveRampTrafficAsync(
+                connections, metrics, metricsGate, schedule, resetDeadline, ramp, cancellationToken)
+                .ConfigureAwait(false);
+
+            await DriveRampTrafficAsync(
+                connections, metrics, metricsGate, schedule, phaseEnd, ramp, cancellationToken)
+                .ConfigureAwait(false);
+
+            string snapshotJson;
+            lock (metricsGate)
+            {
+                snapshotJson = metrics.ToJson();
+            }
+            await File.WriteAllTextAsync(
+                BenchRampConfig.SnapshotPath(metricsPath, phaseIndex, target),
+                snapshotJson + "\n",
+                new UTF8Encoding(false),
+                CancellationToken.None).ConfigureAwait(false);
+            phaseIndex++;
+            ramp.ThrowIfStopRequested();
+        }
+    }
+    catch (BenchRampStopException)
+    {
+    }
+
+    foreach (var connection in connections)
+    {
+        connection.SendPipe!.CompleteDroppingPending();
+    }
+    foreach (var connection in connections)
+    {
+        await connection.SendPipe!.Completion.ConfigureAwait(false);
+    }
+
+    string metricsJson;
+    lock (metricsGate)
+    {
+        metricsJson = metrics.ToJson();
+    }
+    await File.WriteAllTextAsync(metricsPath, metricsJson + "\n", new UTF8Encoding(false), CancellationToken.None)
+        .ConfigureAwait(false);
+    var doneJson = progress is null
+        ? BenchProgress.AttachValidationToDoneStats(metricsJson, payloadValidation.Count)
+        : BenchProgress.AttachToDoneStats(metricsJson, progress.ClientSnapshot(), payloadValidation.Count);
+    if (control is not null)
+    {
+        await control.DoneAsync(doneJson, CancellationToken.None).ConfigureAwait(false);
+    }
+    return 0;
+}
+
+static async Task DriveRampTrafficAsync(
+    IReadOnlyList<ClientConnection> connections,
+    BenchMetrics metrics,
+    object metricsGate,
+    BenchSchedule schedule,
+    ulong deadlineNs,
+    BenchRampConfig ramp,
+    CancellationToken cancellationToken)
+{
+    if (deadlineNs > schedule.StopAtNs)
+    {
+        throw new InvalidOperationException("ramp phases exceed the scheduled measurement window");
+    }
+    while (BenchClock.NowNs() < deadlineNs)
+    {
+        ramp.ThrowIfStopRequested();
+        cancellationToken.ThrowIfCancellationRequested();
+        var now = BenchClock.NowNs();
+        var sendThrough = now < deadlineNs ? now : deadlineNs - 1;
+        if (now >= schedule.StartAtNs)
+        {
+            lock (metricsGate)
+            {
+                metrics.Tick(now);
+            }
+        }
+        foreach (var connection in connections)
+        {
+            while (connection.Plan!.TryNext(sendThrough, out var slot))
+            {
+                connection.SendPipe!.Submit(slot);
+            }
+        }
+        var next = Math.Min(deadlineNs, NextPlanDue(connections));
+        await DelayUntilNextAsync(now, next, deadlineNs, cancellationToken).ConfigureAwait(false);
     }
 }
 

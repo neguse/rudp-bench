@@ -84,9 +84,10 @@ jobs:
       - name: calibration duration invariance
         run: ./calibration/duration_invariance.sh
 
-      # 軽量 loopback ベンチ(共有 runner の診断値。SUT の FAIL/INVALID では
-      # 落とさない — CI の合否は上の smoke が担う)。結果は artifact のみ
-      - name: light bench (diagnostic)
+      # 軽量 loopback ramp ベンチ(単一 run 内で接続を増やし、最初の
+      # SLO 破断接続数を診断 score 化。SUT の FAIL/INVALID では落とさない —
+      # CI の合否は上の smoke が担う)。結果は artifact のみ
+      - name: light ramp bench (diagnostic)
         run: ./scripts/run-ci-bench.sh
 
       - name: upload bench results

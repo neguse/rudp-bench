@@ -47,14 +47,18 @@ func EvaluateGate(input GateInput) GateResult {
 			}
 		}
 	}
-	if input.Config != nil && input.Config.Scenario != nil && input.Control != nil {
+	if input.Config != nil && input.Config.Ramp == nil && input.Config.Scenario != nil && input.Control != nil {
 		invalid, failed := validateScenarioDoneStats(input.Control, *input.Config)
 		reasons = append(reasons, invalid...)
 		sutReasons = append(sutReasons, failed...)
 	}
 
 	attempted := 0.0
-	if input.Metrics == nil {
+	if input.Config != nil && input.Config.Ramp != nil {
+		// Ramp runs are judged from per-phase suffix snapshots. Their final
+		// cumulative metrics intentionally span multiple active-connection
+		// levels and therefore do not satisfy the fixed-window denominator.
+	} else if input.Metrics == nil {
 		reasons = append(reasons, "merged metrics are missing")
 	} else {
 		attempted = input.Metrics.attemptedRatio()

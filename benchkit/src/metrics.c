@@ -91,6 +91,9 @@ struct bk_metrics {
   uint64_t raw_recv_measured;
   uint64_t raw_recv_unmeasured;
   uint64_t raw_timestamp_order_violations;
+  bool cohort_enabled;
+  uint64_t cohort_start_ns;
+  uint64_t cohort_stop_ns;
 };
 
 static uint64_t hash_mix_u64(uint64_t x) {
@@ -457,8 +460,60 @@ void bk_metrics_free(bk_metrics *m) {
   free(m);
 }
 
+void bk_metrics_reset(bk_metrics *m) {
+  if (m == NULL) {
+    return;
+  }
+
+  memset(m->classes, 0, sizeof(m->classes));
+  memset(&m->staleness, 0, sizeof(m->staleness));
+
+  // Keep the allocated tables so a phase reset is bounded and does not add an
+  // allocator spike to the ramp. Clearing used entries also removes all
+  // explicit expected-flow registrations; the caller re-registers the active
+  // roster at the new sample boundary.
+  memset(m->latest, 0, m->latest_cap * sizeof(*m->latest));
+  m->latest_len = 0;
+  memset(m->seen, 0, m->seen_cap * sizeof(*m->seen));
+  m->seen_len = 0;
+
+  // traffic[] contains measurement state only. deadline[] is configuration
+  // and intentionally survives; traffic_get() reapplies it when a series is
+  // recreated after the reset.
+  if (m->traffic != NULL) {
+    memset(m->traffic, 0, m->traffic_cap * sizeof(*m->traffic));
+  }
+  m->traffic_len = 0;
+  m->next_staleness_sample_ns = 0;
+  m->raw_slots = 0;
+  m->raw_submitted = 0;
+  m->raw_recv_measured = 0;
+  m->raw_recv_unmeasured = 0;
+  m->raw_timestamp_order_violations = 0;
+  m->cohort_enabled = false;
+  m->cohort_start_ns = 0;
+  m->cohort_stop_ns = 0;
+}
+
+int bk_metrics_set_cohort(bk_metrics *m, uint64_t start_ns,
+                          uint64_t stop_ns) {
+  if (m == NULL || start_ns >= stop_ns) {
+    return -1;
+  }
+  m->cohort_enabled = true;
+  m->cohort_start_ns = start_ns;
+  m->cohort_stop_ns = stop_ns;
+  return 0;
+}
+
+static bool metrics_accepts_header(const bk_metrics *m, const bk_header *h) {
+  return !m->cohort_enabled ||
+         (h->sched_ts_ns > m->cohort_start_ns &&
+          h->sched_ts_ns <= m->cohort_stop_ns);
+}
+
 void bk_metrics_on_slot(bk_metrics *m, const bk_header *h, bool submitted) {
-  if (m == NULL || h == NULL) {
+  if (m == NULL || h == NULL || !metrics_accepts_header(m, h)) {
     return;
   }
   m->raw_slots++;
@@ -521,7 +576,7 @@ int bk_metrics_expect_latest(bk_metrics *m, uint32_t local_index,
 
 void bk_metrics_on_recv(bk_metrics *m, uint32_t local_index,
                         const bk_header *h, uint64_t recv_ts_ns) {
-  if (m == NULL || h == NULL) {
+  if (m == NULL || h == NULL || !metrics_accepts_header(m, h)) {
     return;
   }
   const uint8_t direction = (uint8_t)BK_FLAGS_DIRECTION(h->flags);
@@ -627,6 +682,14 @@ static bk_class_counts finalized_counts(bk_class_counts counts) {
 void bk_metrics_tick(bk_metrics *m, uint64_t now_ns) {
   if (m == NULL) {
     return;
+  }
+  if (m->cohort_enabled) {
+    if (now_ns < m->cohort_start_ns) {
+      return;
+    }
+    if (now_ns >= m->cohort_stop_ns) {
+      now_ns = m->cohort_stop_ns - 1u;
+    }
   }
   if (m->next_staleness_sample_ns == 0) {
     m->next_staleness_sample_ns = now_ns;

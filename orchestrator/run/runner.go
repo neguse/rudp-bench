@@ -21,7 +21,15 @@ import (
 	"github.com/neguse/rudp-bench/orchestrator/sampler"
 )
 
-const metricsOutEnv = "BENCH_METRICS_OUT"
+const (
+	metricsOutEnv     = "BENCH_METRICS_OUT"
+	rampStartConnsEnv = "BENCH_RAMP_START_CONNS"
+	rampStepConnsEnv  = "BENCH_RAMP_STEP_CONNS"
+	rampGuardNSEnv    = "BENCH_RAMP_GUARD_NS"
+	rampSampleNSEnv   = "BENCH_RAMP_SAMPLE_NS"
+	rampDrainNSEnv    = "BENCH_RAMP_DRAIN_NS"
+	rampStopPathEnv   = "BENCH_RAMP_STOP_PATH"
+)
 
 type processHandle struct {
 	resultIndex int
@@ -95,6 +103,13 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 			"result_json": resultPath,
 			"summary":     summaryPath,
 		},
+	}
+	rampStopPath := ""
+	if cfg.Ramp != nil {
+		rampStopPath, err = filepath.Abs(filepath.Join(metricsDir, "ramp.stop"))
+		if err != nil {
+			return nil, fmt.Errorf("resolve ramp stop path: %w", err)
+		}
 	}
 
 	runCtx, cancelRun := context.WithCancel(ctx)
@@ -274,7 +289,7 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 		ProcIndex:  -1,
 		TotalConns: cfg.TotalConns,
 	})
-	if err := startOne(runCtx, ctrl.SocketPath(), logDir, serverCmd, serverNS, cfg.ServerCPUs, ProcessResult{
+	if err := startOne(runCtx, ctrl.SocketPath(), logDir, serverCmd, serverNS, cfg.ServerCPUs, cfg.Ramp, rampStopPath, ProcessResult{
 		Role:       "server",
 		ProcIndex:  -1,
 		ExitCode:   -1,
@@ -323,7 +338,7 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 				OriginIDEnd:   originEnd,
 				TotalConns:    cfg.TotalConns,
 			})
-			err := startOne(runCtx, ctrl.SocketPath(), logDir, clientCmd, clientNS, cfg.ClientCPUs, ProcessResult{
+			err := startOne(runCtx, ctrl.SocketPath(), logDir, clientCmd, clientNS, cfg.ClientCPUs, cfg.Ramp, rampStopPath, ProcessResult{
 				Role:          "client",
 				ProcIndex:     i,
 				Conns:         conns,
@@ -382,6 +397,18 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 		sampleCh <- sampleEvent{series: series, err: err}
 	}()
 
+	var rampWatchCancel context.CancelFunc
+	var rampWatchCh chan error
+	if cfg.Ramp != nil {
+		var watchCtx context.Context
+		watchCtx, rampWatchCancel = context.WithCancel(runCtx)
+		defer rampWatchCancel()
+		rampWatchCh = make(chan error, 1)
+		go func() {
+			rampWatchCh <- watchRampSnapshots(watchCtx, cfg, serverMetrics, clientMetricPaths, rampStopPath)
+		}()
+	}
+
 	remaining := len(handles) - waitsConsumed
 	controlDone := false
 	for !controlDone {
@@ -436,6 +463,18 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 			}
 		}
 	}
+	if rampWatchCancel != nil {
+		rampWatchCancel()
+		select {
+		case err := <-rampWatchCh:
+			if err != nil {
+				extraReasons = append(extraReasons, fmt.Sprintf("ramp online watcher: %v", err))
+			}
+		case <-time.After(100 * time.Millisecond):
+			// The final offline scorer below remains authoritative. Do not turn a
+			// slow watcher shutdown into a measurement failure.
+		}
+	}
 
 	stopSampler()
 	samples := <-sampleCh
@@ -470,6 +509,24 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 		result.Netem.ServerUDPDelta = serverUDPDelta
 	}
 
+	if cfg.Ramp != nil {
+		rampResult, err := scoreRampSnapshots(cfg, serverMetrics, clientMetricPaths)
+		if err != nil {
+			extraReasons = append(extraReasons, fmt.Sprintf("ramp metrics contract: %v", err))
+		} else {
+			result.Ramp = rampResult
+		}
+		return finishRunResult(result, GateInput{
+			Control:            result.Control,
+			Processes:          result.Processes,
+			NetemEnabled:       netemEnabled,
+			UDPDropDelta:       udpDelta,
+			ServerUDPDropDelta: serverUDPDelta,
+			ExtraReasons:       extraReasons,
+			SUTFailureReasons:  sutFailureReasons,
+		}, resultPath, summaryPath)
+	}
+
 	metricPaths := clientMetricPaths
 	if cfg.Scenario != nil && cfg.Scenario.Kind == ScenarioAuthoritativeState {
 		metricPaths = append([]string{serverMetrics}, clientMetricPaths...)
@@ -498,7 +555,7 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 	}, resultPath, summaryPath)
 }
 
-func startOne(ctx context.Context, controlSock, logDir string, cmdCfg CommandConfig, netns, cpus string, pr ProcessResult, processes *[]ProcessResult, handles *[]processHandle, waitCh chan<- waitEvent) error {
+func startOne(ctx context.Context, controlSock, logDir string, cmdCfg CommandConfig, netns, cpus string, ramp *RampConfig, rampStopPath string, pr ProcessResult, processes *[]ProcessResult, handles *[]processHandle, waitCh chan<- waitEvent) error {
 	path, args := namespaceCommand(cmdCfg, netns, cpus)
 	pr.Command = append([]string{path}, args...)
 	stdoutPath := filepath.Join(logDir, fmt.Sprintf("%s-%d.stdout.log", pr.Role, pr.ProcIndex))
@@ -517,6 +574,16 @@ func startOne(ctx context.Context, controlSock, logDir string, cmdCfg CommandCon
 	env := append([]string(nil), cmdCfg.Env...)
 	if pr.MetricsOut != "" {
 		env = append(env, metricsOutEnv+"="+pr.MetricsOut)
+	}
+	if ramp != nil {
+		env = append(env,
+			rampStartConnsEnv+"="+strconv.Itoa(ramp.StartConns),
+			rampStepConnsEnv+"="+strconv.Itoa(ramp.StepConns),
+			rampGuardNSEnv+"="+strconv.FormatInt(ramp.Guard.Nanoseconds(), 10),
+			rampSampleNSEnv+"="+strconv.FormatInt(ramp.Sample.Nanoseconds(), 10),
+			rampDrainNSEnv+"="+strconv.FormatInt(ramp.Drain.Nanoseconds(), 10),
+			rampStopPathEnv+"="+rampStopPath,
+		)
 	}
 	cmd, err := proc.Start(ctx, proc.Spec{
 		Path:        path,
@@ -842,19 +909,27 @@ func finishRunResult(result *Result, gateInput GateInput, resultPath, summaryPat
 	gate := EvaluateGate(gateInput)
 	result.Verdict = gate.Verdict
 	result.InvalidReasons = gate.Reasons
-	if result.Config.Scenario != nil && result.Metrics != nil {
+	if result.Config.Ramp == nil && result.Config.Scenario != nil && result.Metrics != nil {
 		evaluation := EvaluateScenarioMetrics(result.Metrics, *result.Config.Scenario)
 		result.ScenarioEvaluation = &evaluation
 	}
 	gateInput.SUTFailureReasons = gate.SUTFailureReasons
 	result.Outcome, result.OutcomeReasons = classifyRunOutcome(result, gateInput)
-	result.Cost = ComputeCost(result)
+	if result.Config.Ramp == nil {
+		result.Cost = ComputeCost(result)
+	}
 	return persistRunResult(result, resultPath, summaryPath)
 }
 
 func classifyRunOutcome(result *Result, gateInput GateInput) (Outcome, []string) {
 	if result.Outcome == OutcomeUnsupported {
 		return result.Outcome, dedupeStrings(result.OutcomeReasons)
+	}
+	// In ramp mode a score is valid only when the entire control/process and
+	// snapshot contract completed. A crash or truncated series is not a
+	// capacity point; it is an invalid measurement.
+	if result.Config.Ramp != nil && result.Verdict != VerdictValid {
+		return OutcomeInvalid, append([]string(nil), result.InvalidReasons...)
 	}
 	if len(gateInput.SUTFailureReasons) > 0 {
 		if independent := independentInvalidReasons(result.InvalidReasons); len(independent) > 0 {
@@ -864,6 +939,15 @@ func classifyRunOutcome(result *Result, gateInput GateInput) (Outcome, []string)
 	}
 	if result.Verdict != VerdictValid && !onlyAttemptedShortfall(result.InvalidReasons) {
 		return OutcomeInvalid, append([]string(nil), result.InvalidReasons...)
+	}
+	if result.Config.Ramp != nil {
+		if result.Ramp == nil {
+			return OutcomeInvalid, []string{"ramp evaluation is missing"}
+		}
+		if result.Ramp.Censored {
+			return OutcomeCensored, []string{result.Ramp.Cause}
+		}
+		return OutcomeFail, []string{result.Ramp.Cause}
 	}
 	if result.Config.Scenario == nil {
 		return OutcomePass, nil

@@ -191,6 +191,18 @@ typedef struct bk_metrics bk_metrics;
 
 bk_metrics *bk_metrics_new(const bk_metrics_config *cfg);
 void bk_metrics_free(bk_metrics *m);
+// Clears every measurement sample, counter, dedup key, and expected/latest
+// flow while retaining the immutable config and traffic-specific deadlines.
+// Callers that use explicit latest-flow accounting must register the flows for
+// the new window again with bk_metrics_expect_latest().
+void bk_metrics_reset(bk_metrics *m);
+// Restricts accounting to messages whose sched_ts_ns is in (start_ns,
+// stop_ns]. This lets a ramp phase continue servicing the transport during an
+// accounting drain without admitting slots from the next cohort. reset()
+// disables the filter; callers set a new cohort immediately after each reset.
+// Returns 0 on success or -1 for an invalid range/null metrics object.
+int bk_metrics_set_cohort(bk_metrics *m, uint64_t start_ns,
+                          uint64_t stop_ns);
 
 // 送信側: slot の結果を記録する。submitted=false は coalesce/backpressure 等で
 // transport に渡さなかった slot(分母には入る)。

@@ -84,7 +84,8 @@ public sealed record BenchScenarioConfig(
         BenchMetrics metrics,
         uint localConns,
         uint originBase,
-        ulong firstSchedTsNs)
+        ulong firstSchedTsNs,
+        uint? activeTotalConns = null)
     {
         switch (Kind)
         {
@@ -115,9 +116,10 @@ public sealed record BenchScenarioConfig(
                 break;
 
             case BenchScenarioKind.RoomRelay when RoomPublish is { RateLt: > 0 } publish:
+                var origins = activeTotalConns ?? (uint)TotalConns;
                 for (uint localIndex = 0; localIndex < localConns; localIndex++)
                 {
-                    for (uint originId = 0; originId < (uint)TotalConns; originId++)
+                    for (uint originId = 0; originId < origins; originId++)
                     {
                         ExpectLatest(
                             metrics,

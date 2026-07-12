@@ -18,6 +18,7 @@ if (!config.Valid)
     Console.Error.WriteLine("usage: LiteNetLibBench.Server --port PORT");
     return 1;
 }
+var rampConfig = BenchRampConfig.FromEnvironment(config.Scenario?.TotalConns ?? 1);
 
 using var stopCts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
@@ -184,7 +185,22 @@ try
             stopCts.Token).ConfigureAwait(false);
     }
 
-    if (config.Scenario?.Kind == BenchScenarioKind.AuthoritativeState)
+    if (rampConfig is { } ramp && schedule is { } rampSchedule && config.Scenario is { } rampScenario)
+    {
+        await RunRampServerAsync(
+            rampScenario,
+            ramp,
+            rampSchedule,
+            peersByOrigin,
+            manager,
+            stats,
+            scenarioMetrics!,
+            metricsGate,
+            progress,
+            MetricsPathOrDefault(),
+            stopCts.Token).ConfigureAwait(false);
+    }
+    else if (config.Scenario?.Kind == BenchScenarioKind.AuthoritativeState)
     {
         var rosterDeadline = schedule?.StartAtNs ??
             BenchClock.AddSaturating(BenchClock.NowNs(), ServerConfig.DevConnectTimeoutNs);
@@ -293,6 +309,163 @@ if (control is not null)
 
 manager.Stop();
 return 0;
+
+static async Task RunRampServerAsync(
+    BenchScenarioConfig scenario,
+    BenchRampConfig ramp,
+    BenchSchedule schedule,
+    ConcurrentDictionary<uint, PeerState> peersByOrigin,
+    NetManager manager,
+    LnlServerStats stats,
+    BenchMetrics metrics,
+    object metricsGate,
+    BenchAuthoritativeProgressTracker? progress,
+    string metricsPath,
+    CancellationToken cancellationToken)
+{
+    BenchPlan? statePlan = scenario.Kind == BenchScenarioKind.AuthoritativeState
+        ? new BenchPlan(
+            scenario.ServerState!.Value.Streams(BenchDirection.ServerToClient),
+            schedule.StartAtNs,
+            schedule.StartAtNs,
+            schedule.StopAtNs)
+        : null;
+    var phaseIndex = 0;
+    try
+    {
+        foreach (var target in ramp.Targets(scenario.TotalConns))
+        {
+            var phaseStart = ramp.PhaseStartNs(schedule.StartAtNs, phaseIndex);
+            var resetDeadline = BenchClock.AddSaturating(phaseStart, ramp.GuardNs);
+            var sampleEnd = BenchClock.AddSaturating(resetDeadline, ramp.SampleNs);
+            var phaseEnd = BenchClock.AddSaturating(sampleEnd, ramp.DrainNs);
+            await DriveRampServerAsync(
+                scenario, peersByOrigin, manager, statePlan, metrics, metricsGate, progress,
+                schedule, phaseStart, ramp, cancellationToken).ConfigureAwait(false);
+
+            lock (metricsGate)
+            {
+                metrics.Reset();
+                metrics.SetObservationWindow(resetDeadline, sampleEnd);
+                if (scenario.Kind == BenchScenarioKind.AuthoritativeState &&
+                    scenario.ClientInput is { RateLt: > 0 } input)
+                {
+                    for (uint originId = 0; originId < (uint)target; originId++)
+                    {
+                        metrics.ExpectLatest(
+                            originId, originId, input.TrafficId,
+                            BenchDirection.ClientToServer, resetDeadline);
+                    }
+                }
+            }
+
+            while (stats.ConnectionCount < target && BenchClock.NowNs() < resetDeadline)
+            {
+                ramp.ThrowIfStopRequested();
+                cancellationToken.ThrowIfCancellationRequested();
+                var now = BenchClock.NowNs();
+                await DriveRampServerAsync(
+                    scenario, peersByOrigin, manager, statePlan, metrics, metricsGate, progress,
+                    schedule,
+                    Math.Min(resetDeadline, BenchClock.AddSaturating(now, 1_000_000UL)),
+                    ramp,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            await DriveRampServerAsync(
+                scenario, peersByOrigin, manager, statePlan, metrics, metricsGate, progress,
+                schedule, resetDeadline, ramp, cancellationToken).ConfigureAwait(false);
+
+            await DriveRampServerAsync(
+                scenario, peersByOrigin, manager, statePlan, metrics, metricsGate, progress,
+                schedule, phaseEnd, ramp, cancellationToken).ConfigureAwait(false);
+
+            string snapshotJson;
+            lock (metricsGate)
+            {
+                snapshotJson = metrics.ToJson();
+            }
+            await File.WriteAllTextAsync(
+                BenchRampConfig.SnapshotPath(metricsPath, phaseIndex, target),
+                snapshotJson + "\n",
+                new UTF8Encoding(false),
+                CancellationToken.None).ConfigureAwait(false);
+            phaseIndex++;
+            ramp.ThrowIfStopRequested();
+        }
+    }
+    catch (BenchRampStopException)
+    {
+    }
+}
+
+static async Task DriveRampServerAsync(
+    BenchScenarioConfig scenario,
+    ConcurrentDictionary<uint, PeerState> peersByOrigin,
+    NetManager manager,
+    BenchPlan? statePlan,
+    BenchMetrics metrics,
+    object metricsGate,
+    BenchAuthoritativeProgressTracker? progress,
+    BenchSchedule schedule,
+    ulong deadlineNs,
+    BenchRampConfig ramp,
+    CancellationToken cancellationToken)
+{
+    if (deadlineNs > schedule.StopAtNs)
+    {
+        throw new InvalidOperationException("ramp phases exceed the scheduled measurement window");
+    }
+    while (BenchClock.NowNs() < deadlineNs)
+    {
+        ramp.ThrowIfStopRequested();
+        cancellationToken.ThrowIfCancellationRequested();
+        manager.PollEvents();
+        var now = BenchClock.NowNs();
+        var sendThrough = now < deadlineNs ? now : deadlineNs - 1;
+        if (scenario.Kind == BenchScenarioKind.AuthoritativeState)
+        {
+            lock (metricsGate)
+            {
+                metrics.Tick(now);
+            }
+            while (statePlan!.TryNext(sendThrough, out var slot))
+            {
+                progress?.RecordServerStateTick(slot);
+                foreach (var target in peersByOrigin.Values)
+                {
+                    if (target.Peer.ConnectionState == ConnectionState.Connected)
+                    {
+                        SubmitState(target, scenario.ServerState!.Value, slot, scenario.TotalConns, metrics, metricsGate);
+                    }
+                }
+                manager.TriggerUpdate();
+            }
+        }
+        var next = deadlineNs;
+        if (statePlan is not null && statePlan.PeekNs() < next)
+        {
+            next = statePlan.PeekNs();
+        }
+        now = BenchClock.NowNs();
+        if (now < next && next - now >= 1_000_000UL)
+        {
+            await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await Task.Yield();
+        }
+    }
+}
+
+static string MetricsPathOrDefault()
+{
+    var path = Environment.GetEnvironmentVariable("BENCH_METRICS_OUT");
+    return string.IsNullOrWhiteSpace(path)
+        ? "/tmp/rudp-bench-litenetlib-server-" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".json"
+        : path;
+}
 
 static async Task<PeerState[]> FreezeRosterAsync(
     ConcurrentDictionary<uint, PeerState> peersByOrigin,
@@ -663,6 +836,8 @@ public sealed class LnlServerStats
     private readonly ulong[,] sendFailed = new ulong[BenchConstants.ClassCount, 2];
     private ulong invalidPayload;
     private int connections;
+
+    public int ConnectionCount => Volatile.Read(ref connections);
 
     // 受信系カウンタ(CountRecv/CountSubmit/InvalidPayload)は受信スレッド
     // (UnsyncedReceiveEvent)だけが書き、Connected/Disconnected は main ループ

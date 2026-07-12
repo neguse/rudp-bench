@@ -1,4 +1,5 @@
 #include "kcp_common.h"
+#include "../ramp.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -565,6 +566,44 @@ static int kcp_output_cb(const char *buf, int len, ikcpcb *kcp, void *user) {
   }
 }
 
+static int setup_conn(client_conn *conn, const client_config *cfg,
+                      const struct sockaddr_in *server, int index,
+                      uint8_t *registration_buf) {
+  conn->origin_id = cfg->origin_base + (uint32_t)index;
+  conn->local_index = (uint32_t)index;
+  conn->fd = open_conn_socket(server);
+  if (conn->fd < 0) {
+    return -1;
+  }
+  conn->kcp = ikcp_create((IUINT32)conn->origin_id, conn);
+  if (conn->kcp == NULL) {
+    return -1;
+  }
+  ikcp_setoutput(conn->kcp, kcp_output_cb);
+  kcp_apply_tuning(conn->kcp);
+  const bk_header registration = {
+      .seq = 0,
+      .sched_ts_ns = 0,
+      .send_ts_ns = bk_now_ns(),
+      .flags = 0,
+      .origin_id = conn->origin_id,
+      .traffic_id = 0,
+  };
+  return bk_payload_write(registration_buf, BK_MIN_PAYLOAD, &registration) ==
+                 0 &&
+             send_raw(conn->fd, registration_buf, BK_MIN_PAYLOAD) == 0
+         ? 0
+         : -1;
+}
+
+static int start_conn_plan(client_conn *conn, const bk_stream *streams,
+                           int n_streams, uint64_t start_ns,
+                           const bk_schedule *schedule) {
+  conn->plan = bk_plan_new(streams, n_streams, start_ns,
+                           schedule->start_at_ns, schedule->stop_at_ns);
+  return conn->plan == NULL ? -1 : 0;
+}
+
 static void make_header_from_slot(const bk_slot *slot, uint32_t origin_id,
                                   uint64_t send_ts_ns, bk_header *header) {
   header->seq = slot->seq;
@@ -890,8 +929,10 @@ static void free_conns(client_conn *conns, int n) {
 
 static int expect_scenario_flows(const client_config *cfg,
                                  const client_conn *conns,
+                                 int n_local_conns,
+                                 uint32_t roster_conns,
                                  bk_metrics *metrics,
-                                 const bk_schedule *schedule) {
+                                 uint64_t first_sched_ts_ns) {
   if (cfg->scenario == SCENARIO_LEGACY) {
     return 0;
   }
@@ -899,11 +940,11 @@ static int expect_scenario_flows(const client_config *cfg,
     if (cfg->state.rate_lt == 0.0) {
       return 0;
     }
-    for (int i = 0; i < cfg->conns; ++i) {
+    for (int i = 0; i < n_local_conns; ++i) {
       if (bk_metrics_expect_latest(
               metrics, conns[i].local_index, cfg->total_conns,
               cfg->state.traffic_id, BK_DIRECTION_SERVER_TO_CLIENT,
-              schedule->start_at_ns) != 0) {
+              first_sched_ts_ns) != 0) {
         return -1;
       }
     }
@@ -912,17 +953,17 @@ static int expect_scenario_flows(const client_config *cfg,
   if (cfg->rate_lt == 0.0) {
     return 0;
   }
-  for (int i = 0; i < cfg->conns; ++i) {
+  for (int i = 0; i < n_local_conns; ++i) {
     const uint32_t first_origin =
         cfg->scenario == SCENARIO_ROOM_RELAY ? 0u : conns[i].origin_id;
     const uint32_t end_origin =
-        cfg->scenario == SCENARIO_ROOM_RELAY ? cfg->total_conns
+        cfg->scenario == SCENARIO_ROOM_RELAY ? roster_conns
                                              : first_origin + 1u;
     for (uint32_t origin = first_origin; origin < end_origin; ++origin) {
       if (bk_metrics_expect_latest(metrics, conns[i].local_index, origin,
                                    cfg->traffic_id,
                                    BK_DIRECTION_ROOM_RELAY,
-                                   schedule->start_at_ns) != 0) {
+                                   first_sched_ts_ns) != 0) {
         return -1;
       }
     }
@@ -931,6 +972,11 @@ static int expect_scenario_flows(const client_config *cfg,
 }
 
 static int run_client(const client_config *cfg) {
+  bk_ramp_config ramp;
+  if (bk_ramp_config_load((uint32_t)cfg->conns, &ramp) != 0) {
+    fprintf(stderr, "invalid BENCH_RAMP_* configuration\n");
+    return -1;
+  }
   const uint32_t max_origin_id =
       cfg->scenario == SCENARIO_LEGACY
           ? cfg->origin_base + (uint32_t)cfg->conns
@@ -1001,32 +1047,9 @@ static int run_client(const client_config *cfg) {
     return -1;
   }
 
-  // conn ごとに socket + ikcp(conv=origin_id)を作り、raw channel の
-  // 登録パケットで server にアドレスと origin を学習させる(raw_udp と同じ)。
-  for (int i = 0; i < cfg->conns; ++i) {
-    conns[i].origin_id = cfg->origin_base + (uint32_t)i;
-    conns[i].local_index = (uint32_t)i;
-    conns[i].fd = open_conn_socket(&server);
-    bool conn_ok = conns[i].fd >= 0;
-    if (conn_ok) {
-      conns[i].kcp = ikcp_create((IUINT32)conns[i].origin_id, &conns[i]);
-      conn_ok = conns[i].kcp != NULL;
-      if (conn_ok) {
-        ikcp_setoutput(conns[i].kcp, kcp_output_cb);
-        kcp_apply_tuning(conns[i].kcp);
-      }
-    }
-    bk_header reg = {
-        .seq = 0,
-        .sched_ts_ns = 0,
-        .send_ts_ns = bk_now_ns(),
-        .flags = 0,
-        .origin_id = conns[i].origin_id,
-        .traffic_id = 0,
-    };
-    if (!conn_ok ||
-        bk_payload_write(recv_buf, BK_MIN_PAYLOAD, &reg) != 0 ||
-        send_raw(conns[i].fd, recv_buf, BK_MIN_PAYLOAD) != 0) {
+  int active_conns = ramp.enabled ? (int)ramp.start_conns : cfg->conns;
+  for (int i = 0; i < active_conns; ++i) {
+    if (setup_conn(&conns[i], cfg, &server, i, recv_buf) != 0) {
       fprintf(stderr, "connection setup failed\n");
       if (control != NULL) {
         bk_control_close(control);
@@ -1076,11 +1099,9 @@ static int run_client(const client_config *cfg) {
   }
 
   const uint64_t plan_start_ns = bk_now_ns();
-  for (int i = 0; i < cfg->conns; ++i) {
-    conns[i].plan =
-        bk_plan_new(streams, n_streams, plan_start_ns, schedule.start_at_ns,
-                    schedule.stop_at_ns);
-    if (conns[i].plan == NULL) {
+  for (int i = 0; i < active_conns; ++i) {
+    if (start_conn_plan(&conns[i], streams, n_streams, plan_start_ns,
+                        &schedule) != 0) {
       fprintf(stderr, "bk_plan_new failed\n");
       if (control != NULL) {
         bk_control_close(control);
@@ -1094,7 +1115,10 @@ static int run_client(const client_config *cfg) {
     }
   }
 
-  if (expect_scenario_flows(cfg, conns, metrics, &schedule) != 0) {
+  if (expect_scenario_flows(cfg, conns, active_conns,
+                            ramp.enabled ? (uint32_t)active_conns
+                                         : cfg->total_conns,
+                            metrics, schedule.start_at_ns) != 0) {
     fprintf(stderr, "bk_metrics_expect_latest failed\n");
     if (control != NULL) {
       bk_control_close(control);
@@ -1121,7 +1145,7 @@ static int run_client(const client_config *cfg) {
     bk_metrics_free(metrics);
     return -1;
   }
-  for (int i = 0; i < cfg->conns; ++i) {
+  for (int i = 0; i < active_conns; ++i) {
     pfds[i].fd = conns[i].fd;
     pfds[i].events = POLLIN;
   }
@@ -1129,10 +1153,95 @@ static int run_client(const client_config *cfg) {
   bool marked_unsent = false;
   int run_rc = 0;
   bk_steady steady = {0, false};
-  while (bk_now_ns() < schedule.drain_until_ns) {
+  bk_ramp_phase ramp_phase;
+  if (ramp.enabled) {
+    bk_ramp_phase_begin(&ramp, schedule.start_at_ns, &ramp_phase);
+  }
+  bool ramp_complete = false;
+  while (ramp.enabled ? !ramp_complete
+                      : bk_now_ns() < schedule.drain_until_ns) {
     uint64_t now = bk_now_ns();
 
-    if (control != NULL) {
+    if (ramp.enabled && bk_ramp_stop_requested()) {
+      ramp_complete = true;
+      break;
+    }
+
+    if (ramp.enabled && now >= ramp_phase.phase_start_ns) {
+      while ((uint32_t)active_conns < ramp_phase.target_conns) {
+        if (bk_ramp_stop_requested()) {
+          ramp_complete = true;
+          break;
+        }
+        const int index = active_conns;
+        if (setup_conn(&conns[index], cfg, &server, index, recv_buf) != 0 ||
+            start_conn_plan(&conns[index], streams, n_streams, now,
+                            &schedule) != 0) {
+          fprintf(stderr, "ramp connection setup failed at %d\n", index);
+          run_rc = -1;
+          ramp_complete = true;
+          break;
+        }
+        pfds[index].fd = conns[index].fd;
+        pfds[index].events = POLLIN;
+        active_conns++;
+      }
+      if (run_rc != 0) {
+        break;
+      }
+      if (ramp_complete) {
+        break;
+      }
+      if (!ramp_phase.reset_done && now >= ramp_phase.phase_end_ns) {
+        fprintf(stderr, "ramp phase stalled across reset and phase end\n");
+        run_rc = -1;
+        break;
+      }
+      // Prepare accounting as soon as the phase starts, after attempting to
+      // add its target sockets. The guard is then entirely available for the
+      // peer to reach the same prepared state; guard traffic is rejected by
+      // the future-starting cohort.
+      if (!ramp_phase.reset_done) {
+        bk_metrics_reset(metrics);
+        if (bk_metrics_set_cohort(metrics, ramp_phase.reset_at_ns,
+                                  ramp_phase.sample_end_ns) != 0 ||
+            expect_scenario_flows(cfg, conns,
+                                  (int)ramp_phase.target_conns,
+                                  ramp_phase.target_conns, metrics,
+                                  ramp_phase.reset_at_ns) != 0) {
+          fprintf(stderr, "ramp expected-flow registration failed\n");
+          run_rc = -1;
+          break;
+        }
+        ramp_phase.sample_conns = ramp_phase.target_conns;
+        ramp_phase.reset_done = 1;
+      }
+      if (now >= ramp_phase.phase_end_ns) {
+        const uint64_t cutoff = ramp_phase.sample_end_ns;
+        for (uint32_t i = 0; i < ramp_phase.target_conns; ++i) {
+          mark_unsent_until(&conns[i], cutoff, metrics);
+        }
+        if (!ramp_phase.reset_done ||
+            bk_ramp_dump_metrics(metrics, ramp_phase.phase,
+                                 ramp_phase.sample_conns) != 0) {
+          fprintf(stderr, "ramp metrics dump failed\n");
+          run_rc = -1;
+          break;
+        }
+        if (bk_ramp_stop_requested()) {
+          ramp_complete = true;
+          break;
+        }
+        if (!bk_ramp_phase_advance(&ramp, (uint32_t)cfg->conns,
+                                   &ramp_phase)) {
+          ramp_complete = true;
+          break;
+        }
+        continue;
+      }
+    }
+
+    if (control != NULL && !ramp.enabled) {
       uint64_t raw_submitted = 0;
       uint64_t raw_rm = 0;
       uint64_t raw_ru = 0;
@@ -1145,7 +1254,7 @@ static int run_client(const client_config *cfg) {
         break;
       }
       if (sr == 1) {
-        for (int i = 0; i < cfg->conns; ++i) {
+        for (int i = 0; i < active_conns; ++i) {
           bk_plan_set_window(conns[i].plan, schedule.start_at_ns,
                              schedule.stop_at_ns);
         }
@@ -1155,10 +1264,10 @@ static int run_client(const client_config *cfg) {
       bk_metrics_tick(metrics, now);
     }
 
-    update_kcps(conns, cfg->conns);
+    update_kcps(conns, active_conns);
 
     if (now < schedule.stop_at_ns) {
-      for (int i = 0; i < cfg->conns; ++i) {
+      for (int i = 0; i < active_conns; ++i) {
         bk_slot slot;
         while (bk_plan_next(conns[i].plan, now, &slot)) {
           const size_t payload_size = (slot.flags & BK_FLAG_MUST_DELIVER)
@@ -1167,10 +1276,10 @@ static int run_client(const client_config *cfg) {
           send_slot(&conns[i], &slot, payload_buf, payload_size, metrics);
         }
       }
-    } else if (!marked_unsent) {
+    } else if (!ramp.enabled && !marked_unsent) {
       const uint64_t cutoff =
           schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
-      for (int i = 0; i < cfg->conns; ++i) {
+      for (int i = 0; i < active_conns; ++i) {
         mark_unsent_until(&conns[i], cutoff, metrics);
       }
       marked_unsent = true;
@@ -1179,14 +1288,22 @@ static int run_client(const client_config *cfg) {
     now = bk_now_ns();
     uint64_t next_ns = schedule.drain_until_ns;
     if (now < schedule.stop_at_ns) {
-      const uint64_t due = next_plan_due(conns, cfg->conns);
+      const uint64_t due = next_plan_due(conns, active_conns);
       if (due < next_ns) {
         next_ns = due;
       }
     }
+    if (ramp.enabled) {
+      const uint64_t phase_due = ramp_phase.reset_done
+                                     ? ramp_phase.phase_end_ns
+                                     : ramp_phase.phase_start_ns;
+      if (phase_due < next_ns) {
+        next_ns = phase_due;
+      }
+    }
     const int timeout_ms =
         timeout_for_next(now, next_ns, schedule.drain_until_ns);
-    const int pr = poll(pfds, (nfds_t)cfg->conns, timeout_ms);
+    const int pr = poll(pfds, (nfds_t)active_conns, timeout_ms);
     if (pr < 0) {
       if (errno == EINTR) {
         continue;
@@ -1197,7 +1314,7 @@ static int run_client(const client_config *cfg) {
     }
     if (pr > 0) {
       bool drain_err = false;
-      for (int i = 0; i < cfg->conns; ++i) {
+      for (int i = 0; i < active_conns; ++i) {
         if ((pfds[i].revents & POLLIN) == 0) {
           continue;
         }
@@ -1216,7 +1333,7 @@ static int run_client(const client_config *cfg) {
     }
   }
 
-  if (!marked_unsent) {
+  if (!ramp.enabled && !marked_unsent) {
     const uint64_t cutoff =
         schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
     for (int i = 0; i < cfg->conns; ++i) {
@@ -1224,13 +1341,16 @@ static int run_client(const client_config *cfg) {
     }
   }
 
-  char default_metrics_path[128];
-  const char *metrics_path =
-      metrics_path_or_default(default_metrics_path, sizeof(default_metrics_path));
   int rc = run_rc;
-  if (metrics_path == NULL || bk_metrics_dump_json(metrics, metrics_path) != 0) {
-    fprintf(stderr, "bk_metrics_dump_json failed\n");
-    rc = -1;
+  if (!ramp.enabled) {
+    char default_metrics_path[128];
+    const char *metrics_path = metrics_path_or_default(
+        default_metrics_path, sizeof(default_metrics_path));
+    if (metrics_path == NULL ||
+        bk_metrics_dump_json(metrics, metrics_path) != 0) {
+      fprintf(stderr, "bk_metrics_dump_json failed\n");
+      rc = -1;
+    }
   }
 
   char stats_json[1024];

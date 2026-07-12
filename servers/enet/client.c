@@ -1,5 +1,6 @@
 #include "benchkit.h"
 #include "../scenario_cli.h"
+#include "../ramp.h"
 
 #include <enet/enet.h>
 
@@ -415,6 +416,28 @@ static void tune_peer(ENetPeer *peer) {
   enet_peer_timeout(peer, ENET_PEER_TIMEOUT_LIMIT, 10000, 60000);
 }
 
+static int send_registration(client_conn *conn) {
+  const bk_header registration = {
+      .seq = 0,
+      .sched_ts_ns = 0,
+      .send_ts_ns = bk_now_ns(),
+      .flags = 0,
+      .origin_id = conn->origin_id,
+      .traffic_id = 0,
+  };
+  ENetPacket *packet = enet_packet_create(
+      NULL, BK_MIN_PAYLOAD, ENET_PACKET_FLAG_UNSEQUENCED);
+  if (packet == NULL ||
+      bk_payload_write(packet->data, packet->dataLength, &registration) != 0 ||
+      enet_peer_send(conn->peer, ENET_CHANNEL_UNRELIABLE, packet) != 0) {
+    if (packet != NULL && packet->referenceCount == 0) {
+      enet_packet_destroy(packet);
+    }
+    return -1;
+  }
+  return 0;
+}
+
 static int handle_event(const ENetEvent *event, const client_config *cfg,
                         bk_metrics *metrics, int *connected_count,
                         client_stats *stats) {
@@ -425,6 +448,9 @@ static int handle_event(const ENetEvent *event, const client_config *cfg,
         conn->connected = true;
         (*connected_count)++;
         tune_peer(event->peer);
+        if (send_registration(conn) != 0) {
+          return -1;
+        }
       }
       break;
     }
@@ -546,32 +572,6 @@ static int wait_for_connects(ENetHost *host, const client_config *cfg,
   return 0;
 }
 
-static int send_registrations(ENetHost *host, client_conn *conns,
-                              int n_conns) {
-  for (int i = 0; i < n_conns; ++i) {
-    const bk_header registration = {
-        .seq = 0,
-        .sched_ts_ns = 0,
-        .send_ts_ns = bk_now_ns(),
-        .flags = 0,
-        .origin_id = conns[i].origin_id,
-        .traffic_id = 0,
-    };
-    ENetPacket *packet = enet_packet_create(
-        NULL, BK_MIN_PAYLOAD, ENET_PACKET_FLAG_UNSEQUENCED);
-    if (packet == NULL ||
-        bk_payload_write(packet->data, packet->dataLength, &registration) != 0 ||
-        enet_peer_send(conns[i].peer, ENET_CHANNEL_UNRELIABLE, packet) != 0) {
-      if (packet != NULL && packet->referenceCount == 0) {
-        enet_packet_destroy(packet);
-      }
-      return -1;
-    }
-  }
-  enet_host_flush(host);
-  return 0;
-}
-
 static void make_header_from_slot(const bk_slot *slot, uint32_t origin_id,
                                   uint64_t send_ts_ns, bk_header *header) {
   header->seq = slot->seq;
@@ -684,6 +684,9 @@ static void mark_unsent_until(client_conn *conn, uint64_t cutoff_ns,
 static uint64_t next_plan_due(const client_conn *conns, int n_conns) {
   uint64_t next = UINT64_MAX;
   for (int i = 0; i < n_conns; ++i) {
+    if (!conns[i].connected || conns[i].plan == NULL) {
+      continue;
+    }
     const uint64_t due = bk_plan_peek_ns(conns[i].plan);
     if (due < next) {
       next = due;
@@ -724,8 +727,10 @@ static const char *metrics_path_or_default(char *buf, size_t cap) {
 
 static int expect_scenario_flows(const client_config *cfg,
                                  const client_conn *conns,
+                                 int n_conns,
+                                 uint32_t roster_conns,
                                  bk_metrics *metrics,
-                                 const bk_schedule *schedule) {
+                                 uint64_t first_sched_ts_ns) {
   if (!cfg->scenario.present) {
     return 0;
   }
@@ -733,11 +738,11 @@ static int expect_scenario_flows(const client_config *cfg,
     if (cfg->scenario.state.rate_lt == 0.0) {
       return 0;
     }
-    for (int i = 0; i < cfg->conns; ++i) {
+    for (int i = 0; i < n_conns; ++i) {
       if (bk_metrics_expect_latest(
               metrics, conns[i].local_index, cfg->scenario.total_conns,
               cfg->scenario.state.traffic_id,
-              BK_DIRECTION_SERVER_TO_CLIENT, schedule->start_at_ns) != 0) {
+              BK_DIRECTION_SERVER_TO_CLIENT, first_sched_ts_ns) != 0) {
         return -1;
       }
     }
@@ -746,27 +751,40 @@ static int expect_scenario_flows(const client_config *cfg,
   if (cfg->rate_lt == 0.0) {
     return 0;
   }
-  for (int i = 0; i < cfg->conns; ++i) {
-    const uint32_t first_origin =
-        cfg->scenario.kind == BK_SCENARIO_ROOM_RELAY ? 0u
-                                                     : conns[i].origin_id;
-    const uint32_t end_origin =
-        cfg->scenario.kind == BK_SCENARIO_ROOM_RELAY
-            ? cfg->scenario.total_conns
-            : first_origin + 1u;
-    for (uint32_t origin = first_origin; origin < end_origin; ++origin) {
-      if (bk_metrics_expect_latest(metrics, conns[i].local_index, origin,
+  for (int i = 0; i < n_conns; ++i) {
+    if (cfg->scenario.kind != BK_SCENARIO_ROOM_RELAY) {
+      if (bk_metrics_expect_latest(metrics, conns[i].local_index,
+                                   conns[i].origin_id,
                                    cfg->traffic_id,
                                    BK_DIRECTION_ROOM_RELAY,
-                                   schedule->start_at_ns) != 0) {
+                                   first_sched_ts_ns) != 0) {
         return -1;
       }
+      continue;
+    }
+    uint32_t registered = 0;
+    for (int j = 0; j < n_conns; ++j) {
+      if (bk_metrics_expect_latest(metrics, conns[i].local_index,
+                                   conns[j].origin_id, cfg->traffic_id,
+                                   BK_DIRECTION_ROOM_RELAY,
+                                   first_sched_ts_ns) != 0) {
+        return -1;
+      }
+      registered++;
+    }
+    if (registered != roster_conns) {
+      return -1;
     }
   }
   return 0;
 }
 
 static int run_client(const client_config *cfg) {
+  bk_ramp_config ramp;
+  if (bk_ramp_config_load((uint32_t)cfg->conns, &ramp) != 0) {
+    fprintf(stderr, "invalid BENCH_RAMP_* configuration\n");
+    return -1;
+  }
   const bool authoritative =
       cfg->scenario.kind == BK_SCENARIO_AUTHORITATIVE_STATE;
   const uint32_t max_origin_id =
@@ -848,7 +866,8 @@ static int run_client(const client_config *cfg) {
   }
   address.port = cfg->port;
 
-  for (int i = 0; i < cfg->conns; ++i) {
+  int initiated_conns = ramp.enabled ? (int)ramp.start_conns : cfg->conns;
+  for (int i = 0; i < initiated_conns; ++i) {
     conns[i].origin_id = cfg->origin_base + (uint32_t)i;
     conns[i].local_index = (uint32_t)i;
     conns[i].peer = enet_host_connect(host, &address, 2, 0);
@@ -865,7 +884,7 @@ static int run_client(const client_config *cfg) {
     conns[i].peer->data = &conns[i];
   }
 
-  if (wait_for_connects(host, cfg, cfg->conns, metrics, &stats) != 0) {
+  if (wait_for_connects(host, cfg, initiated_conns, metrics, &stats) != 0) {
     fprintf(stderr, "timed out waiting for ENet connects\n");
     if (control != NULL) {
       bk_control_close(control);
@@ -875,16 +894,7 @@ static int run_client(const client_config *cfg) {
     bk_metrics_free(metrics);
     return -1;
   }
-  if (send_registrations(host, conns, cfg->conns) != 0) {
-    fprintf(stderr, "ENet registration send failed\n");
-    if (control != NULL) {
-      bk_control_close(control);
-    }
-    free(conns);
-    enet_host_destroy(host);
-    bk_metrics_free(metrics);
-    return -1;
-  }
+  enet_host_flush(host);
 
   bk_schedule schedule;
   if (control != NULL) {
@@ -918,7 +928,7 @@ static int run_client(const client_config *cfg) {
   }
 
   const uint64_t plan_start_ns = bk_now_ns();
-  for (int i = 0; i < cfg->conns; ++i) {
+  for (int i = 0; i < initiated_conns; ++i) {
     conns[i].plan =
         bk_plan_new(streams, n_streams, plan_start_ns, schedule.start_at_ns,
                     schedule.stop_at_ns);
@@ -936,7 +946,10 @@ static int run_client(const client_config *cfg) {
       return -1;
     }
   }
-  if (expect_scenario_flows(cfg, conns, metrics, &schedule) != 0) {
+  if (expect_scenario_flows(cfg, conns, initiated_conns,
+                            ramp.enabled ? (uint32_t)initiated_conns
+                                         : cfg->scenario.total_conns,
+                            metrics, schedule.start_at_ns) != 0) {
     fprintf(stderr, "bk_metrics_expect_latest failed\n");
     if (control != NULL) {
       bk_control_close(control);
@@ -951,19 +964,110 @@ static int run_client(const client_config *cfg) {
   }
 
   bool marked_unsent = false;
-  int connected_count = cfg->conns;
+  int connected_count = initiated_conns;
   int run_rc = 0;
   bk_steady steady = {0, false};
-  while (bk_now_ns() < schedule.drain_until_ns) {
+  bk_ramp_phase ramp_phase;
+  if (ramp.enabled) {
+    bk_ramp_phase_begin(&ramp, schedule.start_at_ns, &ramp_phase);
+  }
+  bool ramp_complete = false;
+  while (ramp.enabled ? !ramp_complete
+                      : bk_now_ns() < schedule.drain_until_ns) {
     uint64_t now = bk_now_ns();
+    if (ramp.enabled && bk_ramp_stop_requested()) {
+      ramp_complete = true;
+      break;
+    }
     if (drain_events(host, cfg, metrics, &connected_count, &stats) != 0) {
       fprintf(stderr, "enet event handling failed\n");
       run_rc = -1;
       break;
     }
+    if (ramp.enabled && now >= ramp_phase.phase_start_ns) {
+      while ((uint32_t)initiated_conns < ramp_phase.target_conns) {
+        if (bk_ramp_stop_requested()) {
+          ramp_complete = true;
+          break;
+        }
+        const int index = initiated_conns;
+        conns[index].origin_id = cfg->origin_base + (uint32_t)index;
+        conns[index].local_index = (uint32_t)index;
+        conns[index].peer = enet_host_connect(host, &address, 2, 0);
+        if (conns[index].peer == NULL) {
+          fprintf(stderr, "ramp enet_host_connect failed at %d\n", index);
+          run_rc = -1;
+          ramp_complete = true;
+          break;
+        }
+        conns[index].peer->data = &conns[index];
+        conns[index].plan =
+            bk_plan_new(streams, n_streams, now, schedule.start_at_ns,
+                        schedule.stop_at_ns);
+        if (conns[index].plan == NULL) {
+          fprintf(stderr, "ramp bk_plan_new failed at %d\n", index);
+          run_rc = -1;
+          ramp_complete = true;
+          break;
+        }
+        initiated_conns++;
+      }
+      if (run_rc != 0) {
+        break;
+      }
+      if (ramp_complete) {
+        break;
+      }
+      if (!ramp_phase.reset_done && now >= ramp_phase.phase_end_ns) {
+        fprintf(stderr, "ramp phase stalled across reset and phase end\n");
+        run_rc = -1;
+        break;
+      }
+      // Prepare accounting as soon as the phase starts, after attempting to
+      // add its target peers. The guard is then entirely available for the
+      // server to reach the same prepared state; guard traffic is rejected by
+      // the future-starting cohort.
+      if (!ramp_phase.reset_done) {
+        bk_metrics_reset(metrics);
+        if (bk_metrics_set_cohort(metrics, ramp_phase.reset_at_ns,
+                                  ramp_phase.sample_end_ns) != 0 ||
+            expect_scenario_flows(cfg, conns, initiated_conns,
+                                  ramp_phase.target_conns, metrics,
+                                  ramp_phase.reset_at_ns) != 0) {
+          fprintf(stderr, "ramp expected-flow registration failed\n");
+          run_rc = -1;
+          break;
+        }
+        ramp_phase.sample_conns = ramp_phase.target_conns;
+        ramp_phase.reset_done = 1;
+      }
+      if (now >= ramp_phase.phase_end_ns) {
+        const uint64_t cutoff = ramp_phase.sample_end_ns;
+        for (uint32_t i = 0; i < ramp_phase.target_conns; ++i) {
+          mark_unsent_until(&conns[i], cutoff, metrics);
+        }
+        if (!ramp_phase.reset_done ||
+            bk_ramp_dump_metrics(metrics, ramp_phase.phase,
+                                 ramp_phase.sample_conns) != 0) {
+          fprintf(stderr, "ramp metrics dump failed\n");
+          run_rc = -1;
+          break;
+        }
+        if (bk_ramp_stop_requested()) {
+          ramp_complete = true;
+          break;
+        }
+        if (!bk_ramp_phase_advance(&ramp, (uint32_t)cfg->conns,
+                                   &ramp_phase)) {
+          ramp_complete = true;
+          break;
+        }
+        continue;
+      }
+    }
     // 定常判定つき warmup(benchspec v2): rate 報告と確定窓(window)の受信。
     // window を受けたら全 conn の plan に計測窓を差し替える
-    if (control != NULL) {
+    if (control != NULL && !ramp.enabled) {
       uint64_t raw_submitted = 0;
       uint64_t raw_rm = 0;
       uint64_t raw_ru = 0;
@@ -976,7 +1080,7 @@ static int run_client(const client_config *cfg) {
         break;
       }
       if (sr == 1) {
-        for (int i = 0; i < cfg->conns; ++i) {
+        for (int i = 0; i < initiated_conns; ++i) {
           bk_plan_set_window(conns[i].plan, schedule.start_at_ns,
                              schedule.stop_at_ns);
         }
@@ -990,7 +1094,10 @@ static int run_client(const client_config *cfg) {
 
     if (now < schedule.stop_at_ns) {
       bool submitted_any = false;
-      for (int i = 0; i < cfg->conns; ++i) {
+      for (int i = 0; i < initiated_conns; ++i) {
+        if (!conns[i].connected) {
+          continue;
+        }
         bk_slot slot;
         while (bk_plan_next(conns[i].plan, now, &slot)) {
           const size_t payload_size = (slot.flags & BK_FLAG_MUST_DELIVER)
@@ -1004,10 +1111,10 @@ static int run_client(const client_config *cfg) {
       if (submitted_any) {
         enet_host_flush(host);
       }
-    } else if (!marked_unsent) {
+    } else if (!ramp.enabled && !marked_unsent) {
       const uint64_t cutoff =
           schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
-      for (int i = 0; i < cfg->conns; ++i) {
+      for (int i = 0; i < initiated_conns; ++i) {
         mark_unsent_until(&conns[i], cutoff, metrics);
       }
       marked_unsent = true;
@@ -1016,9 +1123,17 @@ static int run_client(const client_config *cfg) {
     now = bk_now_ns();
     uint64_t next_ns = schedule.drain_until_ns;
     if (now < schedule.stop_at_ns) {
-      const uint64_t due = next_plan_due(conns, cfg->conns);
+      const uint64_t due = next_plan_due(conns, initiated_conns);
       if (due < next_ns) {
         next_ns = due;
+      }
+    }
+    if (ramp.enabled) {
+      const uint64_t phase_due = ramp_phase.reset_done
+                                     ? ramp_phase.phase_end_ns
+                                     : ramp_phase.phase_start_ns;
+      if (phase_due < next_ns) {
+        next_ns = phase_due;
       }
     }
     ENetEvent event;
@@ -1039,7 +1154,7 @@ static int run_client(const client_config *cfg) {
     }
   }
 
-  if (!marked_unsent) {
+  if (!ramp.enabled && !marked_unsent) {
     const uint64_t cutoff =
         schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
     for (int i = 0; i < cfg->conns; ++i) {
@@ -1047,13 +1162,16 @@ static int run_client(const client_config *cfg) {
     }
   }
 
-  char default_metrics_path[128];
-  const char *metrics_path =
-      metrics_path_or_default(default_metrics_path, sizeof(default_metrics_path));
   int rc = run_rc;
-  if (metrics_path == NULL || bk_metrics_dump_json(metrics, metrics_path) != 0) {
-    fprintf(stderr, "bk_metrics_dump_json failed\n");
-    rc = -1;
+  if (!ramp.enabled) {
+    char default_metrics_path[128];
+    const char *metrics_path = metrics_path_or_default(
+        default_metrics_path, sizeof(default_metrics_path));
+    if (metrics_path == NULL ||
+        bk_metrics_dump_json(metrics, metrics_path) != 0) {
+      fprintf(stderr, "bk_metrics_dump_json failed\n");
+      rc = -1;
+    }
   }
 
   char stats_json[1024];

@@ -1,4 +1,5 @@
 #include "kcp_common.h"
+#include "../ramp.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -894,14 +895,16 @@ static void make_state_header(const server_config *cfg, const bk_slot *slot,
 static int send_state_slot(int fd, const server_config *cfg,
                            peer_table *pt, const bk_slot *slot,
                            uint8_t *payload, bk_metrics *metrics,
-                           server_stats *stats) {
+                           server_stats *stats, uint32_t ramp_target_conns) {
   if ((slot->flags & (BK_FLAG_MEASURE | BK_FLAG_MUST_DELIVER)) ==
       BK_FLAG_MEASURE) {
     stats->server_state_ticks++;
   }
   const bool must_deliver = (slot->flags & BK_FLAG_MUST_DELIVER) != 0;
   const size_t payload_size = state_payload_size(cfg, slot);
-  for (uint32_t target = 0; target < cfg->total_conns; ++target) {
+  const uint32_t targets =
+      ramp_target_conns != 0 ? ramp_target_conns : cfg->total_conns;
+  for (uint32_t target = 0; target < targets; ++target) {
     const size_t mapped = pt->origin_to_peer[target];
     bk_header header;
     make_state_header(cfg, slot, 0, &header);
@@ -928,14 +931,15 @@ static int send_state_slot(int fd, const server_config *cfg,
 
 static void mark_state_unsent(const server_config *cfg, const peer_table *pt,
                               bk_plan *plan, uint64_t cutoff_ns,
-                              bk_metrics *metrics, server_stats *stats) {
+                              bk_metrics *metrics, server_stats *stats,
+                              uint32_t target_conns) {
   bk_slot slot;
   while (bk_plan_next(plan, cutoff_ns, &slot)) {
     if ((slot.flags & (BK_FLAG_MEASURE | BK_FLAG_MUST_DELIVER)) ==
         BK_FLAG_MEASURE) {
       stats->server_state_ticks++;
     }
-    for (uint32_t target = 0; target < cfg->total_conns; ++target) {
+    for (uint32_t target = 0; target < target_conns; ++target) {
       (void)pt;
       bk_header header;
       make_state_header(cfg, &slot, 0, &header);
@@ -955,6 +959,24 @@ static int expect_client_inputs(const server_config *cfg,
                                  cfg->input.traffic_id,
                                  BK_DIRECTION_CLIENT_TO_SERVER,
                                  schedule->start_at_ns) != 0) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static int expect_target_client_inputs(const server_config *cfg,
+                                       uint32_t target_conns,
+                                       uint64_t first_sched_ts_ns,
+                                       bk_metrics *metrics) {
+  if (cfg->input.rate_lt == 0.0) {
+    return 0;
+  }
+  for (uint32_t origin = 0; origin < target_conns; ++origin) {
+    if (bk_metrics_expect_latest(metrics, origin, origin,
+                                 cfg->input.traffic_id,
+                                 BK_DIRECTION_CLIENT_TO_SERVER,
+                                 first_sched_ts_ns) != 0) {
       return -1;
     }
   }
@@ -1047,6 +1069,11 @@ int main(int argc, char **argv) {
     usage(argv[0]);
     return EXIT_FAILURE;
   }
+  bk_ramp_config ramp;
+  if (bk_ramp_config_load(cfg.total_conns, &ramp) != 0) {
+    fprintf(stderr, "invalid BENCH_RAMP_* configuration\n");
+    return EXIT_FAILURE;
+  }
   if (signal(SIGINT, on_signal) == SIG_ERR ||
       signal(SIGTERM, on_signal) == SIG_ERR) {
     perror("signal");
@@ -1133,9 +1160,17 @@ int main(int argc, char **argv) {
   bool roster_frozen = false;
   bool state_marked_unsent = false;
   bool window_final = false;
+  bk_ramp_phase ramp_phase;
+  if (ramp.enabled) {
+    bk_ramp_phase_begin(&ramp, schedule.start_at_ns, &ramp_phase);
+  }
   while (!g_stop) {
     uint64_t now = bk_now_ns();
+    if (ramp.enabled && bk_ramp_stop_requested()) {
+      break;
+    }
     if (cfg.scenario == SCENARIO_AUTHORITATIVE_STATE &&
+        !ramp.enabled &&
         !schedule_valid && pt_roster_complete(&peers)) {
       schedule.start_at_ns = add_ns(now, DEV_WARMUP_NS);
       schedule.stop_at_ns = add_ns(schedule.start_at_ns, DEV_DURATION_NS);
@@ -1143,13 +1178,13 @@ int main(int argc, char **argv) {
       schedule_valid = true;
     }
     if (cfg.scenario == SCENARIO_AUTHORITATIVE_STATE && schedule_valid &&
-        !roster_frozen && now >= schedule.start_at_ns) {
+        !ramp.enabled && !roster_frozen && now >= schedule.start_at_ns) {
       fprintf(stderr,
               "authoritative roster incomplete before measurement start\n");
       goto loop_cleanup;
     }
     if (cfg.scenario == SCENARIO_AUTHORITATIVE_STATE && schedule_valid &&
-        !roster_frozen && pt_roster_complete(&peers)) {
+        !ramp.enabled && !roster_frozen && pt_roster_complete(&peers)) {
       bk_stream streams[2];
       int n_streams = 0;
       if (build_state_streams(&cfg, streams, &n_streams) != 0) {
@@ -1170,7 +1205,70 @@ int main(int argc, char **argv) {
       roster_frozen = true;
     }
 
-    if (control != NULL && schedule_valid && !window_final) {
+    if (cfg.scenario == SCENARIO_AUTHORITATIVE_STATE && ramp.enabled &&
+        schedule_valid && state_plan == NULL) {
+      bk_stream streams[2];
+      int n_streams = 0;
+      if (build_state_streams(&cfg, streams, &n_streams) != 0) {
+        fprintf(stderr, "invalid state rates\n");
+        goto loop_cleanup;
+      }
+      const size_t state_cap = cfg.state.payload_lt > cfg.state.payload_md
+                                   ? cfg.state.payload_lt
+                                   : cfg.state.payload_md;
+      state_payload = (uint8_t *)calloc(1, state_cap);
+      state_plan = bk_plan_new(streams, n_streams, now,
+                               schedule.start_at_ns, schedule.stop_at_ns);
+      if (state_payload == NULL || state_plan == NULL) {
+        fprintf(stderr, "ramp authoritative state initialization failed\n");
+        goto loop_cleanup;
+      }
+    }
+
+    if (ramp.enabled && now >= ramp_phase.phase_start_ns) {
+      if (!ramp_phase.reset_done && now >= ramp_phase.phase_end_ns) {
+        fprintf(stderr, "ramp phase stalled across reset and phase end\n");
+        goto loop_cleanup;
+      }
+      // Install the phase accounting window at phase start. The cohort still
+      // starts after guard, so packets serviced during guard are ignored.
+      if (!ramp_phase.reset_done) {
+        bk_metrics_reset(metrics);
+        if (bk_metrics_set_cohort(metrics, ramp_phase.reset_at_ns,
+                                  ramp_phase.sample_end_ns) != 0 ||
+            (cfg.scenario == SCENARIO_AUTHORITATIVE_STATE &&
+             expect_target_client_inputs(&cfg, ramp_phase.target_conns,
+                                        ramp_phase.reset_at_ns,
+                                        metrics) != 0)) {
+          fprintf(stderr, "ramp expected-flow registration failed\n");
+          goto loop_cleanup;
+        }
+        ramp_phase.sample_conns = ramp_phase.target_conns;
+        ramp_phase.reset_done = 1;
+      }
+      if (now >= ramp_phase.phase_end_ns) {
+        if (state_plan != NULL) {
+          mark_state_unsent(&cfg, &peers, state_plan,
+                            ramp_phase.sample_end_ns, metrics, &stats,
+                            ramp_phase.target_conns);
+        }
+        if (!ramp_phase.reset_done ||
+            bk_ramp_dump_metrics(metrics, ramp_phase.phase,
+                                 ramp_phase.sample_conns) != 0) {
+          fprintf(stderr, "ramp metrics dump failed\n");
+          goto loop_cleanup;
+        }
+        if (bk_ramp_stop_requested()) {
+          break;
+        }
+        if (!bk_ramp_phase_advance(&ramp, cfg.total_conns, &ramp_phase)) {
+          break;
+        }
+        continue;
+      }
+    }
+
+    if (control != NULL && schedule_valid && !window_final && !ramp.enabled) {
       if (now >= schedule.start_at_ns) {
         window_final = true;
       } else {
@@ -1198,17 +1296,20 @@ int main(int argc, char **argv) {
       bk_slot slot;
       while (bk_plan_next(state_plan, now, &slot)) {
         if (send_state_slot(fd, &cfg, &peers, &slot, state_payload,
-                            metrics, &stats) != 0) {
+                            metrics, &stats,
+                            ramp.enabled ? ramp_phase.target_conns : 0) != 0) {
           goto loop_cleanup;
         }
       }
     } else if (state_plan != NULL && !state_marked_unsent) {
       const uint64_t cutoff =
           schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
-      mark_state_unsent(&cfg, &peers, state_plan, cutoff, metrics, &stats);
+      mark_state_unsent(&cfg, &peers, state_plan, cutoff, metrics, &stats,
+                        cfg.total_conns);
       state_marked_unsent = true;
     }
-    if (control != NULL && schedule_valid && now >= schedule.drain_until_ns) {
+    if (!ramp.enabled && control != NULL && schedule_valid &&
+        now >= schedule.drain_until_ns) {
       break;
     }
 
@@ -1224,24 +1325,40 @@ int main(int argc, char **argv) {
         }
       }
     }
+    if (ramp.enabled) {
+      const uint64_t phase_due = ramp_phase.reset_done
+                                     ? ramp_phase.phase_end_ns
+                                     : ramp_phase.phase_start_ns;
+      if (phase_due <= now) {
+        timeout_ms = 0;
+      } else {
+        const uint64_t wait_ms = (phase_due - now) / 1000000ull;
+        if (wait_ms < (uint64_t)timeout_ms) {
+          timeout_ms = (int)wait_ms;
+        }
+      }
+    }
     if (service_once(fd, &cfg, &peers, timeout_ms, &stats, metrics) != 0) {
       fprintf(stderr, "service failed\n");
       goto loop_cleanup;
     }
   }
 
-  if (state_plan != NULL && !state_marked_unsent) {
+  if (!ramp.enabled && state_plan != NULL && !state_marked_unsent) {
     const uint64_t cutoff =
         schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
-    mark_state_unsent(&cfg, &peers, state_plan, cutoff, metrics, &stats);
+    mark_state_unsent(&cfg, &peers, state_plan, cutoff, metrics, &stats,
+                      cfg.total_conns);
   }
 
   {
-    const char *metrics_path = getenv("BENCH_METRICS_OUT");
-    if (metrics_path != NULL && *metrics_path != '\0' &&
-        bk_metrics_dump_json(metrics, metrics_path) != 0) {
-      fprintf(stderr, "bk_metrics_dump_json failed\n");
-      goto loop_cleanup;
+    if (!ramp.enabled) {
+      const char *metrics_path = getenv("BENCH_METRICS_OUT");
+      if (metrics_path != NULL && *metrics_path != '\0' &&
+          bk_metrics_dump_json(metrics, metrics_path) != 0) {
+        fprintf(stderr, "bk_metrics_dump_json failed\n");
+        goto loop_cleanup;
+      }
     }
     char stats_json[2048];
     if (format_stats_json(&stats, &cfg, &peers, stats_json,
