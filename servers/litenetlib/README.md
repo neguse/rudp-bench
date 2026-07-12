@@ -117,8 +117,21 @@ spin-pump(sleep なし)は farm proc が core を焼き同居プロセスを sta
 | PacketPoolSize | server 16384 / client 4096(1000) | 枯渇すると全 packet が contended pool lock + GC alloc 経路に落ちる(`LiteNetManager.PacketPool.cs:42-80`)。fanout の in-flight は容易に 1000 を超える |
 
 SocketBufferSize(1MB)は定数で公開ノブが無い(`NetConstants.cs:48`)。
-farm 側 rcvbuf 増強が必要になった場合(ledger #5 のシグナル発火時)は
-ソース vendor か reflection が必要 — 未実施。
+farm(client)側は ledger #5/#9 のシグナル発火(wired c256 で InErrors=207k)を
+受けて、reflection で kernel rcvbuf を 4MB へ増強済み
+(`LiteNetLibBench.Client/Program.cs` の `SetReceiveBuffer` — protected field への
+reflection が唯一の手段)。計測器の十分性の話であり SUT(server)側は不変。
+同じく farm 側の凍結構成として `ThreadPool.SetMinThreads(cores×4)` を client
+起動時に設定する(ledger #7 — hill-climbing の起動遅延が送信 pacing stall に
+なるため。server には入れない)。
+
+## ramp モード
+
+orchestrator の ramp(単一 run 内の接続数段階増加。契約は
+`benchspec/README.md`「ramp mode」)に対応済み(`BenchKit.CS/BenchRamp.cs`)。
+`BENCH_RAMP_*` が揃うと phase ごとに `NetManager` を追加して per-phase
+snapshot(`$BENCH_METRICS_OUT.ramp-*.json`)を書き、最終の cumulative
+metrics JSON は書かない。
 
 ## 確認結果(loopback 5s run、Release ビルド、2026-07-10)
 

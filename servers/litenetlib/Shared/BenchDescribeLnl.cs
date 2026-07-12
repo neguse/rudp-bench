@@ -45,7 +45,7 @@ public static class LnlDescribe
             "{\"knob\":\"NetManager.UseNativeSockets\",\"value\":\"true\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
             "{\"knob\":\"NetManager.MtuDiscovery\",\"value\":\"true\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
             "{\"knob\":\"NetManager.DisconnectTimeout\",\"value\":\"60000 ms\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
-            "{\"knob\":\"NetManager.UnsyncedEvents\",\"value\":\"true (server)\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
+            "{\"knob\":\"NetManager.UnsyncedReceiveEvent\",\"value\":\"true (server)\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
             "{\"knob\":\"NetManager.UpdateTime\",\"value\":\"1 ms; TriggerUpdate after enqueue (server)\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
             "{\"knob\":\"NetManager.PacketPoolSize\",\"value\":\"16384 (server), 4096 (client)\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib/wiki/NetManager-and-NetPeer\"}," +
             "{\"knob\":\"NetPeer.CreatePacketFromPool/SendPooledPacket\",\"value\":\"direct pooled-packet write (client)\",\"upstream_ref\":\"https://github.com/RevenantX/LiteNetLib\"}" +

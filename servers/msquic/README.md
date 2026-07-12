@@ -63,6 +63,7 @@ benchspec/README.md 準拠の実装対。「ライブラリが想定する最速
 | SendBufferingEnabled | FALSE(TRUE) | 上記 |
 | StreamRecvWindowDefault | 1MB(64KB) | md fanout の flow control 余裕(auto-tune の起点を引き上げ) |
 | DatagramReceiveEnabled | TRUE(FALSE) | lt class の前提 |
+| PeerBidiStreamCount | 16384 | md ストリームの同時数上限。接続あたりの md フローを枯渇させない(`msquic_common.cc:66-67`) |
 
 未検証の候補(バトル時に A/B): `MaxOperationsPerDrain`(既定 16)引き上げ、
 ExecutionProfile MAX_THROUGHPUT、XDP datapath。
@@ -75,6 +76,13 @@ ExecutionProfile MAX_THROUGHPUT、XDP datapath。
 - broadcast c128: VALID・全 proc exit 0(crash なし)。delivery 0.008 =
   datagram が CC キューに滞留する QUIC の意味論どおりの正直な過負荷挙動
   (farm 側 ACK 遅延で BBR が絞られる寄与も含む — wired + farm 増強で再測)
+
+## ramp モード
+
+**未対応**(`docs/ledger.md` #22)。orchestrator の ramp(契約は
+`benchspec/README.md`「ramp mode」)に必要な `BENCH_RAMP_*` / per-phase
+snapshot をこの実装対はまだ持たず、CI の ramp 診断ベンチの対象からも
+外れている。
 
 ## build / test
 

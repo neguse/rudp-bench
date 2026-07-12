@@ -54,3 +54,12 @@ keys, `log2x16` histogram metadata, and 448-bin histogram arrays.
   ループ内ローカルへの固定で解消。docs/ledger.md #19。
 - 確認(loopback 5s、Release): echo c4 p50 0.37ms、bcast c64 delivery
   1.000 / dup 0 / p50 5.9ms。
+
+## ramp モード
+
+orchestrator の ramp(単一 run 内の接続数段階増加。契約は
+`benchspec/README.md`「ramp mode」)に対応済み(`BenchKit.CS/BenchRamp.cs`)。
+`BENCH_RAMP_*` が揃うと phase ごとに接続を追加して per-phase snapshot
+(`$BENCH_METRICS_OUT.ramp-*.json`)を書き、最終の cumulative metrics JSON は
+書かない(上記 smoke の metrics 形状検査は固定窓経路の話)。stop marker
+出現後の connect 失敗は停止手順として graceful に扱う。

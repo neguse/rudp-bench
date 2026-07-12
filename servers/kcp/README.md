@@ -30,7 +30,7 @@ v1 sweep の結論を引き継ぐ:
 - `ikcp_nodelay(1, 5, 2, 1)` — nodelay(min RTO 30ms)、fastresend=2、
   **nocwnd=1**(TCP Reno AIMD の cwnd を無効化。ベンチは自前 rate 制御)
 - **interval 5ms**: `ikcp_nodelay` は interval<10ms を 10ms に clamp する
-  (`third_party/kcp/ikcp.c:1240-1241`)ため、公開 field `kcp->interval` を
+  (`third_party/kcp/ikcp.c:1258-1259`)ため、公開 field `kcp->interval` を
   直接上書きして vendored source を変えずに 5ms を通す。sweep では 5ms が
   高 conn 側の HoL stall 回復で勝った
 - `ikcp_wndsize(256, 256)`: 既定 snd_wnd=32(`ikcp.c:35`)は小さすぎる。
@@ -58,7 +58,17 @@ v1 sweep の結論を引き継ぐ:
 
 - MD は KCP の ordered stream に載るため、loss 時は message 単位の
   HoL blocking が deadline hit に響く(reliable-ordered の宿命)
-- conv は 32-bit。監査 #146: sequence の signed cast half-space により
-  ~71.6min で折り返しに注意(本ベンチの run 長では届かない)
+- KCP 内部クロックは 32-bit ms(`kcp_common.h:37-39` の `kcp_now_ms`、
+  差分は `_itimediff` の signed cast)で、half-space 2^31ms ≈ 24.8 日で
+  折り返す。sn の折り返しは 2^32 packets でベンチの rate では実質届かない。
+  いずれも本ベンチの run 長では問題にならない
 - dead_link=20(`ikcp.c:41`): 同一 segment の再送 20 回で state=-1。
   本実装は切断扱いにせず送信継続する(ベンチ中の削除はロスターを壊すため)
+
+## ramp モード
+
+orchestrator の ramp(単一 run 内の接続数段階増加。契約は
+`benchspec/README.md`「ramp mode」)に対応済み(`../ramp.h` を使用)。
+`BENCH_RAMP_*` が揃うと phase ごとに接続を追加して per-phase snapshot
+(`$BENCH_METRICS_OUT.ramp-*.json`)を書き、最終の cumulative metrics は
+書かない。

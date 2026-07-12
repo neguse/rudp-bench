@@ -29,3 +29,12 @@ keys, `log2x16` histogram metadata, and 448-bin histogram arrays.
 - 確認(loopback 5s、Release): echo c4 p50 0.61ms。c64 broadcast は
   同居負荷のある開発機では farm 側 pacing gate(attempted<0.99)で INVALID に
   なるため、スケール挙動の確定は wired rig でのバトル測定に委ねる。
+
+## ramp モード
+
+orchestrator の ramp(単一 run 内の接続数段階増加。契約は
+`benchspec/README.md`「ramp mode」)に対応済み(`BenchKit.CS/BenchRamp.cs`)。
+`BENCH_RAMP_*` が揃うと phase ごとに接続を追加して per-phase snapshot
+(`$BENCH_METRICS_OUT.ramp-*.json`)を書き、最終の cumulative metrics JSON は
+書かない(上記 smoke の metrics 形状検査は固定窓経路の話)。stop marker
+出現後の connect 失敗は停止手順として graceful に扱う。
