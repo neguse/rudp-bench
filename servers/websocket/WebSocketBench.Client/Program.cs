@@ -343,6 +343,13 @@ static async Task<int> RunRampAsync(
             catch
             {
                 ws.Dispose();
+                // The server observes the stop marker before closing its
+                // listener, so a connect that fails once the marker exists is
+                // the stop protocol in action, not a measurement failure.
+                if (observeStop && ramp.StopRequested)
+                {
+                    throw new BenchRampStopException();
+                }
                 throw;
             }
 
