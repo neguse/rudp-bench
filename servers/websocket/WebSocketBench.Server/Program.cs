@@ -202,8 +202,10 @@ else
 {
     reportJson = stats.ToJson();
 }
+// Ramp runs are scored from per-phase snapshots only; the cumulative series
+// spans multiple connection levels and must not pose as a fixed-window artifact.
 var metricsOut = Environment.GetEnvironmentVariable("BENCH_METRICS_OUT");
-if (!string.IsNullOrWhiteSpace(metricsOut))
+if (rampConfig is null && !string.IsNullOrWhiteSpace(metricsOut))
 {
     await File.WriteAllTextAsync(metricsOut, reportJson + "\n", new UTF8Encoding(false), CancellationToken.None)
         .ConfigureAwait(false);

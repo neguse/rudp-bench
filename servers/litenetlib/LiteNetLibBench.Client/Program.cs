@@ -618,9 +618,10 @@ static async Task<int> RunRampAsync(
     }
 
     PumpAll(0f);
+    // Ramp runs are scored from per-phase snapshots only; the cumulative
+    // series spans multiple connection levels, so no plain metrics artifact
+    // is written (matching the C endpoints).
     var metricsJson = metrics.ToJson();
-    await File.WriteAllTextAsync(metricsPath, metricsJson + "\n", new UTF8Encoding(false), CancellationToken.None)
-        .ConfigureAwait(false);
     var doneJson = progress is null
         ? BenchProgress.AttachValidationToDoneStats(metricsJson, payloadValidation.Count)
         : BenchProgress.AttachToDoneStats(metricsJson, progress.ClientSnapshot(), payloadValidation.Count);
