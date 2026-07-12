@@ -1,6 +1,6 @@
 # 14ライブラリ Adapter 調査結果
 
-[`checklist.md`](checklist.md) の各項目を本プロジェクトの14ライブラリで検証した結果。
+[`checklist.md`](../checklist.md) の各項目を本プロジェクトの14ライブラリで検証した結果。
 adapter コード + third_party ライブラリのソースコードを精読して得た具体的な値を記載。
 
 > **2026-07-02 更新**: [`improvements.md`](improvements.md) の改善実装により、

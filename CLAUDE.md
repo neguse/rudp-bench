@@ -10,7 +10,7 @@
   ループ内の確認は短時間 run(smoke test・低 conns・短 duration)のみで行う。
 - 実時間を無駄にしない。長時間測定を回して待つ運用をしない。
   バトル(長時間ベンチ)は詰め切った実装が揃ってから一括で行う。
-- この方針は specs/2026-07-08-validity-and-tuning.md の V1→V4 実行順に優先する
+- この方針は docs/log/2026-07-08-validity-and-tuning.md の V1→V4 実行順に優先する
   (V1 ceiling sweep も後回し対象)。
 - 設計ノートは `servers/<lib>/README.md` にソース行引用つきで書く。
   「この実装はライブラリが想定する最速の使い方である」を監査可能にするのが目的。

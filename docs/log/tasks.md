@@ -1,6 +1,9 @@
-# Tasks
+# Tasks(v1 adapter backlog — 凍結記録)
 
-`docs/adapter-audit.md` の改善で、adapter 変更だけでは完了しない残作業。
+v1 凍結(ルート CLAUDE.md「v1/v2」)により、この backlog の未完了項目は停止した。
+2026-07-02 時点の残作業の記録として保持する。
+
+[`adapter-audit.md`](adapter-audit.md) の改善で、adapter 変更だけでは完了しない残作業。
 2026-07-02 の全実装レビューで見つかった新規の改善ポイントは [`improvements.md`](improvements.md) 参照。
 
 - [x] `coop_rudp` core に per-conn close/abort と max retransmit/idle timeout を追加し、crashed peer の reliable retransmit queue を解放できるようにする。

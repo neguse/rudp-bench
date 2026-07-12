@@ -1,7 +1,7 @@
 # benchspec — rudp-bench v5 ワイヤ契約
 
 言語非依存の契約仕様。server / client / orchestrator の実装はすべてこの文書に従う。
-設計の背景と根拠は [v2 design spec](../docs/superpowers/specs/2026-07-02-rudp-bench-v2-design.md) 参照。
+設計の背景と根拠は [v2 design spec](../docs/log/2026-07-02-rudp-bench-v2-design.md) 参照。
 
 - version: 5(通常bodyを`splitmix64-v1`へ変更し、wire圧縮禁止を`--describe`へ追加。
   metrics raw countへtimestamp順序違反を追加する。v4の構造化class mapping、v3の
@@ -163,7 +163,36 @@ orchestrator からプロセスへの受け渡しは環境変数で行う:
 | 変数 | 意味 |
 |---|---|
 | `BENCH_CONTROL_SOCK` | control channel の UDS path |
-| `BENCH_METRICS_OUT` | このプロセスが metrics JSON を書き出すファイル path。プロセスは drain 完了後・`done` 送信前に書く |
+| `BENCH_METRICS_OUT` | このプロセスが metrics JSON を書き出すファイル path。プロセスは drain 完了後・`done` 送信前に書く(ramp mode では書かない — 下記) |
+
+### ramp mode(単一 run 内の接続数段階増加)
+
+wire format と control protocol は変えない実行 mode。次の環境変数は
+**all-or-nothing**(一部だけの設定は起動拒否)で、5 変数が揃ったとき有効になる:
+
+| 変数 | 意味 |
+|---|---|
+| `BENCH_RAMP_START_CONNS` | 最初の phase の接続数(1..総接続数) |
+| `BENCH_RAMP_STEP_CONNS` | phase ごとの追加接続数(最終 phase は総接続数へ clamp) |
+| `BENCH_RAMP_GUARD_NS` | phase 冒頭の整定区間(接続追加と peer の準備に充てる) |
+| `BENCH_RAMP_SAMPLE_NS` | 会計対象区間 |
+| `BENCH_RAMP_DRAIN_NS` | sample 内に schedule された packet の到着待ち区間 |
+| `BENCH_RAMP_STOP_PATH` | orchestrator が最初の SLO 破断で作る stop marker のファイル path |
+
+- 各 phase = guard + sample + drain。phase 開始で metrics を reset し、
+  会計 cohort を `sched_ts_ns ∈ (guard 終端, sample 終端]` に固定する
+  (drain 中も transport は動かすが、次 cohort の slot は会計に入れない)。
+  expected flows(latest-value)は phase ごとに現 roster で再登録する
+- phase 終了ごとに snapshot を
+  `$BENCH_METRICS_OUT.ramp-<phase 6桁>-c<接続数 6桁>.json` へ書く。
+  最終的な cumulative `BENCH_METRICS_OUT` は書かない(複数接続レベルを
+  またいだ系列を固定窓 artifact と誤読させないため)。判定は orchestrator が
+  phase snapshot 対から行う
+- endpoint は phase 境界と接続追加中に stop marker を確認し、存在したら
+  `done` を送って終了する(それ以上の過負荷を掛けない)。marker 出現後の
+  接続失敗は停止手順の一部であり、endpoint の異常終了として扱わない
+- ramp は client process 1 個と scenario SLO を前提とする。orchestrator 側の
+  検証・phase 時間の導出は `orchestrator/run/config.go` の `RampConfig` が正
 
 control channel は **Unix domain socket**。netns をファイルシステム経由で越えるため、被測定経路の
 netem の影響を受けない out-of-band 経路になる。プロトコルは line-delimited JSON:

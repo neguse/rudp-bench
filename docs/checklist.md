@@ -1,8 +1,8 @@
 # 高性能通信ライブラリの実装・ベンチマークチェックリスト
 
 対象読者: 通信ライブラリの実装者とベンチマークアダプタの実装者。
-各項目の具体的な根拠は本プロジェクト14ライブラリの調査（[`adapter-audit.md`](adapter-audit.md)）に基づく。
-`§X.Y` は [`dev-notes.md`](dev-notes.md) の事例。
+各項目の具体的な根拠は本プロジェクト14ライブラリの調査（[`adapter-audit.md`](log/adapter-audit.md)）に基づく。
+`§X.Y` は [`dev-notes.md`](log/dev-notes.md) の事例。
 
 ---
 

@@ -11,7 +11,7 @@
 4. [Phase 2 着手前の技術的負債](#4-phase-2-着手前の技術的負債2026-05-30-計測妥当性レビューで照合済み)
 5. [計測指標の定義と既知の系統差](#5-計測指標の定義と既知の系統差2026-05-30-計測妥当性レビュー反映)
 
-関連: 測定レポートは [`docs/measurements/`](measurements/) 配下。
+関連: 測定レポートは [`docs/measurements/`](../measurements/) 配下。
 
 ---
 
@@ -179,7 +179,7 @@ msquic と同じ「c1 から壊れている=ライブラリ起因として不自
 **その他:**
 - **コメント言語:** 日本語コメント OK(プラン・コード両方)。レビュアーが「英語に揃えるべき」と指摘しても従わなくてよい(意図的選択)
 - **ファイル粒度:** 1 adapter = 1 cc(ヘッダ無し、static class を内部 namespace に隠す)。harness の各機能(metrics/csv/scenario/runner/proc_sampler)は h+cc の対。テストは smoke 1本
-- **Canonical benchmark test:** 人間向け入口は [`docs/CANONICAL.md`](CANONICAL.md)。`scripts/run_canonical_tests.sh` を標準の再測定入口にする。ここでの test は unit test ではなく、build 後に latest final saturation profiles (`media_relay`, `game_server`, `echo`) を current canonical target set で N=3 全実行する benchmark test。測定後に `scripts/render_canonical_report.py` が `$OUT/report.md` と `$OUT/plots/*.png` を生成し、`scripts/publish_canonical_result.py` が dated measurement directory と `docs/measurements/current.md` を更新する。各 adapter は STATIC lib(`adapter_<name>` 命名)
+- **Canonical benchmark test:** 人間向け入口は [`docs/log/canonical-v1.md`](canonical-v1.md)。`scripts/run_canonical_tests.sh` を標準の再測定入口にする。ここでの test は unit test ではなく、build 後に latest final saturation profiles (`media_relay`, `game_server`, `echo`) を current canonical target set で N=3 全実行する benchmark test。測定後に `scripts/render_canonical_report.py` が `$OUT/report.md` と `$OUT/plots/*.png` を生成し、`scripts/publish_canonical_result.py` が dated measurement directory と `docs/measurements/current.md` を更新する。各 adapter は STATIC lib(`adapter_<name>` 命名)
 
 ---
 

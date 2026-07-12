@@ -13,7 +13,7 @@ benchspec/README.md 準拠の実装対。「ライブラリが想定する最速
 
 reliable と unreliable を別 channel に分けているのは、同一 channel だと
 channel 内 sequence 維持のため reliable 未到着時に unreliable が
-HoL blocking されるため(`docs/dev-notes.md` §1.3 参照)。
+HoL blocking されるため(`docs/log/dev-notes.md` §1.3 参照)。
 
 **制約**: unsequenced packet は 1 fragment 長
 (≈ MTU 1392 − ヘッダ ≈ 1350B)を超えると reliable fragment に格上げされる

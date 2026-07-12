@@ -1,6 +1,12 @@
 # Workload 定義 — 負荷平面と archetype anchor
 
-- 状態: draft(E2 着手前に凍結)
+- 状態: この平面は orchestrator の workload セル語彙(`r{pps}p{bytes}` /
+  synthetic echo)として実装済みで、その定義書としては現役
+  (`orchestrator/run/workload.go`、`orchestrator/sweep/judge.go` が参照)。
+  一方、この平面を reference 比較の battle matrix として使う案は
+  [ADR-0003](adr/0003-battle-matrix.md) で撤回された。比較カタログの凍結条件は
+  [ADR-0004](adr/0004-reference-preset.md) の preset が正。anchor の根拠収集は
+  preset 導出・将来 scenario の資料として保持する
 - 方針: workload はシチュエーション名で固定せず、**構造を categorical に固定し
   負荷2軸を sweep する平面**として定義する(netem を「mobile」でなく loss%×burst
   平面にしたのと同型の現象パラメータ化)。実在ユースケースは平面上の

@@ -9,7 +9,7 @@
 ## v1 の教訓(なぜ作り直すか)
 
 v1 は「harness が event loop を所有し、adapter が抽象 IF でそれに合わせる」構造だった。
-2ヶ月の運用で得た教訓([dev-notes](../../dev-notes.md) §1、[improvements](../../improvements.md)):
+2ヶ月の運用で得た教訓([dev-notes](dev-notes.md) §1、[improvements](improvements.md)):
 
 1. **ループのはめ込み事故が数桁級の誤測定を生む**: yojimbo の空パケット洪水(0.42→0.989)、
    msquic の poll() no-op、mini_rudp の client 律速。adapter の作りが結果を桁で変える。

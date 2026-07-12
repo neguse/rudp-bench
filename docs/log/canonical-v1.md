@@ -1,6 +1,10 @@
-# Canonical Benchmark
+# Canonical Benchmark(v1 — 凍結記録)
 
-このファイルを canonical benchmark の唯一の人間向け入口にする。
+v1(`harness/`, `adapters/`, `cmd/rudp-benchctl`)の canonical benchmark 運用の記録。
+v1 は凍結済みで、この手順で新しい値は取らない(ルート CLAUDE.md「v1/v2」参照)。
+旧 canonical の published 結果は legacy record として
+[`../measurements/current.md`](../measurements/current.md) から参照できる。
+sentinel(回帰検知)は v2 でも現役のため [`../sentinel.md`](../sentinel.md) に分離した。
 
 ## Run
 
@@ -14,7 +18,7 @@ go run ./cmd/rudp-benchctl run scenarios/canonical.json
 
 ## Current Published Result
 
-**open this:** [`measurements/current.md`](measurements/current.md)
+**open this:** [`measurements/current.md`](../measurements/current.md)
 
 `go run ./cmd/rudp-bench-canonical` publishes each run to a dated directory under `docs/measurements/` and updates `docs/measurements/current.md` to point at that latest report. Review and commit both the dated directory and `current.md` when publishing a new current result.
 
@@ -59,33 +63,9 @@ The canonical layout is role-isolated by physical core:
 sweep 終了時に teardown する。benchmark process は `systemd-run` の
 `AllowedCPUs` で起動され、OS / client / server が物理コアを共有しない。
 
-## 回帰検知(sentinel)
-
-published 基準からの漂移を 26 プローブ・約 13 分で機械判定する定点再測チェック。
-
-```sh
-sudo scripts/run-sentinel.sh            # 既定 config(orchestrator/examples/sentinel-home.json)
-sudo scripts/run-sentinel.sh my.json    # config 指定
-```
-
-ラッパーが CPU 隔離下の bench.slice 起動と netns 残留の掃除を面倒みる。
-終了コード: 0 = 全 PASS / 3 = DRIFT(2 回連続で基準乖離)/ 4 = INVALID
-(測定不成立 — 環境かインフラの故障。結果は漂移として読まないこと)。
-単発のゆらぎは FLAP として報知されない。
-
-**運用ルール**:
-
-- 測定器(orchestrator / benchkit / BenchKit.CS / servers / adapters)に触れる
-  変更は、merge 前に sentinel を 1 回通すこと(2026-07-02 に adapter 改修で
-  配送 0% の回帰が unit test 全 green のまま入った再発防止)
-- 日次実行の例(root の crontab):
-  `0 5 * * * /home/neguse/ghq/github.com/neguse/rudp-bench/scripts/run-sentinel.sh >> /var/log/rudp-sentinel.log 2>&1`
-- 基準は published aggregate から生成される。プロトコル変更(benchspec version
-  更新)をしたら基準の取り直しが必要(古い基準との比較は偽 DRIFT になる)
-
 ## Source Of Truth
 
-- Benchmark CLI: [`../cmd/rudp-benchctl`](../cmd/rudp-benchctl)
-- Canonical scenario: [`../scenarios/canonical.json`](../scenarios/canonical.json)
-- Stable published pointer: [`measurements/current.md`](measurements/current.md)
+- Benchmark CLI: [`../../cmd/rudp-benchctl`](../../cmd/rudp-benchctl)
+- Canonical scenario: [`../../scenarios/canonical.json`](../../scenarios/canonical.json)
+- Stable published pointer: [`measurements/current.md`](../measurements/current.md)
 - Dated measurement reports under `docs/measurements/` are archived run outputs.
