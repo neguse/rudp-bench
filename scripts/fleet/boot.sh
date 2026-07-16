@@ -27,10 +27,11 @@ apt-get update -qq
 # ベンチ運用ツール + native adapter の動的依存(gns: protobuf / msquic: numa)
 apt-get install -y -qq zstd ethtool iperf3 jq libprotobuf32t64 libnuma1 libsodium23
 
-# nofile(現プロセスと、以後 systemd-run で起動する scope の両方)
-mkdir -p /etc/systemd/system.conf.d
-printf '[Manager]\nDefaultLimitNOFILE=1048576\n' > /etc/systemd/system.conf.d/99-bench-nofile.conf
-systemctl daemon-reexec
+# nofile: 現プロセスは ulimit、ssh セッションは pam_limits、bench scope は
+# systemd-run の -p LimitNOFILE で与える。systemctl daemon-reexec は使わない
+# (cloud-final unit が壊れて boot.sh が orphan 化し、gate 途中で刈られる —
+# 2026-07-17 の 2 台目実機で実証)
+printf 'root - nofile 1048576\nubuntu - nofile 1048576\n' > /etc/security/limits.d/99-bench-nofile.conf
 ulimit -n 1048576
 
 # 動的依存の欠落を fail fast で検出(apt リストの陳腐化を manifest 側から検証)。
@@ -64,6 +65,8 @@ jq -e '.ok == true' "$GATE_DIR/doctor.json" > /dev/null || {
 # isolate setup 後は shell が os_cpus に閉じ込められるため、bench 系の実行は
 # bench.slice scope で起動する(battle.md「rig の CPU 隔離下では〜」の既知の罠)
 BENCH_CPUS=$(jq -r .bench_cpus "$RIG")
+# rlimit は scope に設定できない(LimitNOFILE は service 専用)。本スクリプトの
+# ulimit を子が継承する
 systemd-run --scope --slice=bench.slice -p AllowedCPUs="$BENCH_CPUS" -p CPUWeight=10000 --quiet \
   env ORCHESTRATOR="$PWD/build-v2/orchestrator" \
   ./calibration/duration_invariance.sh > "$GATE_DIR/duration-invariance.log" 2>&1
