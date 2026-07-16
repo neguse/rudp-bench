@@ -20,6 +20,15 @@ cd "$(dirname "$0")/../.."
 
 GATE_DIR=/var/lib/rudp-bench/boot-gate
 mkdir -p "$GATE_DIR"
+# coordinator が「実行中」と「失敗」を区別できるよう、異常終了時は FAILED を残す
+trap '[ -f "$GATE_DIR/READY" ] || touch "$GATE_DIR/FAILED"' EXIT
+
+# 初回 boot のバックグラウンドジョブ(snap seeding・apt-daily 等)が測定を
+# 摂動させる(3 台目実機: cloud-init 直下の calibration だけ非 PASS)。
+# boot が settle するまで待つ。本スクリプトは cloud-final の子ではなく独立
+# transient unit として起動される前提(user-data 参照 — cloud-final の子だと
+# この wait はデッドロックする)
+systemctl is-system-running --wait > /dev/null || true
 
 # --- 最小 setup ---------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
@@ -63,13 +72,22 @@ jq -e '.ok == true' "$GATE_DIR/doctor.json" > /dev/null || {
 
 # 校正(duration invariance。netem 実効値 gate は run 時に orchestrator が行う)。
 # isolate setup 後は shell が os_cpus に閉じ込められるため、bench 系の実行は
-# bench.slice scope で起動する(battle.md「rig の CPU 隔離下では〜」の既知の罠)
+# bench.slice scope で起動する(battle.md「rig の CPU 隔離下では〜」の既知の罠)。
+# 証拠(run bundle)は gate dir に永続化し、失敗時に消えないようにする。
+# rlimit は scope に設定できない(LimitNOFILE は service 専用)ため、本
+# スクリプトの ulimit を子が継承する
 BENCH_CPUS=$(jq -r .bench_cpus "$RIG")
-# rlimit は scope に設定できない(LimitNOFILE は service 専用)。本スクリプトの
-# ulimit を子が継承する
-systemd-run --scope --slice=bench.slice -p AllowedCPUs="$BENCH_CPUS" -p CPUWeight=10000 --quiet \
-  env ORCHESTRATOR="$PWD/build-v2/orchestrator" \
-  ./calibration/duration_invariance.sh > "$GATE_DIR/duration-invariance.log" 2>&1
+run_calibration() { # $1 = attempt 番号
+  systemd-run --scope --slice=bench.slice -p AllowedCPUs="$BENCH_CPUS" -p CPUWeight=10000 --quiet \
+    env ORCHESTRATOR="$PWD/build-v2/orchestrator" \
+      CALIBRATION_DIR="$GATE_DIR/duration-invariance/attempt-$1" \
+    ./calibration/duration_invariance.sh > "$GATE_DIR/duration-invariance-$1.log" 2>&1
+}
+# 1 回だけ retry(証拠は attempt 別に残る)。flap 自体が gate dir に開示される
+if ! run_calibration 1; then
+  echo "WARN: calibration attempt-1 が非 PASS。attempt-2 を実行" >&2
+  run_calibration 2
+fi
 
 # TODO(A/A 設計時に確定): raw_udp anchor 1 点 probe の config を固定し、
 # ここで実行して結果を $GATE_DIR に残す。合否(fleet median 比較)は coordinator。

@@ -62,7 +62,15 @@ run_once() {
   "output_dir": "$out"
 }
 EOF
-  "$ORCH" run -config "$out/config.json" >/dev/null
+  # orchestrator run は非 PASS(FAIL/INVALID 等)でも result/summary を出力して
+  # 無言で非ゼロ exit する(rc=2..5)。失敗時に outcome を表面化する
+  local rc=0
+  "$ORCH" run -config "$out/config.json" > "$out/orchestrator.log" 2>&1 || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "FAIL: run(duration=$duration) rc=$rc outcome=$(jq -r '.outcome // .verdict // "unknown"' "$out/result.json" 2>/dev/null)" >&2
+    tail -5 "$out/orchestrator.log" >&2 || true
+    return "$rc"
+  fi
 }
 
 run_once "$DUR_SHORT" "$WORK/short" 42911

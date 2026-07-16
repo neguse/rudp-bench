@@ -13,4 +13,8 @@ runcmd:
   - apt-get update -qq
   - apt-get install -y -qq zstd
   - tar --zstd -xf /opt/bundle.tar.zst -C /opt/rudp-bench
-  - cd /opt/rudp-bench && ./scripts/fleet/boot.sh -rig "__RIG__" > /var/log/rudp-boot-gate.log 2>&1
+  # gate は cloud-final の子で走らせない(orphan/kill 意味論に巻き込まれるのと、
+  # gate 内の is-system-running --wait が boot とデッドロックするため)。
+  # 独立 transient unit として起動し、cloud-init 自体は即座に成功で終わる。
+  # 合否は coordinator が /var/lib/rudp-bench/boot-gate/{READY,FAILED} を見る
+  - systemd-run --unit=rudp-boot-gate -p Type=oneshot -p WorkingDirectory=/opt/rudp-bench --no-block /bin/bash -c './scripts/fleet/boot.sh -rig "__RIG__" > /var/log/rudp-boot-gate.log 2>&1'
