@@ -56,7 +56,7 @@ ADR-0002 の「host fingerprint が違う cell は同じ comparison に集約し
 - **サイズ混在の禁止**: instance size が違えば別 class。1 campaign は単一
   サイズで構成する
 
-### 3. spot-first 実行
+### 3. spot 実行（on-demand fallback なし）
 
 - cell（treatment×scenario×regime）単位の work queue + 冪等 retry で配る。
   fleet fingerprint により代替ホストは定義上「同じ rig」なので、spot 中断の
@@ -67,18 +67,22 @@ ADR-0002 の「host fingerprint が違う cell は同じ comparison に集約し
   しない — ADR-0002「中断 run は捨てる」の原則のまま）。S3 へ upload 完了 +
   gate PASS の block のみ有効
 - IMDS の interruption notice（2 分前）で実行中 run を interrupted とマークし
-  cell を requeue する
-- **fallback**: 同一 cell が 2 回中断されたら on-demand へ切り替える
-  （spot-first / on-demand-fallback）。多様化は AZ 方向のみ（AZ が fingerprint
-  に効かないことは A/A に混ぜて確認する）
-- campaign 記録に中断率と fallback 発動数を残す。高頻度なら confirmatory を
-  on-demand へ戻す判断材料にする
+  cell を requeue する。retry は spot のまま、campaign の打ち切り時刻
+  （ADR-0002 pre-registration の「予定時間・打ち切り条件」）まで繰り返す
+- **on-demand fallback は置かない**（2026-07-16 owner 決定）。打ち切りまでに
+  完了しなかった cell は未取得として記録し、campaign の穴とする。中断が
+  多くて回りきらないのは購入形態で吸収する事象ではなく、**打ち切って原因を
+  調査する事象**（AZ・時間帯・サイズ・fleet 構成の見直し）。campaign 単価が
+  安いため、穴が多ければ campaign ごと再実行する方が単純
+- 多様化は AZ 方向のみ（AZ が fingerprint に効かないことは A/A に混ぜて
+  確認する）。campaign 記録に中断率を残す
 
 ### 4. 1h campaign protocol
 
 golden AMI（受入自動化 + フルビルド焼き込み）を前提に、campaign を次の
-phase で回す。1h は typical 目標であり、spot 中断時の worst は 1.5h 程度を
-許容する（hard SLA ではない）。
+phase で回す。1h は typical 目標（hard SLA ではない）。打ち切り時刻は
+campaign ごとに pre-registration で固定し、超えたら未取得 cell を残したまま
+終了して原因を調査する。
 
 | phase | 内容 | 予算 |
 |---|---|---|
@@ -119,7 +123,6 @@ phase で回す。1h は typical 目標であり、spot 中断時の worst は 1
 
 - fleet の instance size と台数
 - anchor gate / drift gate の許容幅
-- on-demand fallback の発動閾値（提案値: 同一 cell 2 回中断）
 
 ## Consequences
 
