@@ -17,4 +17,7 @@ runcmd:
   # gate 内の is-system-running --wait が boot とデッドロックするため)。
   # 独立 transient unit として起動し、cloud-init 自体は即座に成功で終わる。
   # 合否は coordinator が /var/lib/rudp-bench/boot-gate/{READY,FAILED} を見る
-  - systemd-run --unit=rudp-boot-gate -p Type=oneshot -p WorkingDirectory=/opt/rudp-bench --no-block /bin/bash -c './scripts/fleet/boot.sh -rig "__RIG__" > /var/log/rudp-boot-gate.log 2>&1'
+  # Type は既定(simple)のまま: oneshot だと unit が完了まで activating =
+  # 未完了 start job になり、gate 内の is-system-running --wait が自分自身を
+  # 待ってデッドロックする(4 台目実機で実証)
+  - systemd-run --unit=rudp-boot-gate -p WorkingDirectory=/opt/rudp-bench --no-block /bin/bash -c './scripts/fleet/boot.sh -rig "__RIG__" > /var/log/rudp-boot-gate.log 2>&1'
