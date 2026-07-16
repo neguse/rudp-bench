@@ -1,6 +1,9 @@
 package doctor
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"archive/tar"
 	"context"
 	"io"
@@ -223,5 +226,121 @@ func runGit(t *testing.T, dir string, args ...string) {
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+}
+
+func writeBundleManifest(t *testing.T, dir string, mutate func(map[string]any)) {
+	t.Helper()
+	binary := filepath.Join(dir, "build-v2", "orchestrator")
+	if err := os.MkdirAll(filepath.Dir(binary), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binary, []byte("fake orchestrator binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("fake orchestrator binary"))
+	manifest := map[string]any{
+		"commit": strings.Repeat("ab", 20),
+		"rid":    "linux-arm64",
+		"dirty":  false,
+		"binaries": []map[string]any{
+			{"path": "build-v2/orchestrator", "sha256": hex.EncodeToString(sum[:])},
+		},
+	}
+	if mutate != nil {
+		mutate(manifest)
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bundle-manifest.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sourceStateCheck(t *testing.T, report Report) Check {
+	t.Helper()
+	for _, check := range report.Checks {
+		if check.Name == "source_state" {
+			return check
+		}
+	}
+	t.Fatal("source_state check is missing")
+	return Check{}
+}
+
+func TestCollectAcceptsVerifiedBundleTree(t *testing.T) {
+	dir := t.TempDir()
+	writeBundleManifest(t, dir, nil)
+	report := Collect(context.Background(), rig.Rig{}, dir)
+	check := sourceStateCheck(t, report)
+	if check.Status != StatusPass {
+		t.Fatalf("source_state = %+v", check)
+	}
+	if report.Git.Commit != strings.Repeat("ab", 20) {
+		t.Fatalf("Git.Commit = %q", report.Git.Commit)
+	}
+	if report.Git.Dirty {
+		t.Fatal("bundle tree reported dirty")
+	}
+	if report.Git.Bundle == nil || report.Git.Bundle.RID != "linux-arm64" || report.Git.Bundle.Binaries != 1 {
+		t.Fatalf("Git.Bundle = %+v", report.Git.Bundle)
+	}
+	if report.Git.Bundle.ManifestSHA256 == "" {
+		t.Fatal("bundle manifest hash is missing")
+	}
+}
+
+func TestCollectRejectsTamperedBundleBinary(t *testing.T) {
+	dir := t.TempDir()
+	writeBundleManifest(t, dir, nil)
+	if err := os.WriteFile(filepath.Join(dir, "build-v2", "orchestrator"), []byte("tampered"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report := Collect(context.Background(), rig.Rig{}, dir)
+	if check := sourceStateCheck(t, report); check.Status != StatusFail || !strings.Contains(check.Detail, "build-v2/orchestrator") {
+		t.Fatalf("source_state = %+v", check)
+	}
+}
+
+func TestCollectRejectsDirtyBundle(t *testing.T) {
+	dir := t.TempDir()
+	writeBundleManifest(t, dir, func(m map[string]any) { m["dirty"] = true })
+	report := Collect(context.Background(), rig.Rig{}, dir)
+	if check := sourceStateCheck(t, report); check.Status != StatusFail || !strings.Contains(check.Detail, "dirty") {
+		t.Fatalf("source_state = %+v", check)
+	}
+}
+
+func TestCollectRejectsBundleWithMissingBinary(t *testing.T) {
+	dir := t.TempDir()
+	writeBundleManifest(t, dir, nil)
+	if err := os.Remove(filepath.Join(dir, "build-v2", "orchestrator")); err != nil {
+		t.Fatal(err)
+	}
+	report := Collect(context.Background(), rig.Rig{}, dir)
+	if check := sourceStateCheck(t, report); check.Status != StatusFail {
+		t.Fatalf("source_state = %+v", check)
+	}
+}
+
+func TestCollectRejectsBundleWithInvalidCommit(t *testing.T) {
+	dir := t.TempDir()
+	writeBundleManifest(t, dir, func(m map[string]any) { m["commit"] = "not-a-commit" })
+	report := Collect(context.Background(), rig.Rig{}, dir)
+	if check := sourceStateCheck(t, report); check.Status != StatusFail {
+		t.Fatalf("source_state = %+v", check)
+	}
+}
+
+func TestCollectRejectsBundleWithEscapingPath(t *testing.T) {
+	dir := t.TempDir()
+	writeBundleManifest(t, dir, func(m map[string]any) {
+		m["binaries"] = []map[string]any{{"path": "../outside", "sha256": strings.Repeat("00", 32)}}
+	})
+	report := Collect(context.Background(), rig.Rig{}, dir)
+	if check := sourceStateCheck(t, report); check.Status != StatusFail {
+		t.Fatalf("source_state = %+v", check)
 	}
 }

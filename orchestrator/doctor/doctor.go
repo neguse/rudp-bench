@@ -44,6 +44,16 @@ type GitState struct {
 	Dirty          bool            `json:"dirty"`
 	PatchSHA256    string          `json:"patch_sha256,omitempty"`
 	SourceSnapshot *SourceSnapshot `json:"source_snapshot,omitempty"`
+	Bundle         *BundleState    `json:"bundle,omitempty"`
+}
+
+// BundleState は git worktree の代わりに bundle manifest を source 証跡と
+// した場合の来歴。commit は manifest の申告値であり、バイナリ実体は
+// manifest の sha256 と照合済みであることを意味する。
+type BundleState struct {
+	RID            string `json:"rid,omitempty"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	Binaries       int    `json:"binaries"`
 }
 
 type SourceArtifact struct {
@@ -209,14 +219,76 @@ func Collect(ctx context.Context, r rig.Rig, repoDir string) Report {
 		report.add(Check{Name: "tool_" + tool, Status: status, Observed: path, Expected: "available"})
 	}
 	gitState, err := collectGit(ctx, repoDir)
-	report.Git = gitState
-	sourceCheck := Check{Name: "source_state", Status: StatusPass, Observed: gitState.Commit, Expected: "readable Git worktree"}
+	sourceCheck := Check{Name: "source_state", Status: StatusPass, Observed: gitState.Commit, Expected: "readable Git worktree or verified bundle manifest"}
 	if err != nil {
-		sourceCheck.Status = StatusFail
-		sourceCheck.Detail = err.Error()
+		bundleState, bundleErr := collectBundle(repoDir)
+		if bundleErr == nil {
+			gitState = bundleState
+			sourceCheck.Observed = gitState.Commit
+			sourceCheck.Detail = "bundle manifest verified"
+		} else {
+			sourceCheck.Status = StatusFail
+			sourceCheck.Detail = fmt.Sprintf("git: %v; bundle: %v", err, bundleErr)
+		}
 	}
+	report.Git = gitState
 	report.add(sourceCheck)
 	return report
+}
+
+type bundleManifest struct {
+	Commit   string `json:"commit"`
+	RID      string `json:"rid"`
+	Dirty    bool   `json:"dirty"`
+	Binaries []struct {
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	} `json:"binaries"`
+}
+
+// collectBundle は bundle 展開ツリー(git worktree なし)の source 証跡を
+// bundle-manifest.json から検証して集める。manifest の申告 commit を信用する
+// 前提条件として、記載された全バイナリの sha256 が実体と一致することを課す。
+func collectBundle(repoDir string) (GitState, error) {
+	raw, err := os.ReadFile(filepath.Join(repoDir, "bundle-manifest.json"))
+	if err != nil {
+		return GitState{}, fmt.Errorf("bundle manifest is not readable: %w", err)
+	}
+	var manifest bundleManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return GitState{}, fmt.Errorf("bundle manifest is not valid JSON: %w", err)
+	}
+	if !isGitCommit(manifest.Commit) {
+		return GitState{}, fmt.Errorf("bundle manifest commit %q is not a git commit hash", manifest.Commit)
+	}
+	if manifest.Dirty {
+		return GitState{}, fmt.Errorf("bundle was built from a dirty tree")
+	}
+	if len(manifest.Binaries) == 0 {
+		return GitState{}, fmt.Errorf("bundle manifest lists no binaries")
+	}
+	for _, binary := range manifest.Binaries {
+		if binary.Path == "" || filepath.IsAbs(binary.Path) || binary.Path != filepath.Clean(binary.Path) || strings.HasPrefix(binary.Path, "..") {
+			return GitState{}, fmt.Errorf("bundle manifest path %q is not a clean repo-relative path", binary.Path)
+		}
+		data, err := os.ReadFile(filepath.Join(repoDir, binary.Path))
+		if err != nil {
+			return GitState{}, fmt.Errorf("bundle binary %s is not readable: %w", binary.Path, err)
+		}
+		digest := sha256.Sum256(data)
+		if !strings.EqualFold(hex.EncodeToString(digest[:]), binary.SHA256) {
+			return GitState{}, fmt.Errorf("bundle binary %s does not match its manifest sha256", binary.Path)
+		}
+	}
+	manifestDigest := sha256.Sum256(raw)
+	return GitState{
+		Commit: manifest.Commit,
+		Bundle: &BundleState{
+			RID:            manifest.RID,
+			ManifestSHA256: hex.EncodeToString(manifestDigest[:]),
+			Binaries:       len(manifest.Binaries),
+		},
+	}, nil
 }
 
 func (r *Report) add(check Check) {

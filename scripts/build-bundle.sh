@@ -27,7 +27,9 @@ DOTNET=${BUNDLE_DOTNET:-"litenetlib websocket magiconion"}
 
 COMMIT=$(git rev-parse HEAD)
 SHORT=$(git rev-parse --short HEAD)
+DIRTY=false
 if [ -n "$(git status --porcelain)" ]; then
+  DIRTY=true
   if [ "$ALLOW_DIRTY" = 1 ]; then
     echo "WARN: dirty tree(reference 用 bundle には使わないこと)" >&2
     SHORT="${SHORT}-dirty"
@@ -95,6 +97,7 @@ done
   echo "{"
   echo "  \"commit\": \"$COMMIT\","
   echo "  \"rid\": \"$RID\","
+  echo "  \"dirty\": $DIRTY,"
   echo "  \"built_on\": \"$( (. /etc/os-release 2>/dev/null; echo "${ID:-unknown}-${VERSION_ID:-rolling}") )\","
   echo "  \"binaries\": ["
   (cd "$STAGE" && find build-v2* servers -type f -executable | sort | while read -r f; do
