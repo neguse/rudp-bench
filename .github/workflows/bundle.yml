@@ -1,0 +1,67 @@
+name: bundle
+
+# fleet 配布用 arm64 bundle(ADR-0005 §5)。master push ごとにビルドし、
+# rolling pre-release `bundles` の asset として公開する。fleet ホストは
+# これを無認証 curl で取得する。合否 gate(ビルド + orchestrator テスト +
+# benchkit ctest)が通った bundle だけが公開される。
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-bundle:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init required submodules
+        run: |
+          git submodule update --init third_party/enet third_party/kcp
+          git submodule update --init --recursive third_party/gns third_party/msquic
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake zstd \
+            libnuma-dev libprotobuf-dev libssl-dev libsodium-dev protobuf-compiler
+
+      - name: Gate: orchestrator tests
+        run: |
+          go vet ./orchestrator/...
+          go test -count=1 ./orchestrator/...
+
+      - name: Build bundle
+        run: ./scripts/build-bundle.sh -o "bundle-${GITHUB_SHA::7}.tar.zst"
+
+      - name: Gate: benchkit calibration tests (arm64)
+        run: ctest --test-dir build-v2-rawudp/benchkit-build --output-on-failure
+
+      - name: Publish to rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view bundles >/dev/null 2>&1 || \
+            gh release create bundles --prerelease \
+              --title "fleet bundles" \
+              --notes "ADR-0005 fleet 配布用 bundle(rolling)。asset 名の commit が正。"
+          gh release upload bundles "bundle-${GITHUB_SHA::7}.tar.zst" --clobber
+          # 直近 5 個だけ残す(asset 名の更新時刻順)
+          gh api repos/${{ github.repository }}/releases/tags/bundles \
+            --jq '.assets | sort_by(.created_at) | reverse | .[5:][].id' |
+          while read -r id; do
+            gh api -X DELETE repos/${{ github.repository }}/releases/assets/$id
+          done
