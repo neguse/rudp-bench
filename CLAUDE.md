@@ -36,14 +36,17 @@
   ap-northeast-1 で使える最新世代 = c8g(Graviton4)**(2026-07-12 ユーザー表明。
   GameLift の第8世代対応は 2026-03 発表、EC2 c8g の東京提供は 2025-03 から)。
 - 予算: 外部環境に月 5 万円まで(2026-07-12 ユーザー表明)。
-- reference rig は **EC2 c8g.metal-24xl(96 vCPU / 192 GiB)を campaign 単位で時間借り**。
-  campaign 中はインスタンスを保持(host fingerprint 維持)、終了後 terminate。
-  screening は spot 可、confirmatory は on-demand。
+- reference rig は **仮想化 c8g の spot fleet を campaign 単位で起動**
+  (2026-07-16 決定、[ADR-0005](docs/adr/0005-reference-fleet.md))。サイズは
+  A/A 実験で凍結。全 run spot、on-demand fallback なし。中断 cell は打ち切り
+  時刻まで requeue し、残った穴は原因調査の対象。metal は perf 診断専用に降格。
+  fleet fingerprint・1h campaign protocol の詳細は ADR-0005 が正。
 - rig のリージョンは target(ap-northeast-1)に合わせず、**安価な US リージョン
   (us-west-2 等)でよい**(2026-07-12 ユーザー承認。ベンチは veth/netns 完結で
   リージョンは測定に影響しない。silicon 一致が要件)。
-- clocksource 是正(ledger #21)は smolcenter では行わない。
-  reference rig の選定要件(clocksource=tsc、CPU 隔離、再起動自由、bare metal)へ移管。
+- clocksource 是正(ledger #21)は smolcenter では行わない。x86 の tsc/hpet 問題は
+  Graviton(virt 含め `arch_sys_counter`)には存在せず、reference fleet の受入 gate
+  で担保する(ADR-0005)。
 - host fingerprint が異なる rig の値は同じ比較に集約しない(ADR-0002 のとおり)。
 
 ## v1/v2
