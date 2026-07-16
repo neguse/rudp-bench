@@ -118,6 +118,12 @@ EC2 以外の永続資産（AMI、S3、IAM role）を持たない。
 - 副次効果: campaign 結果の landing が PR レビューになり、aggregate への
   混入可否（gate 判定・INVALID の扱い）を merge 前に人間が確認する関門が
   自然にできる
+- **IaC（Terraform 等）は使わない**（2026-07-16 owner 合意）。管理対象が
+  campaign 中の約 1h しか生きず、spot 中断の動的対応は coordinator のループの
+  仕事で宣言的 apply と噛み合わないため。安全網は state ではなく tag:
+  全リソースに `Project=rudp-bench, Campaign=<id>` を付け、coordinator の
+  `cleanup` が tag 検索で orphan を含めて全削除する。恒久 substrate を持つ
+  決断をしたときに限り、その部分だけ IaC 化を再検討する
 
 ## 具体手順
 
@@ -146,8 +152,11 @@ EC2 以外の永続資産（AMI、S3、IAM role）を持たない。
    `bundle-<commit>.tar.zst` として Release asset へ push
 2. **cloud-init + boot 時 gate**: stock AMI 上で最小 setup（CPU 隔離、nofile、
    数点の apt）→ bundle pull → doctor + anchor + calibration
-3. **coordinator**: fleet 起動 → SSM で cell 配布 → 逐次 scp 回収 →
-   interruption handler → 集約 → PR 作成。Batch / Step Functions は使わない
+3. **coordinator**: fleet 起動 → SSH で cell 配布 → 逐次 scp 回収 →
+   interruption handler → 集約 → PR 作成。Batch / Step Functions は使わない。
+   SSM は使わない(instance profile = IAM credential が必要になり、
+   zero-credential 方針と矛盾する — 2026-07-16 修正)。配布・回収とも
+   per-campaign の SSH key pair + coordinator IP のみ許す SG で行う
 4. **ramp screening の等価性検証**（A/A と同一 fleet 上で実施可）
 5. **A/A campaign** → 判定 → 本 ADR の Open Decisions を凍結
 
