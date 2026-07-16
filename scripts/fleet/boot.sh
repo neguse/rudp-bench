@@ -33,9 +33,12 @@ printf '[Manager]\nDefaultLimitNOFILE=1048576\n' > /etc/systemd/system.conf.d/99
 systemctl daemon-reexec
 ulimit -n 1048576
 
-# 動的依存の欠落を fail fast で検出(apt リストの陳腐化を manifest 側から検証)
+# 動的依存の欠落を fail fast で検出(apt リストの陳腐化を manifest 側から検証)。
+# .so は対象外: 実行に必要な lib は実行ファイル側の ldd に現れる。dlopen される
+# オプショナル provider(.NET の libcoreclrtraceptprovider 等)を誤検出しない
 missing=0
 while read -r bin; do
+  case "$bin" in *.so|*.so.*) continue ;; esac
   if ldd "$bin" 2>/dev/null | grep -q 'not found'; then
     echo "ERROR: $bin に未解決の動的依存:" >&2
     ldd "$bin" | grep 'not found' >&2
@@ -57,8 +60,13 @@ jq -e '.ok == true' "$GATE_DIR/doctor.json" > /dev/null || {
   exit 1
 }
 
-# 校正(duration invariance。netem 実効値 gate は run 時に orchestrator が行う)
-./calibration/duration_invariance.sh > "$GATE_DIR/duration-invariance.log" 2>&1
+# 校正(duration invariance。netem 実効値 gate は run 時に orchestrator が行う)。
+# isolate setup 後は shell が os_cpus に閉じ込められるため、bench 系の実行は
+# bench.slice scope で起動する(battle.md「rig の CPU 隔離下では〜」の既知の罠)
+BENCH_CPUS=$(jq -r .bench_cpus "$RIG")
+systemd-run --scope --slice=bench.slice -p AllowedCPUs="$BENCH_CPUS" -p CPUWeight=10000 --quiet \
+  env ORCHESTRATOR="$PWD/build-v2/orchestrator" \
+  ./calibration/duration_invariance.sh > "$GATE_DIR/duration-invariance.log" 2>&1
 
 # TODO(A/A 設計時に確定): raw_udp anchor 1 点 probe の config を固定し、
 # ここで実行して結果を $GATE_DIR に残す。合否(fleet median 比較)は coordinator。

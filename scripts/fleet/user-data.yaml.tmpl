@@ -10,6 +10,7 @@ package_update: false
 runcmd:
   - mkdir -p /opt/rudp-bench
   - curl -fsSL --retry 5 --retry-connrefused -o /opt/bundle.tar.zst "__BUNDLE_URL__"
+  - apt-get update -qq
   - apt-get install -y -qq zstd
   - tar --zstd -xf /opt/bundle.tar.zst -C /opt/rudp-bench
   - cd /opt/rudp-bench && ./scripts/fleet/boot.sh -rig "__RIG__" > /var/log/rudp-boot-gate.log 2>&1

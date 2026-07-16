@@ -26,10 +26,18 @@ else
   trap 'rm -rf "$WORK"' EXIT
 fi
 
-# ビルド(既にあれば no-op)
-cmake -S "$ROOT/servers/enet" -B "$ROOT/build-v2-enet" >/dev/null
-cmake --build "$ROOT/build-v2-enet" -j >/dev/null
-go build -o "$ROOT/build-v2-go/orchestrator" "$ROOT/orchestrator/cmd/orchestrator" >/dev/null
+# ビルド(toolchain がある環境のみ。fleet ホストは toolchain を持たず、
+# bundle の prebuilt を ORCHESTRATOR 環境変数経由で使う)
+ORCH="${ORCHESTRATOR:-$ROOT/build-v2-go/orchestrator}"
+if command -v cmake >/dev/null; then
+  cmake -S "$ROOT/servers/enet" -B "$ROOT/build-v2-enet" >/dev/null
+  cmake --build "$ROOT/build-v2-enet" -j >/dev/null
+fi
+if command -v go >/dev/null && [[ "$ORCH" == "$ROOT/build-v2-go/orchestrator" ]]; then
+  go build -o "$ORCH" "$ROOT/orchestrator/cmd/orchestrator" >/dev/null
+fi
+[[ -x "$ROOT/build-v2-enet/enet_server" ]] || { echo "enet_server が無い(build するか bundle を使う)" >&2; exit 1; }
+[[ -x "$ORCH" ]] || { echo "orchestrator が無い: $ORCH" >&2; exit 1; }
 
 run_once() {
   local duration="$1" out="$2" port="$3"
@@ -54,7 +62,7 @@ run_once() {
   "output_dir": "$out"
 }
 EOF
-  "$ROOT/build-v2-go/orchestrator" run -config "$out/config.json" >/dev/null
+  "$ORCH" run -config "$out/config.json" >/dev/null
 }
 
 run_once "$DUR_SHORT" "$WORK/short" 42911

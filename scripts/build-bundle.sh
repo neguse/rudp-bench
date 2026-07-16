@@ -72,6 +72,9 @@ fi
 # --- stage -------------------------------------------------------------
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
+# mktemp は 0700 — tar が「.」の mode を保存し、展開先 dir が非 root から
+# 辿れなくなるため展開時の想定(755)に合わせる
+chmod 755 "$STAGE"
 
 # ソースツリー(tracked file のみ。submodule はビルド時依存なので空で良い)
 git archive HEAD | tar -x -C "$STAGE"

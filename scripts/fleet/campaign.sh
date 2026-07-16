@@ -107,7 +107,7 @@ cleanup)
   SG=$(aws2 ec2 describe-security-groups \
     --filters "Name=tag:Project,Values=$PROJECT" "Name=tag:Campaign,Values=$CAMPAIGN" \
     | jq -r '.SecurityGroups[].GroupId')
-  [ -n "$SG" ] && aws2 ec2 delete-security-group --group-id "$SG" && echo "sg deleted: $SG"
+  [ -n "$SG" ] && aws2 ec2 delete-security-group --group-id "$SG" > /dev/null && echo "sg deleted: $SG"
   aws2 ec2 delete-key-pair --key-name "$PROJECT-$CAMPAIGN" > /dev/null && echo "key pair deleted"
   ;;
 

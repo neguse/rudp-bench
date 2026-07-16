@@ -81,10 +81,24 @@ func TestIRQAffinityConflictsUsesEffectiveMask(t *testing.T) {
 	writeIRQ("54", "3,11", &eleven)
 	writeIRQ("55", "4", nil) // Older kernels: fall back to the requested mask.
 
-	got := irqAffinityConflicts(root, "3-7,11-15")
+	steerableAll := func(string) bool { return true }
+	got, managed := irqAffinityConflicts(root, "3-7,11-15", steerableAll)
 	want := []string{"54:11", "55:4"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("conflicts = %v, want %v", got, want)
+	}
+	if len(managed) != 0 {
+		t.Fatalf("managed = %v, want none", managed)
+	}
+
+	// kernel-managed(steer 不可)な IRQ は conflicts でなく managed に分類する
+	managedOnly := func(dir string) bool { return filepath.Base(dir) != "54" }
+	got, managed = irqAffinityConflicts(root, "3-7,11-15", managedOnly)
+	if !reflect.DeepEqual(got, []string{"55:4"}) {
+		t.Fatalf("conflicts = %v, want [55:4]", got)
+	}
+	if !reflect.DeepEqual(managed, []string{"54:11"}) {
+		t.Fatalf("managed = %v, want [54:11]", managed)
 	}
 }
 

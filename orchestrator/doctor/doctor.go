@@ -92,6 +92,7 @@ type Report struct {
 	PID1AllowedCPUs    string            `json:"pid1_allowed_cpus,omitempty"`
 	SliceAllowedCPUs   map[string]string `json:"slice_allowed_cpus,omitempty"`
 	BenchIRQs          []string          `json:"bench_cpu_irqs,omitempty"`
+	ManagedBenchIRQs   []string          `json:"managed_bench_cpu_irqs,omitempty"`
 	NetworkNamespaces  []string          `json:"network_namespaces,omitempty"`
 	NoFileSoft         uint64            `json:"nofile_soft"`
 	NoFileHard         uint64            `json:"nofile_hard"`
@@ -156,12 +157,24 @@ func Collect(ctx context.Context, r rig.Rig, repoDir string) Report {
 			}
 			report.add(Check{Name: "slice_cpu_isolation_" + strings.TrimSuffix(unit, ".slice"), Status: status, Observed: allowed, Expected: r.OSCPUs, Detail: detail})
 		}
-		report.BenchIRQs = benchCPUIRQs(r.BenchCPUs)
-		irqStatus := StatusPass
+		var managedIRQs []string
+		report.BenchIRQs, managedIRQs = benchCPUIRQs(r.BenchCPUs)
+		report.ManagedBenchIRQs = managedIRQs
+		// kernel-managed IRQ(NVMe queue 等)は root でも steer できず、EC2 では
+		// metal を含む全ホストに存在する platform 固有物。gate で落とすのは
+		// 退避し損ねた steerable な交差のみとし、managed は開示して PASS する
+		irqCheck := Check{Name: "irq_cpu_isolation", Status: StatusPass, Expected: "no steerable IRQ affinity intersects bench_cpus"}
 		if len(report.BenchIRQs) > 0 {
-			irqStatus = StatusFail
+			irqCheck.Status = StatusFail
+			irqCheck.Observed = strings.Join(report.BenchIRQs, ",")
+			if len(managedIRQs) > 0 {
+				irqCheck.Detail = "managed(immovable): " + strings.Join(managedIRQs, ",")
+			}
+		} else if len(managedIRQs) > 0 {
+			irqCheck.Observed = "managed-only: " + strings.Join(managedIRQs, ",")
+			irqCheck.Detail = "kernel-managed IRQ affinity is not steerable from userspace"
 		}
-		report.add(Check{Name: "irq_cpu_isolation", Status: irqStatus, Observed: strings.Join(report.BenchIRQs, ","), Expected: "no IRQ affinity intersects bench_cpus"})
+		report.add(irqCheck)
 	} else {
 		report.add(Check{Name: "pid1_cpu_isolation", Status: StatusWarn, Observed: report.PID1AllowedCPUs, Detail: "rig does not require isolation"})
 	}
@@ -875,13 +888,31 @@ func equalCPUSet(a, b string) bool {
 	return true
 }
 
-func benchCPUIRQs(benchCPUs string) []string {
-	return irqAffinityConflicts("/proc/irq", benchCPUs)
+func benchCPUIRQs(benchCPUs string) (conflicts, managed []string) {
+	return irqAffinityConflicts("/proc/irq", benchCPUs, probeIRQSteerable)
 }
 
-func irqAffinityConflicts(irqRoot, benchCPUs string) []string {
+// probeIRQSteerable は現在の requested mask をそのまま書き戻して、affinity が
+// ユーザ空間から変更可能かを判定する(状態は変えない)。NVMe queue のような
+// kernel-managed IRQ は root でも write が EPERM/EIO で拒否される。
+// 権限不足で判定できない場合は steerable(=従来どおり FAIL 側)へ倒す。
+func probeIRQSteerable(dir string) bool {
+	path := filepath.Join(dir, "smp_affinity_list")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	_, err = f.Write([]byte(strings.TrimSpace(string(data))))
+	return err == nil
+}
+
+func irqAffinityConflicts(irqRoot, benchCPUs string, steerable func(dir string) bool) (conflicts, managed []string) {
 	dirs, _ := filepath.Glob(filepath.Join(irqRoot, "[0-9]*"))
-	var conflicts []string
 	for _, dir := range dirs {
 		info, err := os.Stat(dir)
 		if err != nil || !info.IsDir() {
@@ -899,11 +930,17 @@ func irqAffinityConflicts(irqRoot, benchCPUs string) []string {
 		}
 		affinity := strings.TrimSpace(string(affinityBytes))
 		if affinity != "" && rig.Intersects(affinity, benchCPUs) {
-			conflicts = append(conflicts, filepath.Base(dir)+":"+affinity)
+			entry := filepath.Base(dir) + ":" + affinity
+			if steerable(dir) {
+				conflicts = append(conflicts, entry)
+			} else {
+				managed = append(managed, entry)
+			}
 		}
 	}
 	sort.Strings(conflicts)
-	return conflicts
+	sort.Strings(managed)
+	return conflicts, managed
 }
 
 func commandOutput(ctx context.Context, dir, name string, args ...string) (string, error) {
