@@ -1,0 +1,15 @@
+#cloud-config
+# fleet ホストの cloud-init template(ADR-0005)。coordinator が変数を埋めて
+# EC2 user-data として渡す。ロジックは持たず、bundle の取得と boot.sh の
+# 起動だけを行う(boot ロジックは bundle 内 = commit に束縛され監査可能)。
+#
+# 変数: __BUNDLE_URL__ (GitHub Release asset の無認証 URL)
+#       __RIG__        (orchestrator/rigs/*.json のリポ相対パス)
+package_update: false
+
+runcmd:
+  - mkdir -p /opt/rudp-bench
+  - curl -fsSL --retry 5 --retry-connrefused -o /opt/bundle.tar.zst "__BUNDLE_URL__"
+  - apt-get install -y -qq zstd
+  - tar --zstd -xf /opt/bundle.tar.zst -C /opt/rudp-bench
+  - cd /opt/rudp-bench && ./scripts/fleet/boot.sh -rig "__RIG__" > /var/log/rudp-boot-gate.log 2>&1
