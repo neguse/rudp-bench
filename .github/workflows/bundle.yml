@@ -39,7 +39,7 @@ jobs:
           sudo apt-get install -y build-essential cmake zstd \
             libnuma-dev libprotobuf-dev libssl-dev libsodium-dev protobuf-compiler
 
-      - name: Gate: orchestrator tests
+      - name: "Gate: orchestrator tests"
         run: |
           go vet ./orchestrator/...
           go test -count=1 ./orchestrator/...
@@ -47,7 +47,7 @@ jobs:
       - name: Build bundle
         run: ./scripts/build-bundle.sh -o "bundle-${GITHUB_SHA::7}.tar.zst"
 
-      - name: Gate: benchkit calibration tests (arm64)
+      - name: "Gate: benchkit calibration tests (arm64)"
         run: ctest --test-dir build-v2-rawudp/benchkit-build --output-on-failure
 
       - name: Publish to rolling release
