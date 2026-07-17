@@ -11,10 +11,13 @@
 #   scripts/fleet/campaign.sh aggregate -campaign <id>
 #   scripts/fleet/campaign.sh cleanup   -campaign <id>
 #
-# queue 形式: <dir>/<job>/block.json(+ 参照 config)。config 内の __JOB__ は
-# dispatch がホスト側 job dir(campaign-jobs/<job>)へ置換する。block.json は
-# "tar": true と "output_dir": "__JOB__/out" を持つこと(回収対象 = out.tar.gz)。
-# 配布・retry の単位は job = 1 block(ADR-0005: 中断 block は丸ごと捨てる)。
+# queue 形式: <dir>/<job>/block.json または run.json(+ 参照 config)。
+# config 内の __JOB__ は dispatch がホスト側 job dir(campaign-jobs/<job>)へ
+# 置換する。output_dir は "__JOB__/out" を指すこと(回収対象 = out.tar.gz。
+# block は自前 tar、run は dispatch が remote で tar する)。
+# 配布・retry の単位は job = 1 block/run(ADR-0005: 中断 block は丸ごと捨てる)。
+# run job は SLO 破断(rc=3)・censored(rc=5)もデータとして受理し、
+# INVALID(rc=2)/unsupported(rc=4)だけを失敗扱いにする。
 #
 # TODO(A/A 設計時): raw_udp anchor の fleet median gate。boot.sh 側の anchor
 # probe 追加とセットで入れる。IMDS interruption notice の先読み requeue も
@@ -131,17 +134,57 @@ run_job() { # $1=ip $2=job → 0:成功(回収済み) 1:失敗 255:ホスト不�
 
   # 前 job 異常終了の netns 残留を冪等に掃除(run-sweep.sh と同じ罠)。
   # bench.slice の service として実行(scope は LimitNOFILE を持てない)
-  local bench_cpus
+  local bench_cpus kind remote_cmd
   bench_cpus=$(jq -r .bench_cpus "$RIG")
-  local rc=0
-  fssh "$ip" "sudo ip netns del rudpbench-srv 2>/dev/null; sudo ip netns del rudpbench-cli 2>/dev/null; \
+  if [ -f "$jobout/rendered/run.json" ]; then kind=run; else kind=block; fi
+  # 計測器(orchestrator 本体と netem evidence 採取の exec)を SUT と別 CPU へ
+  # 隔離する。共有だと過負荷点で evidence capture が starvation spike を食い、
+  # 窓終端をはみ出して INVALID が flap する(c20260718-060820 の c64/ramp で実証)
+  local pin=""
+  if [ "$kind" = run ]; then
+    pin=$(python3 - "$RIG" "$jobout/rendered/run.json" <<'PY'
+import json, sys
+
+def parse(spec):
+    cpus = set()
+    for part in spec.split(","):
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-")
+            cpus |= set(range(int(lo), int(hi) + 1))
+        else:
+            cpus.add(int(part))
+    return cpus
+
+rig = json.load(open(sys.argv[1]))
+run = json.load(open(sys.argv[2]))
+free = parse(rig["bench_cpus"]) - parse(run.get("server_cpus", "")) - parse(run.get("client_cpus", ""))
+print(",".join(str(c) for c in sorted(free)))
+PY
+)
+  fi
+  local orch="/opt/rudp-bench/build-v2/orchestrator"
+  [ -n "$pin" ] && orch="taskset -c $pin $orch"
+  remote_cmd="sudo ip netns del rudpbench-srv 2>/dev/null; sudo ip netns del rudpbench-cli 2>/dev/null; \
     sudo systemd-run --wait --pipe --collect --unit='rudp-job-$job' --slice=bench.slice \
       -p AllowedCPUs='$bench_cpus' -p CPUWeight=10000 -p LimitNOFILE=1048576 \
       -p WorkingDirectory=/opt/rudp-bench \
-      /opt/rudp-bench/build-v2/orchestrator block -config '$hostdir/block.json'" \
-    > "$jobout/run.log" 2>&1 || rc=$?
+      $orch $kind -config '$hostdir/$kind.json'"
+  if [ "$kind" = run ]; then
+    # run は非 PASS でも result を残して非ゼロ exit する。破断(3)と
+    # inconclusive/censored(5)は ramp のデータなので受理し、tar も自前で作る
+    remote_cmd="$remote_cmd; rc=\$?; case \$rc in 0|3|5) ;; *) exit \$rc ;; esac; \
+      sudo tar czf '/opt/rudp-bench/$hostdir/out.tar.gz' -C '/opt/rudp-bench/$hostdir' out"
+  fi
+  local rc=0
+  fssh "$ip" "$remote_cmd" > "$jobout/run.log" 2>&1 || rc=$?
   if [ "$rc" -ne 0 ]; then
-    echo "job $job on $ip: block rc=$rc(log: $jobout/run.log)" >&2
+    echo "job $job on $ip: $kind rc=$rc(log: $jobout/run.log)" >&2
+    # 失敗 run の証跡(result.json 等)を診断用に回収する。retry の rm -rf や
+    # cleanup の terminate で消える前に手元へ残す(attempt 別に保持)
+    local attempt=$(( $(cat "$WORKDIR/queue/running/$job/.attempts" 2>/dev/null || echo 0) + 1 ))
+    fscp -r "ubuntu@$ip:/opt/rudp-bench/$hostdir/out" "$jobout/diag-attempt-$attempt" 2>/dev/null || true
     return "$rc"
   fi
 
@@ -156,6 +199,12 @@ host_worker() { # $1=ip $2=deadline_epoch
   local ip="$1" deadline="$2" job rc attempts
   if ! wait_boot_gate "$ip"; then
     echo "worker $ip: boot gate 非 PASS のため離脱(job は他ホストが拾う)" >&2
+    return 0
+  fi
+  # farm 凍結構成の前提 sysctl(ledger #5: client rcvbuf 4MB。tuned enet client
+  # は効かないと fail fast する)。本来は boot.sh(bundle)の仕事 — ledger #24
+  if ! fssh "$ip" 'sudo sysctl -q -w net.core.rmem_max=8388608 net.core.wmem_max=8388608'; then
+    echo "worker $ip: host prep(sysctl)失敗 → 離脱" >&2
     return 0
   fi
   echo "worker $ip: READY(gate 証跡回収済み)"
@@ -332,10 +381,15 @@ aggregate)
         job=$(basename "$d")
         cells=$(find "$WORKDIR/aggregate/$job/out" -name capacity.json \
           -exec jq '.cells' {} + 2>/dev/null | jq -s 'add // []')
+        # run job(ramp 等)は out/result.json が直接の成果物
+        ramp=$(jq '{transport: .config.transport, workload: .config.workload,
+            outcome, verdict, score_conns: .ramp.score_conns,
+            censored: .ramp.censored, cause: .ramp.cause}' \
+          "$WORKDIR/aggregate/$job/out/result.json" 2>/dev/null || echo null)
         jq -n --arg job "$job" --arg host "$(cat "$WORKDIR/jobs/$job/host" 2>/dev/null || echo -)" \
           --argjson attempts "$(( $(cat "$WORKDIR/queue/done/$job/.attempts" 2>/dev/null || echo 0) + 1 ))" \
-          --argjson cells "$cells" \
-          '{job: $job, host: $host, attempts: $attempts, cells: $cells}'
+          --argjson cells "$cells" --argjson ramp "$ramp" \
+          '{job: $job, host: $host, attempts: $attempts, cells: $cells, ramp: $ramp}'
       done) \
     --slurpfile holes <(
       for st in pending failed; do
@@ -352,7 +406,8 @@ aggregate)
     "hosts: \(.hosts | map("\(.ip) doctor=\(.doctor_ok) calibration=\(.calibration_passed)") | join(", "))",
     "jobs: \(.jobs | length) done / holes: \(.holes | length)",
     (.jobs[] | "  \(.job) @\(.host) attempts=\(.attempts) cells=\(.cells | length)"),
-    (.jobs[].cells[] | "    \(.transport)/\(.workload)/\(.regime): capacity=\(.capacity) censored=\(.censored // false)")' \
+    (.jobs[].cells[] | "    \(.transport)/\(.workload)/\(.regime): capacity=\(.capacity) censored=\(.censored // false)"),
+    (.jobs[] | select(.ramp != null) | "    run \(.job): \(.ramp.transport) outcome=\(.ramp.outcome) ramp_score=\(.ramp.score_conns // "-") censored=\(.ramp.censored // "-") cause=\(.ramp.cause // "-")")' \
     "$WORKDIR/campaign-summary.json"
   ;;
 
