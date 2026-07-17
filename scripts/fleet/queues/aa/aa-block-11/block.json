@@ -1,0 +1,12 @@
+{
+  "rig": "__RIG__",
+  "seed": 11,
+  "output_dir": "__JOB__/out",
+  "tar": true,
+  "sweeps": [
+    {
+      "name": "room-lan",
+      "config": "__JOB__/sweep.json"
+    }
+  ]
+}

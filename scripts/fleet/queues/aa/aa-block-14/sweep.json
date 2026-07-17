@@ -1,0 +1,95 @@
+{
+  "regime": "room-lan-screen",
+  "netem": {
+    "link_mtu_bytes": 1500,
+    "disable_offloads": true,
+    "server_egress": {
+      "delay_ms": 1
+    },
+    "client_egress": {
+      "delay_ms": 1
+    }
+  },
+  "scenarios": [
+    {
+      "name": "ref-room-lan-screen",
+      "kind": "room_relay",
+      "room_publish": {
+        "traffic_id": 3,
+        "loss_tolerant": {
+          "rate_hz": 20,
+          "payload_bytes": 128,
+          "staleness_p99_ns": 300000000,
+          "min_delivery_ratio": 0.95
+        },
+        "must_deliver": {
+          "rate_hz": 10,
+          "payload_bytes": 64,
+          "deadline_ns": 200000000,
+          "min_deadline_hit_ratio": 0.95,
+          "min_eventual_delivery_ratio": 1
+        }
+      }
+    }
+  ],
+  "conns": {
+    "min": 4,
+    "max": 512
+  },
+  "seed": 14,
+  "warmup": "25s",
+  "duration": "10s",
+  "drain": "1s",
+  "staleness_period_ns": 10000000,
+  "output_dir": "__JOB__/out/room-lan",
+  "transports": {
+    "raw_udp": {
+      "server_command": [
+        "build-v2-rawudp/raw_udp_server",
+        "--port",
+        "42917"
+      ],
+      "client_command": [
+        "build-v2-rawudp/raw_udp_client",
+        "--host",
+        "10.200.0.1",
+        "--port",
+        "42917",
+        "--conns",
+        "{conns}",
+        "--proc-index",
+        "{proc_index}",
+        "--origin-base",
+        "{origin_id_start}"
+      ],
+      "client_procs": 8
+    },
+    "litenetlib": {
+      "server_command": [
+        "servers/litenetlib/LiteNetLibBench.Server/bin/Release/net10.0/LiteNetLibBench.Server",
+        "--port",
+        "42941"
+      ],
+      "client_command": {
+        "path": "servers/litenetlib/LiteNetLibBench.Client/bin/Release/net10.0/LiteNetLibBench.Client",
+        "args": [
+          "--host",
+          "10.200.0.1",
+          "--port",
+          "42941",
+          "--conns",
+          "{conns}",
+          "--proc-index",
+          "{proc_index}",
+          "--origin-base",
+          "{origin_id_start}"
+        ],
+        "env": [
+          "DOTNET_gcServer=1"
+        ]
+      },
+      "client_procs": 8
+    }
+  },
+  "steady_warmup": true
+}
