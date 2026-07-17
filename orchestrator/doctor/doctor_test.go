@@ -208,6 +208,8 @@ func TestValidateReferenceRequiresSourceCommit(t *testing.T) {
 			RequirePerformanceGovernor: true,
 			RequireIsolation:           true,
 			MinNoFile:                  1,
+			MinRmemMax:                 1,
+			MinWmemMax:                 1,
 		},
 		Checks: checks,
 	}

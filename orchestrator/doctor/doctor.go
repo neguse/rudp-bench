@@ -96,6 +96,8 @@ type Report struct {
 	NetworkNamespaces  []string          `json:"network_namespaces,omitempty"`
 	NoFileSoft         uint64            `json:"nofile_soft"`
 	NoFileHard         uint64            `json:"nofile_hard"`
+	RmemMax            uint64            `json:"rmem_max,omitempty"`
+	WmemMax            uint64            `json:"wmem_max,omitempty"`
 	Qdisc              string            `json:"qdisc,omitempty"`
 	Tools              map[string]string `json:"tools,omitempty"`
 	Git                GitState          `json:"git"`
@@ -121,6 +123,8 @@ func Collect(ctx context.Context, r rig.Rig, repoDir string) Report {
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &limit); err == nil {
 		report.NoFileSoft, report.NoFileHard = limit.Cur, limit.Max
 	}
+	report.RmemMax = readUint("/proc/sys/net/core/rmem_max")
+	report.WmemMax = readUint("/proc/sys/net/core/wmem_max")
 
 	if r.ExpectedClocksource == "" {
 		report.add(Check{Name: "clocksource", Status: StatusWarn, Observed: report.Clocksource, Detail: "rig does not declare expected_clocksource"})
@@ -186,6 +190,26 @@ func Collect(ctx context.Context, r rig.Rig, repoDir string) Report {
 		report.add(Check{Name: "nofile", Status: status, Observed: strconv.FormatUint(report.NoFileSoft, 10), Expected: ">=" + strconv.FormatUint(r.MinNoFile, 10)})
 	} else {
 		report.add(Check{Name: "nofile", Status: StatusWarn, Observed: strconv.FormatUint(report.NoFileSoft, 10), Detail: "rig does not declare min_nofile"})
+	}
+
+	// farm 凍結構成(client rcvbuf 4MB fail-fast)の前提となる kernel 上限
+	for _, buf := range []struct {
+		name     string
+		min      uint64
+		observed uint64
+	}{
+		{"rmem_max", r.MinRmemMax, report.RmemMax},
+		{"wmem_max", r.MinWmemMax, report.WmemMax},
+	} {
+		if buf.min > 0 {
+			status := StatusPass
+			if buf.observed < buf.min {
+				status = StatusFail
+			}
+			report.add(Check{Name: buf.name, Status: status, Observed: strconv.FormatUint(buf.observed, 10), Expected: ">=" + strconv.FormatUint(buf.min, 10)})
+		} else {
+			report.add(Check{Name: buf.name, Status: StatusWarn, Observed: strconv.FormatUint(buf.observed, 10), Detail: "rig does not declare min_" + buf.name})
+		}
 	}
 
 	qdisc, err := commandOutput(ctx, repoDir, "tc", "qdisc", "show")
@@ -672,6 +696,22 @@ func ValidateReferenceEnvironment(report Report) error {
 		return fmt.Errorf("nofile limit changed after doctor: soft/hard=%d/%d current=%d/%d",
 			report.NoFileSoft, report.NoFileHard, currentLimit.Cur, currentLimit.Max)
 	}
+	for _, buf := range []struct {
+		name     string
+		path     string
+		min      uint64
+		reported uint64
+	}{
+		{"rmem_max", "/proc/sys/net/core/rmem_max", report.Rig.MinRmemMax, report.RmemMax},
+		{"wmem_max", "/proc/sys/net/core/wmem_max", report.Rig.MinWmemMax, report.WmemMax},
+	} {
+		if buf.reported < buf.min {
+			return fmt.Errorf("doctor %s=%d is below reference minimum=%d", buf.name, buf.reported, buf.min)
+		}
+		if current := readUint(buf.path); current != buf.reported {
+			return fmt.Errorf("%s changed after doctor: %d != %d", buf.name, current, buf.reported)
+		}
+	}
 	return nil
 }
 
@@ -694,6 +734,8 @@ var referenceCheckNames = []string{
 	"slice_cpu_isolation_init.scope",
 	"irq_cpu_isolation",
 	"nofile",
+	"rmem_max",
+	"wmem_max",
 	"residual_netem",
 	"residual_benchmark_netns",
 	"tool_ip",
@@ -743,8 +785,9 @@ func validateReferenceRig(referenceRig rig.Rig) error {
 		return fmt.Errorf("reference rig: %w", err)
 	}
 	if referenceRig.ExpectedClocksource == "" || !referenceRig.RequirePerformanceGovernor ||
-		!referenceRig.RequireIsolation || referenceRig.MinNoFile == 0 {
-		return fmt.Errorf("reference rig must require clocksource, performance governor, isolation, and nofile")
+		!referenceRig.RequireIsolation || referenceRig.MinNoFile == 0 ||
+		referenceRig.MinRmemMax == 0 || referenceRig.MinWmemMax == 0 {
+		return fmt.Errorf("reference rig must require clocksource, performance governor, isolation, nofile, and rmem/wmem max")
 	}
 	return nil
 }
@@ -844,6 +887,14 @@ func readTrimmed(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+func readUint(path string) uint64 {
+	value, err := strconv.ParseUint(readTrimmed(path), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 func readStatusField(path, name string) string {

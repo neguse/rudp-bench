@@ -113,6 +113,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	// 計測器(orchestrator 本体と netem evidence 採取の exec)を SUT と別の
+	// CPU に置く。共有すると過負荷点で evidence 採取が starvation spike を
+	// 食い、計測窓をはみ出して INVALID が flap する(ledger #23)
+	if err := pinInstrumentCPUs(r); err != nil {
+		fmt.Fprintf(os.Stderr, "[block] instrument CPU pinning skipped: %v\n", err)
+	}
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return err
 	}

@@ -34,6 +34,10 @@ type Rig struct {
 	ExpectFixedFrequency bool   `json:"expect_fixed_frequency,omitempty"`
 	RequireIsolation     bool   `json:"require_isolation,omitempty"`
 	MinNoFile            uint64 `json:"min_nofile,omitempty"`
+	// farm 凍結構成(client rcvbuf 4MB 明示)の前提となる kernel 上限。
+	// 未宣言の rig では doctor が WARN を出すだけに留める
+	MinRmemMax uint64 `json:"min_rmem_max,omitempty"`
+	MinWmemMax uint64 `json:"min_wmem_max,omitempty"`
 }
 
 func Load(path string) (Rig, error) {

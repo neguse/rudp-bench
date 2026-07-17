@@ -752,28 +752,22 @@ static int expect_scenario_flows(const client_config *cfg,
     return 0;
   }
   for (int i = 0; i < n_conns; ++i) {
-    if (cfg->scenario.kind != BK_SCENARIO_ROOM_RELAY) {
-      if (bk_metrics_expect_latest(metrics, conns[i].local_index,
-                                   conns[i].origin_id,
+    // room の期待 flow は roster 全体(origin 0..roster_conns)。proc ローカルの
+    // conns だけ登録すると multi-proc farm で他 proc の origin が漏れる
+    // (raw_udp client と同型)
+    const uint32_t first_origin =
+        cfg->scenario.kind == BK_SCENARIO_ROOM_RELAY ? 0u
+                                                     : conns[i].origin_id;
+    const uint32_t end_origin =
+        cfg->scenario.kind == BK_SCENARIO_ROOM_RELAY ? roster_conns
+                                                     : first_origin + 1u;
+    for (uint32_t origin = first_origin; origin < end_origin; ++origin) {
+      if (bk_metrics_expect_latest(metrics, conns[i].local_index, origin,
                                    cfg->traffic_id,
                                    BK_DIRECTION_ROOM_RELAY,
                                    first_sched_ts_ns) != 0) {
         return -1;
       }
-      continue;
-    }
-    uint32_t registered = 0;
-    for (int j = 0; j < n_conns; ++j) {
-      if (bk_metrics_expect_latest(metrics, conns[i].local_index,
-                                   conns[j].origin_id, cfg->traffic_id,
-                                   BK_DIRECTION_ROOM_RELAY,
-                                   first_sched_ts_ns) != 0) {
-        return -1;
-      }
-      registered++;
-    }
-    if (registered != roster_conns) {
-      return -1;
     }
   }
   return 0;
