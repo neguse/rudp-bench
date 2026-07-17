@@ -44,10 +44,24 @@ fleet fingerprint・spot 実行・1h campaign protocol・配布/回収経路は
    (doctor / calibration)・capacity セル・穴を `campaign-summary.json` に集約
 4. `cleanup -campaign <id>`: tag 検索で instance/SG/key pair を全削除
 
-queue の書式と placeholder(`__JOB__`)は campaign.sh 冒頭コメントが正。
-smoke 用 queue は `scripts/fleet/queues/smoke/`(loss 0 — 0.1% loss は短時間 run
-だと期待 drop < 1 で netem loss evidence gate に正しく落とされるため、
-smoke はパイプライン検証のみを目的に loss を置かない)。
+queue の書式と placeholder(`__JOB__` / `__RIG__`)は campaign.sh 冒頭コメント
+が正。smoke 用 queue は `scripts/fleet/queues/smoke/`(loss 0 — 0.1% loss は
+短時間 run だと期待 drop < 1 で netem loss evidence gate に正しく落とされる
+ため、smoke はパイプライン検証のみを目的に loss を置かない)。
+
+### A/A 実験(ADR-0005)の回し方
+
+- queue は `scripts/fleet/queues/aa/`(block × 3 seed。treatment =
+  raw_udp + litenetlib、ref-room-lan の screening 条件)。regime を lan に
+  するのは raw_udp が loss 下で MD を満たせない(設計開示)ため —
+  [2026-07-18-ramp-equivalence](measurements/2026-07-18-ramp-equivalence.md)
+- サイズごとに campaign 1 回: `config.json` の instance_type / rig を
+  切り替え → `launch -n 5` → `dispatch -queue scripts/fleet/queues/aa`
+  → `aggregate`。時間帯を変えて 2 セッション
+- 判定は `scripts/fleet/aa-analyze.sh <campaign-summary.json>...`
+  (ホスト内 median → ホスト間全幅 ≤ 5% で PASS。censored/INVALID block は
+  除外して開示。dispatch の動的割当により block 数はホスト間で揃わないことが
+  あるため、ホストあたり有効 block 数も判定材料として出る)
 
 ## 受入チェックリスト
 

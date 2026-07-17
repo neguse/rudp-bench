@@ -1,12 +1,14 @@
 {
- "name": "aws-c8g-16xlarge",
- "os_cpus": "0-3",
- "bench_cpus": "4-63",
- "client_cpus": "16-63",
- "server_cpus": "4-15",
- "all_cpus": "0-63",
- "expected_clocksource": "arch_sys_counter",
- "expect_fixed_frequency": true,
- "require_isolation": true,
- "min_nofile": 65535
+  "name": "aws-c8g-16xlarge",
+  "os_cpus": "0-1",
+  "bench_cpus": "2-63",
+  "client_cpus": "8-63",
+  "server_cpus": "2-3",
+  "all_cpus": "0-63",
+  "expected_clocksource": "arch_sys_counter",
+  "expect_fixed_frequency": true,
+  "require_isolation": true,
+  "min_nofile": 65535,
+  "min_rmem_max": 8388608,
+  "min_wmem_max": 8388608
 }

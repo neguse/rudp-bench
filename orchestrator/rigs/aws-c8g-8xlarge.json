@@ -3,7 +3,7 @@
   "os_cpus": "0-1",
   "bench_cpus": "2-31",
   "client_cpus": "8-31",
-  "server_cpus": "2-7",
+  "server_cpus": "2-3",
   "all_cpus": "0-31",
   "expected_clocksource": "arch_sys_counter",
   "expect_fixed_frequency": true,
