@@ -22,6 +22,9 @@ type Rig struct {
 	// 役割別(RunConfig の client_cpus / server_cpus に入る)
 	ClientCPUs string `json:"client_cpus"`
 	ServerCPUs string `json:"server_cpus"`
+	// 計測器(orchestrator と evidence 採取)を SUT/farm から隔離するコア
+	// (ledger #23)。省略時は client∪server が bench を埋め尽くすこと
+	InstrumentCPUs string `json:"instrument_cpus,omitempty"`
 	// teardown 時に IRQ affinity を戻す全コア
 	AllCPUs string `json:"all_cpus"`
 	// Reference measurement preflight. These fields are optional so existing
@@ -83,8 +86,19 @@ func (r Rig) Validate() error {
 	if overlap(sets["os_cpus"], sets["bench_cpus"]) {
 		return fmt.Errorf("os_cpus and bench_cpus must be disjoint")
 	}
+	instrument := []int{}
+	if r.InstrumentCPUs != "" {
+		cpus, err := ParseCPUSet(r.InstrumentCPUs)
+		if err != nil || len(cpus) == 0 {
+			return fmt.Errorf("instrument_cpus: invalid CPU set %q", r.InstrumentCPUs)
+		}
+		instrument = cpus
+	}
 	if overlap(sets["client_cpus"], sets["server_cpus"]) {
 		return fmt.Errorf("client_cpus and server_cpus must be disjoint")
+	}
+	if overlap(instrument, sets["client_cpus"]) || overlap(instrument, sets["server_cpus"]) {
+		return fmt.Errorf("instrument_cpus must be disjoint from client_cpus and server_cpus")
 	}
 	if !subset(sets["client_cpus"], sets["bench_cpus"]) || !subset(sets["server_cpus"], sets["bench_cpus"]) {
 		return fmt.Errorf("client_cpus and server_cpus must be subsets of bench_cpus")
@@ -92,8 +106,8 @@ func (r Rig) Validate() error {
 	if !sameSet(union(sets["os_cpus"], sets["bench_cpus"]), sets["all_cpus"]) {
 		return fmt.Errorf("os_cpus union bench_cpus must equal all_cpus")
 	}
-	if !sameSet(union(sets["client_cpus"], sets["server_cpus"]), sets["bench_cpus"]) {
-		return fmt.Errorf("client_cpus union server_cpus must equal bench_cpus")
+	if !sameSet(union(union(sets["client_cpus"], sets["server_cpus"]), instrument), sets["bench_cpus"]) {
+		return fmt.Errorf("client_cpus union server_cpus union instrument_cpus must equal bench_cpus")
 	}
 	if r.RequirePerformanceGovernor && r.ExpectFixedFrequency {
 		return fmt.Errorf("require_performance_governor and expect_fixed_frequency are mutually exclusive")

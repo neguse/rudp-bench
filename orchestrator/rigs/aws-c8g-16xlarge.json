@@ -10,5 +10,6 @@
   "require_isolation": true,
   "min_nofile": 65535,
   "min_rmem_max": 8388608,
-  "min_wmem_max": 8388608
+  "min_wmem_max": 8388608,
+  "instrument_cpus": "4-7"
 }
