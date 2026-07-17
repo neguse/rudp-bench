@@ -1,0 +1,34 @@
+{
+ "regime": "wired-smoke",
+ "netem": {
+  "server_egress": {"delay_ms": 10, "loss_pct": 0},
+  "client_egress": {"delay_ms": 10, "loss_pct": 0}
+ },
+ "workloads": ["r20p128"],
+ "conns": {"min": 4, "max": 8},
+ "seed": 2,
+ "warmup": "2s",
+ "duration": "4s",
+ "drain": "1s",
+ "deadline_ns": 150000000,
+ "staleness_period_ns": 10000000,
+ "output_dir": "__JOB__/out/wired-smoke",
+ "transports": {
+  "raw_udp": {
+   "server_command": [
+    "build-v2-rawudp/raw_udp_server", "--port", "42917"
+   ],
+   "client_command": [
+    "build-v2-rawudp/raw_udp_client",
+    "--host", "10.200.0.1", "--port", "42917",
+    "--conns", "{conns}",
+    "--proc-index", "{proc_index}",
+    "--origin-base", "{origin_id_start}",
+    "--deadline-ns", "150000000",
+    "--staleness-period-ns", "10000000"
+   ],
+   "client_procs": 8
+  }
+ },
+ "steady_warmup": true
+}

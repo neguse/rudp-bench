@@ -29,6 +29,26 @@ fleet fingerprint・spot 実行・1h campaign protocol・配布/回収経路は
   逐次 scp。campaign 結果は PR(measurement doc + compact aggregate)+
   campaign タグの Release asset(生 bundle tar)として提出
 
+## campaign 実行手順(coordinator)
+
+`scripts/fleet/campaign.sh` がローカルマシンで campaign 一式を回す
+(ADR-0005 enabler #3。AWS 側は tag 付き ephemeral リソースのみ)。
+
+1. `launch -n <hosts>`: bundle 実在確認 → per-campaign SSH key/SG → spot 起動
+2. `dispatch -campaign <id> -queue <dir> -deadline-min <N>`: boot gate READY を
+   待って gate 証跡を回収し、job(= 1 `orchestrator block`、`<dir>/<job>/block.json`)
+   を空きホストへ配布。block 完了ごとに逐次 scp 回収。失敗は requeue
+   (上限 2 attempt)、SSH 不達は spot 中断とみなし requeue + ホスト離脱。
+   打ち切り時刻で残った job は穴として exit 3
+3. `aggregate -campaign <id>`: 回収 tar を展開し、ホスト gate 結果
+   (doctor / calibration)・capacity セル・穴を `campaign-summary.json` に集約
+4. `cleanup -campaign <id>`: tag 検索で instance/SG/key pair を全削除
+
+queue の書式と placeholder(`__JOB__`)は campaign.sh 冒頭コメントが正。
+smoke 用 queue は `scripts/fleet/queues/smoke/`(loss 0 — 0.1% loss は短時間 run
+だと期待 drop < 1 で netem loss evidence gate に正しく落とされるため、
+smoke はパイプライン検証のみを目的に loss を置かない)。
+
 ## 受入チェックリスト
 
 旧単一ホスト時代の受入 1–9 は「CI ビルド時」と「boot 時 gate(毎回)」に分割する。

@@ -1,0 +1,9 @@
+{
+ "rig": "orchestrator/rigs/aws-c8g-8xlarge.json",
+ "seed": 2,
+ "output_dir": "__JOB__/out",
+ "tar": true,
+ "sweeps": [
+  {"name": "wired-smoke", "config": "__JOB__/sweep.json"}
+ ]
+}
