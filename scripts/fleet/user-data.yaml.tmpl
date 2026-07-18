@@ -8,6 +8,10 @@
 package_update: false
 
 runcmd:
+  # デッドマンスイッチ: coordinator が死んでも(AWS セッション失効等で
+  # cleanup できなくても)100 分で自滅する。one-time spot は OS shutdown =
+  # terminate。campaign は boot ~10 分 + dispatch 上限 60 分で収まる前提
+  - shutdown -h +100
   - mkdir -p /opt/rudp-bench
   - curl -fsSL --retry 5 --retry-connrefused -o /opt/bundle.tar.zst "__BUNDLE_URL__"
   - apt-get update -qq
