@@ -91,11 +91,12 @@ magiconion: 5.88%(median 149–158)。session 1 と同水準で再現 —
 | raw_udp | 142, 143, 144, 144 | **1.4%** | PASS |
 | magiconion | 152, 153, 154, 154 | **1.3%** | PASS |
 
-**発見: magiconion の ~6% 分散は 8xlarge のサイズ起因**。16xlarge では
-両 treatment とも raw_udp 並みに収束する(コア余裕で GC/ThreadPool の
-揺れが消える)。8xlarge の raw_udp median(143)と 16xlarge の同 median
-(143)は一致 — SUT 側(server 2 vCPU 固定)の測定値はサイズ非依存で、
-分散だけがサイズに依存する、という綺麗な構図。
+**発見: magiconion の ~6% 分散は farm のコア余裕不足が原因**(切り分け
+session `c20260718-182742`: 16xlarge で farm を 24 コアに制限すると
+spread 5.96% に逆戻り — ホストスライス起因を棄却)。境界点の farm 総 CPU は
+2 割弱で「暇」なため、平均 CPU による farm 十分性判定では検出できない
+(ledger #26)。SUT median はサイズ間で一致(raw_udp 143、mo 151–153)し、
+破断は server budget 200% の飽和で起きる(= 測定対象として健全)。
 
 ## 凍結提案(ADR-0005 Open Decisions — owner 判断待ち)
 
