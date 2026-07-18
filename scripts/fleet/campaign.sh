@@ -328,8 +328,18 @@ dispatch)
   date -d "@$DEADLINE_EPOCH" +%FT%T%z > "$WORKDIR/deadline"
   echo "dispatch: deadline $(cat "$WORKDIR/deadline")(${DEADLINE_MIN}分)"
 
-  IPS=$(running_ips)
-  [ -n "$IPS" ] || { echo "running なホストが居ない" >&2; exit 1; }
+  # launch 直後は instance がまだ pending のことがある(overnight runner で
+  # 実証した race)。期待台数が running になるまで待つ(上限 5 分、
+  # 以降は起動できた分だけで進める — 足りない分の job は他ホストが拾う)
+  want=$(grep -c . "$WORKDIR/instance-ids" 2>/dev/null || echo 1)
+  IPS=""; waited=0
+  while [ "$waited" -lt 300 ]; do
+    IPS=$(running_ips)
+    n=$(printf '%s' "$IPS" | grep -c . || true)
+    [ "$n" -ge "$want" ] && break
+    sleep 15; waited=$((waited + 15))
+  done
+  [ -n "$IPS" ] || { echo "running なホストが居ない(${waited}s 待機後)" >&2; exit 1; }
   pids=()
   for ip in $IPS; do
     host_worker "$ip" "$DEADLINE_EPOCH" &
