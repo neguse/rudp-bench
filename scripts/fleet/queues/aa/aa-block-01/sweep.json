@@ -64,19 +64,19 @@
       ],
       "client_procs": 8
     },
-    "litenetlib": {
+    "magiconion": {
       "server_command": [
-        "servers/litenetlib/LiteNetLibBench.Server/bin/Release/net10.0/LiteNetLibBench.Server",
+        "servers/magiconion/MagicOnionBench.Server/bin/Release/net10.0/MagicOnionBench.Server",
         "--port",
-        "42941"
+        "42931"
       ],
       "client_command": {
-        "path": "servers/litenetlib/LiteNetLibBench.Client/bin/Release/net10.0/LiteNetLibBench.Client",
+        "path": "servers/magiconion/MagicOnionBench.Client/bin/Release/net10.0/MagicOnionBench.Client",
         "args": [
           "--host",
           "10.200.0.1",
           "--port",
-          "42941",
+          "42931",
           "--conns",
           "{conns}",
           "--proc-index",
@@ -88,7 +88,8 @@
           "DOTNET_gcServer=1"
         ]
       },
-      "client_procs": 8
+      "client_procs": 8,
+      "sched_is_measurand": true
     }
   },
   "steady_warmup": true
