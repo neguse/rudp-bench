@@ -94,8 +94,17 @@ if ! run_calibration 1; then
   run_calibration 2
 fi
 
-# TODO(A/A 設計時に確定): raw_udp anchor 1 点 probe の config を固定し、
-# ここで実行して結果を $GATE_DIR に残す。合否(fleet median 比較)は coordinator。
+# anchor probe: raw_udp ref-room-lan c128(A/A の全 block が踏んだ点。
+# 45 run で staleness_p99 全幅 5.3% — 2026-07-18-aa-session1-8xlarge.md)。
+# 合否(fleet median 比較 ±10% 暫定)は coordinator の aggregate が行う。
+# ここでは評価結果の保存まで(FAIL/INVALID も証跡として残す)
+sed -e "s|__SERVER_CPUS__|$(jq -r .server_cpus "$RIG")|" \
+    -e "s|__CLIENT_CPUS__|$(jq -r .client_cpus "$RIG")|" \
+    -e "s|__OUTPUT_DIR__|$GATE_DIR/anchor|" \
+  scripts/fleet/anchor-room-lan-c128.json.tmpl > "$GATE_DIR/anchor-config.json"
+systemd-run --scope --slice=bench.slice -p AllowedCPUs="$BENCH_CPUS" -p CPUWeight=10000 --quiet \
+  ./build-v2/orchestrator run -config "$GATE_DIR/anchor-config.json" \
+  > "$GATE_DIR/anchor.log" 2>&1 || true
 
 touch "$GATE_DIR/READY"
 echo "boot gate PASS: $GATE_DIR/READY"

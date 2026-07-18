@@ -374,7 +374,8 @@ aggregate)
           --argjson doctor "$(jq '.ok' "$h/boot-gate/doctor.json" 2>/dev/null || echo null)" \
           --argjson calibration "$(ls "$h"/boot-gate/duration-invariance/attempt-* 2>/dev/null | wc -l)" \
           --argjson calibration_passed "$(jq -s 'map(.passed) | any' "$h"/boot-gate/duration-invariance/attempt-*/summary.json 2>/dev/null || echo null)" \
-          '{ip: $ip, doctor_ok: $doctor, calibration_attempts: $calibration, calibration_passed: $calibration_passed}'
+          --argjson anchor "$(jq '{outcome, staleness_p99_ms: (.metrics.classes.loss_tolerant.update_gap_ns.p99_ns / 1e6)}' "$h/boot-gate/anchor/result.json" 2>/dev/null || echo null)" \
+          '{ip: $ip, doctor_ok: $doctor, calibration_attempts: $calibration, calibration_passed: $calibration_passed, anchor: $anchor}'
       done) \
     --slurpfile jobs <(
       for d in "$WORKDIR"/queue/done/*/; do
@@ -400,11 +401,21 @@ aggregate)
         done
       done) \
     '{campaign: $campaign, commit: $commit, deadline: $deadline,
-      hosts: $hosts, jobs: $jobs, holes: $holes}' \
+      hosts: $hosts, jobs: $jobs, holes: $holes}
+     # anchor gate: fleet median ±10%(暫定幅 — A/A 完了時に凍結)+ PASS 必須。
+     # probe の無い旧 bundle の campaign では null のまま(未判定)
+     | ([.hosts[].anchor.staleness_p99_ms | select(. != null)] | sort) as $vals
+     | .anchor_fleet_median_ms = (if ($vals | length) == 0 then null else $vals[(($vals | length) - 1) / 2 | floor] end)
+     | .anchor_fleet_median_ms as $med
+     | .hosts = [.hosts[] | .anchor_ok =
+         (if .anchor == null or $med == null then null
+          else (.anchor.outcome == "PASS"
+                and (.anchor.staleness_p99_ms >= $med * 0.9)
+                and (.anchor.staleness_p99_ms <= $med * 1.1)) end)]' \
     > "$WORKDIR/campaign-summary.json"
   echo "aggregate: $WORKDIR/campaign-summary.json"
-  jq -r '"campaign \(.campaign) commit \(.commit)",
-    "hosts: \(.hosts | map("\(.ip) doctor=\(.doctor_ok) calibration=\(.calibration_passed)") | join(", "))",
+  jq -r '"campaign \(.campaign) commit \(.commit) anchor_median=\(.anchor_fleet_median_ms // "-")ms",
+    "hosts: \(.hosts | map("\(.ip) doctor=\(.doctor_ok) calibration=\(.calibration_passed) anchor=\(if .anchor_ok == null then "-" else .anchor_ok end)") | join(", "))",
     "jobs: \(.jobs | length) done / holes: \(.holes | length)",
     (.jobs[] | "  \(.job) @\(.host) attempts=\(.attempts) cells=\(.cells | length)"),
     (.jobs[].cells[] | "    \(.transport)/\(.workload)/\(.regime): capacity=\(.capacity) censored=\(.censored // false)"),
