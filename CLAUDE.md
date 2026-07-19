@@ -38,9 +38,10 @@
 - 予算: 外部環境に月 5 万円まで(2026-07-12 ユーザー表明)。
 - reference rig は **仮想化 c8g の spot fleet を campaign 単位で起動**
   (2026-07-16 決定、[ADR-0005](docs/adr/0005-reference-fleet.md))。サイズは
-  A/A 実験で凍結。全 run spot、on-demand fallback なし。中断 cell は打ち切り
-  時刻まで requeue し、残った穴は原因調査の対象。metal は perf 診断専用に降格。
-  fleet fingerprint・1h campaign protocol の詳細は ADR-0005 が正。
+  **c8g.16xlarge に凍結**(2026-07-19 A/A 完了・owner 承認。raw_udp のみの
+  campaign は 8xlarge 可)。全 run spot、on-demand fallback なし。中断 cell は
+  打ち切り時刻まで requeue し、残った穴は原因調査の対象。metal は perf 診断
+  専用に降格。fleet fingerprint・1h campaign protocol の詳細は ADR-0005 が正。
 - rig のリージョンは target(ap-northeast-1)に合わせず、**安価な US リージョン
   (us-west-2 等)でよい**(2026-07-12 ユーザー承認。ベンチは veth/netns 完結で
   リージョンは測定に影響しない。silicon 一致が要件)。

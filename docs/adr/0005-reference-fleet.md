@@ -162,8 +162,22 @@ EC2 以外の永続資産（AMI、S3、IAM role）を持たない。
 
 ## Open Decisions（A/A 後に凍結）
 
-- fleet の instance size と台数
-- anchor gate / drift gate の許容幅
+**凍結済み（2026-07-19 owner 承認。証跡:
+[A/A campaign](../measurements/2026-07-18-aa-session1-8xlarge.md)）**
+
+- **fleet instance size = c8g.16xlarge**。A/A 全セッションで両 treatment が
+  ホスト間全幅 ≤5% を満たす最小サイズ（raw_udp 1.3–1.4% / magiconion
+  1.3–3.9%）。8xlarge は raw_udp 単独では PASS(0.7–2.8%) するが、managed
+  treatment は farm コア余裕不足で ~6%（ledger #26）のため除外。
+  raw_udp のみの campaign には 8xlarge を使ってよい
+- **anchor gate = fleet median ±10%（+ probe PASS 必須）**。probe は
+  raw_udp ref-room-lan c128（45 run で全幅 5.3% = ヒストグラム 1 bin。
+  ±10% は bin 量子化 2 個分）。boot.sh が probe を実行し、coordinator の
+  aggregate が判定する（実装・実 rejection とも検証済み）
+- 台数は campaign ごとの pre-registration で指定する（A/A は 4–5 台で実証。
+  spot vCPU quota 300 の現状では 16xlarge ≤4 台、増枠申請 512 は審査中）
+- drift gate（block 前後 baseline）の許容幅は従来どおり ADR-0004 §3 の
+  pilot で凍結する（本 ADR の凍結対象から変更なし）
 
 ## Consequences
 

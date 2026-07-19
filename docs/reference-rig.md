@@ -7,9 +7,11 @@ fleet fingerprint・spot 実行・1h campaign protocol・配布/回収経路は
 
 ## 調達条件
 
-- **仮想化 c8g の単一サイズ**(候補 c8g.8xlarge / 16xlarge — A/A 実験で
-  PASS する最小サイズに凍結)。target(GameLift の ARM インスタンス)と
-  silicon(Graviton4)を揃える。GameLift ホストは仮想化のため virt が target 一致
+- **仮想化 c8g.16xlarge に凍結**(2026-07-19、ADR-0005 Open Decisions。
+  managed treatment の farm には 56 コア級の余裕が要る — ledger #26)。
+  raw_udp のみの campaign は 8xlarge 可。target(GameLift の ARM
+  インスタンス)と silicon(Graviton4)を揃える。GameLift ホストは
+  仮想化のため virt が target 一致
 - **全 run spot**、on-demand fallback なし(ADR-0005)。多様化は AZ 方向のみ。
   サイズ・AMI の混在は fingerprint class が割れるため 1 campaign 内で禁止
 - リージョンは安価な US リージョン(us-west-2 等)。ベンチは veth/netns 完結で
