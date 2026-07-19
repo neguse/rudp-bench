@@ -377,15 +377,24 @@ aggregate)
     --arg commit "$(cat "$WORKDIR/commit" 2>/dev/null || echo unknown)" \
     --arg deadline "$(cat "$WORKDIR/deadline" 2>/dev/null || echo -)" \
     --slurpfile hosts <(
+      # 証跡が欠けたホスト(gate FAILED 等)で列挙が止まらないよう、この
+      # subshell だけ errexit/pipefail を外す(2026-07-19 の 4→1 ホスト事故)
+      set +e +o pipefail
       for h in "$WORKDIR"/hosts/*/; do
         [ -d "$h" ] || continue
         ip=$(basename "$h")
+        # jq は入力欠損時に「部分出力 + 非ゼロ exit」がありうる(calibration
+        # 未完走ホストで実証)。値は tail -1 で 1 行に落とし、空なら null
+        doctor=$(jq '.ok' "$h/boot-gate/doctor.json" 2>/dev/null | tail -1); doctor=${doctor:-null}
+        attempts=$(find "$h/boot-gate/duration-invariance" -maxdepth 1 -name 'attempt-*' 2>/dev/null | wc -l)
+        calib=$(jq -s 'map(.passed) | any' "$h"/boot-gate/duration-invariance/attempt-*/summary.json 2>/dev/null | tail -1); calib=${calib:-null}
+        anchor=$(jq '{outcome, staleness_p99_ms: (.metrics.classes.loss_tolerant.update_gap_ns.p99_ns / 1e6)}' \
+          "$h/boot-gate/anchor/result.json" 2>/dev/null | tr -d '\n'); anchor=${anchor:-null}
         jq -n --arg ip "$ip" \
-          --argjson doctor "$(jq '.ok' "$h/boot-gate/doctor.json" 2>/dev/null || echo null)" \
-          --argjson calibration "$(ls "$h"/boot-gate/duration-invariance/attempt-* 2>/dev/null | wc -l)" \
-          --argjson calibration_passed "$(jq -s 'map(.passed) | any' "$h"/boot-gate/duration-invariance/attempt-*/summary.json 2>/dev/null || echo null)" \
-          --argjson anchor "$(jq '{outcome, staleness_p99_ms: (.metrics.classes.loss_tolerant.update_gap_ns.p99_ns / 1e6)}' "$h/boot-gate/anchor/result.json" 2>/dev/null || echo null)" \
-          '{ip: $ip, doctor_ok: $doctor, calibration_attempts: $calibration, calibration_passed: $calibration_passed, anchor: $anchor}'
+          --argjson doctor "$doctor" --argjson calibration "$attempts" \
+          --argjson calibration_passed "$calib" --argjson anchor "$anchor" \
+          '{ip: $ip, doctor_ok: $doctor, calibration_attempts: $calibration, calibration_passed: $calibration_passed, anchor: $anchor}' \
+          || echo "{\"ip\": \"$ip\", \"aggregate_error\": true}"
       done) \
     --slurpfile jobs <(
       for d in "$WORKDIR"/queue/done/*/; do
