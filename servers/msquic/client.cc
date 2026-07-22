@@ -848,6 +848,15 @@ class ClientApp {
         const uint64_t cutoff =
             schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
         for (ClientConn *conn : conns_) {
+          bk_slot slot;
+          while (bk_plan_next(conn->plan, cutoff, &slot)) {
+            const size_t payload_size = (slot.flags & BK_FLAG_MUST_DELIVER)
+                                            ? cfg_.payload_md
+                                            : cfg_.payload_lt;
+            send_slot(conn, &slot, payload_size);
+          }
+        }
+        for (ClientConn *conn : conns_) {
           mark_unsent_until(conn, cutoff);
         }
         marked_unsent = true;

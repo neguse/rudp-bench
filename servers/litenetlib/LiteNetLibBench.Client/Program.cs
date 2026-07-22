@@ -324,6 +324,23 @@ try
         }
         else if (!markedUnsent)
         {
+            var cutoff = schedule.StopAtNs == 0 ? 0 : schedule.StopAtNs - 1;
+            for (var i = 0; i < config.Conns; i++)
+            {
+                while (plans[i]!.TryNext(cutoff, out var slot))
+                {
+                    SendSlot(
+                        peers[i],
+                        originIds[i],
+                        i,
+                        slot,
+                        config,
+                        metrics,
+                        ref lastInputSeq[i],
+                        progress,
+                        payloadValidation);
+                }
+            }
             MarkUnsent(plans, originIds, schedule.StopAtNs, metrics);
             markedUnsent = true;
         }

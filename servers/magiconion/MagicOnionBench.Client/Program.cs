@@ -218,6 +218,7 @@ try
         }
         else if (!markedUnsent)
         {
+            SendRemainingAndStopPipes(connections, schedule.StopAtNs);
             MarkUnsentAndStopPipes(connections, schedule.StopAtNs, metrics, metricsGate);
             markedUnsent = true;
         }
@@ -568,6 +569,21 @@ static ulong IntervalFromRate(double rateHz)
     return ns == 0 ? 1 : ns;
 }
 
+static void SendRemainingAndStopPipes(
+    IReadOnlyList<ClientConnection> connections,
+    ulong stopAtNs)
+{
+    var cutoff = stopAtNs == 0 ? 0 : stopAtNs - 1;
+    foreach (var connection in connections)
+    {
+        while (connection.Plan!.TryNext(cutoff, out var slot))
+        {
+            connection.SendPipe!.Submit(slot);
+        }
+        connection.SendPipe!.CompleteAfterPending();
+    }
+}
+
 static void MarkUnsentAndStopPipes(
     IReadOnlyList<ClientConnection> connections,
     ulong stopAtNs,
@@ -831,6 +847,15 @@ internal sealed class SendPipe
         if (dropped.HasValue)
         {
             RecordSlot(metrics, metricsGate, originId, dropped.Value, 0, false);
+        }
+    }
+
+    public void CompleteAfterPending()
+    {
+        lock (gate)
+        {
+            accepting = false;
+            Monitor.PulseAll(gate);
         }
     }
 

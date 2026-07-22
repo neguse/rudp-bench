@@ -1280,6 +1280,15 @@ static int run_client(const client_config *cfg) {
       const uint64_t cutoff =
           schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
       for (int i = 0; i < active_conns; ++i) {
+        bk_slot slot;
+        while (bk_plan_next(conns[i].plan, cutoff, &slot)) {
+          const size_t payload_size = (slot.flags & BK_FLAG_MUST_DELIVER)
+                                          ? cfg->payload_md
+                                          : cfg->payload_lt;
+          send_slot(&conns[i], &slot, payload_buf, payload_size, metrics);
+        }
+      }
+      for (int i = 0; i < active_conns; ++i) {
         mark_unsent_until(&conns[i], cutoff, metrics);
       }
       marked_unsent = true;

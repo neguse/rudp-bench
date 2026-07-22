@@ -60,6 +60,7 @@ typedef struct {
   uint64_t last_input_seq;
   uint64_t last_applied_input_seq;
   uint64_t input_last_sent_measured;
+  uint64_t md_last_sent_measured;
   uint64_t state_header_seq_recv_measured;
   uint64_t state_applied_input_seq_recv_measured;
 } client_conn;
@@ -619,6 +620,13 @@ static int send_slot(client_conn *conn, const bk_slot *slot,
       header.seq > conn->input_last_sent_measured) {
     conn->input_last_sent_measured = header.seq;
   }
+  if (submitted && BK_FLAGS_DIRECTION(header.flags) ==
+                       BK_DIRECTION_CLIENT_TO_SERVER &&
+      (header.flags & (BK_FLAG_MUST_DELIVER | BK_FLAG_MEASURE)) ==
+          (BK_FLAG_MUST_DELIVER | BK_FLAG_MEASURE) &&
+      header.seq > conn->md_last_sent_measured) {
+    conn->md_last_sent_measured = header.seq;
+  }
   return submitted ? 0 : -1;
 }
 
@@ -1108,6 +1116,29 @@ static int run_client(const client_config *cfg) {
     } else if (!ramp.enabled && !marked_unsent) {
       const uint64_t cutoff =
           schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
+      // stop までに予定された未送 slot は mark する前に送り切る。最終 tick の
+      // 予定時刻が stop 直前に落ちた proc は loop 粒度の都合で送信機会を
+      // 得られないことがあり、mark だけだと必達の分母に恒久欠けが残って
+      // eventual=1.0 が確率で破れる(送信 ts は stop を跨ぐが、計測窓の
+      // 帰属は sched 基準なので会計は変わらない)
+      bool flushed_any = false;
+      for (int i = 0; i < initiated_conns; ++i) {
+        if (!conns[i].connected) {
+          continue;
+        }
+        bk_slot slot;
+        while (bk_plan_next(conns[i].plan, cutoff, &slot)) {
+          const size_t payload_size = (slot.flags & BK_FLAG_MUST_DELIVER)
+                                          ? cfg->payload_md
+                                          : cfg->payload_lt;
+          if (send_slot(&conns[i], &slot, payload_size, metrics) == 0) {
+            flushed_any = true;
+          }
+        }
+      }
+      if (flushed_any) {
+        enet_host_flush(host);
+      }
       for (int i = 0; i < initiated_conns; ++i) {
         mark_unsent_until(&conns[i], cutoff, metrics);
       }
@@ -1153,6 +1184,29 @@ static int run_client(const client_config *cfg) {
         schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
     for (int i = 0; i < cfg->conns; ++i) {
       mark_unsent_until(&conns[i], cutoff, metrics);
+    }
+  }
+
+  // BENCH_DIAG_DRAIN=1: drain 終了時点で ACK 未完の reliable が残る peer を
+  // stderr へ開示する(必達の永続欠け調査用の計測器診断。測定経路には触れない)
+  if (getenv("BENCH_DIAG_DRAIN") != NULL) {
+    for (int i = 0; i < initiated_conns; ++i) {
+      ENetPeer *peer = conns[i].peer;
+      if (peer == NULL) {
+        continue;
+      }
+      const size_t sent_rel = enet_list_size(&peer->sentReliableCommands);
+      const size_t out_send_rel =
+          enet_list_size(&peer->outgoingSendReliableCommands);
+      const size_t outgoing = enet_list_size(&peer->outgoingCommands);
+      fprintf(stderr,
+              "diag-drain conn=%d origin=%u state=%d rtt=%u rttvar=%u "
+              "in_transit=%u sent_rel=%zu out_send_rel=%zu outgoing=%zu "
+              "window=%u md_last_sent=%" PRIu64 "\n",
+              i, conns[i].origin_id, (int)peer->state, peer->roundTripTime,
+              peer->roundTripTimeVariance, peer->reliableDataInTransit,
+              sent_rel, out_send_rel, outgoing, peer->windowSize,
+              conns[i].md_last_sent_measured);
     }
   }
 

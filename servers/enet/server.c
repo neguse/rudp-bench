@@ -76,6 +76,11 @@ typedef struct {
 
 static volatile sig_atomic_t g_stop = 0;
 
+// BENCH_DIAG_DRAIN=1 のときだけ確保する per-flow 受信形状(必達欠け調査)
+static uint64_t *g_diag_md_count = NULL;
+static uint64_t *g_diag_md_max = NULL;
+static uint64_t *g_diag_md_min = NULL;
+
 static void on_signal(int signo) {
   (void)signo;
   g_stop = 1;
@@ -327,6 +332,18 @@ static void handle_receive(server_context *ctx, const ENetEvent *event) {
     if ((header.flags & BK_FLAG_MUST_DELIVER) == 0 &&
         header.seq > state->applied_input_seq) {
       state->applied_input_seq = header.seq;
+    }
+    if (g_diag_md_count != NULL &&
+        (header.flags & (BK_FLAG_MUST_DELIVER | BK_FLAG_MEASURE)) ==
+            (BK_FLAG_MUST_DELIVER | BK_FLAG_MEASURE) &&
+        header.origin_id < ctx->cfg->scenario.total_conns) {
+      g_diag_md_count[header.origin_id]++;
+      if (header.seq > g_diag_md_max[header.origin_id]) {
+        g_diag_md_max[header.origin_id] = header.seq;
+      }
+      if (header.seq < g_diag_md_min[header.origin_id]) {
+        g_diag_md_min[header.origin_id] = header.seq;
+      }
     }
     bk_metrics_on_recv(ctx->metrics, header.origin_id, &header, bk_now_ns());
     enet_packet_destroy(packet);
@@ -747,6 +764,28 @@ int main(int argc, char **argv) {
     enet_host_destroy(host);
     return EXIT_FAILURE;
   }
+  if (authoritative && getenv("BENCH_DIAG_DRAIN") != NULL) {
+    g_diag_md_count = (uint64_t *)calloc(cfg.scenario.total_conns,
+                                         sizeof(*g_diag_md_count));
+    g_diag_md_max =
+        (uint64_t *)calloc(cfg.scenario.total_conns, sizeof(*g_diag_md_max));
+    g_diag_md_min =
+        (uint64_t *)malloc(cfg.scenario.total_conns * sizeof(*g_diag_md_min));
+    if (g_diag_md_min != NULL) {
+      for (uint32_t o = 0; o < cfg.scenario.total_conns; ++o) {
+        g_diag_md_min[o] = UINT64_MAX;
+      }
+    }
+    if (g_diag_md_count == NULL || g_diag_md_max == NULL ||
+        g_diag_md_min == NULL) {
+      free(g_diag_md_count);
+      free(g_diag_md_max);
+      free(g_diag_md_min);
+      g_diag_md_count = NULL;
+      g_diag_md_max = NULL;
+      g_diag_md_min = NULL;
+    }
+  }
   server_context ctx = {
       .host = host,
       .cfg = &cfg,
@@ -980,6 +1019,56 @@ int main(int argc, char **argv) {
     const uint64_t cutoff =
         schedule.stop_at_ns == 0 ? 0 : schedule.stop_at_ns - 1u;
     mark_state_unsent(&ctx, state_plan, cutoff, cfg.scenario.total_conns);
+  }
+
+  // BENCH_DIAG_DRAIN=1: drain 期限でループを抜けた時点の dispatch queue 残量を
+  // 開示する(必達の永続欠け調査用の計測器診断。数えるだけで計上はしない)
+  if (getenv("BENCH_DIAG_DRAIN") != NULL) {
+    ENetEvent event;
+    size_t leftover_recv = 0;
+    size_t leftover_md_measure = 0;
+    while (enet_host_check_events(host, &event) > 0) {
+      if (event.type != ENET_EVENT_TYPE_RECEIVE) {
+        continue;
+      }
+      leftover_recv++;
+      bk_header header;
+      if (bk_payload_read(event.packet->data, event.packet->dataLength,
+                          &header) == 0 &&
+          (header.flags & BK_FLAG_MUST_DELIVER) != 0 &&
+          (header.flags & BK_FLAG_MEASURE) != 0) {
+        leftover_md_measure++;
+      }
+      enet_packet_destroy(event.packet);
+    }
+    fprintf(stderr,
+            "diag-drain server leftover_recv=%zu leftover_md_measure=%zu\n",
+            leftover_recv, leftover_md_measure);
+    if (g_diag_md_count != NULL) {
+      uint64_t global_max = 0;
+      for (uint32_t o = 0; o < cfg.scenario.total_conns; ++o) {
+        if (g_diag_md_max[o] > global_max) {
+          global_max = g_diag_md_max[o];
+        }
+      }
+      for (uint32_t o = 0; o < cfg.scenario.total_conns; ++o) {
+        if (g_diag_md_count[o] == 0) {
+          fprintf(stderr, "diag-md-flow origin=%u count=0\n", o);
+          continue;
+        }
+        const uint64_t span = g_diag_md_max[o] - g_diag_md_min[o] + 1u;
+        const uint64_t holes = span - g_diag_md_count[o];
+        if (holes != 0 || g_diag_md_max[o] != global_max) {
+          fprintf(stderr,
+                  "diag-md-flow origin=%u min=%" PRIu64 " max=%" PRIu64
+                  " count=%" PRIu64 " holes=%" PRIu64 " tail_short=%" PRIu64
+                  "\n",
+                  o, g_diag_md_min[o], g_diag_md_max[o], g_diag_md_count[o],
+                  holes, global_max - g_diag_md_max[o]);
+        }
+      }
+      fprintf(stderr, "diag-md-flow global_max=%" PRIu64 "\n", global_max);
+    }
   }
 
   char stats_json[4096];
