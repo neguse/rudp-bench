@@ -175,7 +175,8 @@ EC2 以外の永続資産（AMI、S3、IAM role）を持たない。
   ±10% は bin 量子化 2 個分）。boot.sh が probe を実行し、coordinator の
   aggregate が判定する（実装・実 rejection とも検証済み）
 - 台数は campaign ごとの pre-registration で指定する（A/A は 4–5 台で実証。
-  spot vCPU quota 300 の現状では 16xlarge ≤4 台、増枠申請 512 は審査中）
+  spot vCPU quota 300 のため 16xlarge ≤4 台。512 増枠は追わない —
+  2026-07-23 owner 決定。既存申請は放置し、結果に関わらず ≤4 台で運用）
 - drift gate（block 前後 baseline）の許容幅は従来どおり ADR-0004 §3 の
   pilot で凍結する（本 ADR の凍結対象から変更なし）
 
