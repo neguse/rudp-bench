@@ -1,0 +1,12 @@
+{
+  "rig": "__RIG__",
+  "seed": 2,
+  "output_dir": "__JOB__/out",
+  "tar": true,
+  "sweeps": [
+    {
+      "name": "auth1000",
+      "config": "__JOB__/sweep.json"
+    }
+  ]
+}
