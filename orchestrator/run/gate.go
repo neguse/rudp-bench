@@ -63,7 +63,16 @@ func EvaluateGate(input GateInput) GateResult {
 	} else {
 		attempted = input.Metrics.attemptedRatio()
 		if attempted < input.AttemptedThreshold {
-			reasons = append(reasons, fmt.Sprintf("attempted_ratio=%g below threshold=%g", attempted, input.AttemptedThreshold))
+			// peer 切断が開示されている run の attempted 不足は、切断された
+			// conn の slot が未送計上された結果 = SUT の切断帰属(ADR-0002 の
+			// 「切断は FAIL」)。開示なしの不足は従来どおり farm 側疑いの INVALID
+			if disconnects := totalPeerDisconnects(input.Control); disconnects > 0 {
+				sutReasons = append(sutReasons, fmt.Sprintf(
+					"attempted_ratio=%g below threshold=%g with peer_disconnects=%d: unsent slots attributed to SUT disconnects",
+					attempted, input.AttemptedThreshold, disconnects))
+			} else {
+				reasons = append(reasons, fmt.Sprintf("attempted_ratio=%g below threshold=%g", attempted, input.AttemptedThreshold))
+			}
 		}
 		if input.Metrics.Raw.TimestampOrderViolations != 0 {
 			reasons = append(reasons, fmt.Sprintf("timestamp_order_violations=%d, want 0",
@@ -420,7 +429,29 @@ type authoritativeProgress struct {
 
 type scenarioDoneStats struct {
 	InvalidPayload        *uint64                `json:"invalid_payload"`
+	PeerDisconnects       *uint64                `json:"peer_disconnects"`
 	AuthoritativeProgress *authoritativeProgress `json:"authoritative_progress"`
+}
+
+// totalPeerDisconnects sums the run-time disconnect disclosures across all
+// participants. Only clients that survive a peer disconnect report the key;
+// absence means zero.
+func totalPeerDisconnects(controlResult *control.Result) uint64 {
+	if controlResult == nil {
+		return 0
+	}
+	var total uint64
+	for _, participant := range controlResult.Participants {
+		var stats scenarioDoneStats
+		if len(participant.Done.Stats) == 0 ||
+			json.Unmarshal(participant.Done.Stats, &stats) != nil {
+			continue
+		}
+		if stats.PeerDisconnects != nil {
+			total += *stats.PeerDisconnects
+		}
+	}
+	return total
 }
 
 func validateScenarioDoneStats(controlResult *control.Result, cfg RunConfig) (invalid, failed []string) {

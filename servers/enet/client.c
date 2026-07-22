@@ -67,6 +67,7 @@ typedef struct {
 
 typedef struct {
   uint64_t invalid_payload;
+  uint64_t peer_disconnects;
 } client_stats;
 
 static void print_describe(void) {
@@ -509,8 +510,21 @@ static int handle_event(const ENetEvent *event, const client_config *cfg,
       enet_packet_destroy(event->packet);
       break;
     }
-    case ENET_EVENT_TYPE_DISCONNECT:
+    case ENET_EVENT_TYPE_DISCONNECT: {
+      // run 中の peer 切断は SUT の FAIL 材料(ADR-0002)であって計測の失敗では
+      // ない。conn を止めて続行し、切断数を stats で開示する — 以降その flow の
+      // slot は未送計上・受信は欠測となり、SLO 破りとして judge に採点される
+      client_conn *conn = (client_conn *)event->peer->data;
+      if (conn != NULL && conn->connected) {
+        conn->connected = false;
+        (*connected_count)--;
+        stats->peer_disconnects++;
+        fprintf(stderr, "enet peer disconnected: conn origin=%u (continuing)\n",
+                conn->origin_id);
+        break;
+      }
       return -1;
+    }
     case ENET_EVENT_TYPE_NONE:
       break;
   }
@@ -674,8 +688,11 @@ static int format_client_stats_json(const client_config *cfg,
                                        sizeof(progress_json)) != 0) {
     return -1;
   }
-  const int n = snprintf(buf, cap, "{\"invalid_payload\":%" PRIu64 ",%s}",
-                         stats->invalid_payload, progress_json);
+  const int n = snprintf(buf, cap,
+                         "{\"invalid_payload\":%" PRIu64
+                         ",\"peer_disconnects\":%" PRIu64 ",%s}",
+                         stats->invalid_payload, stats->peer_disconnects,
+                         progress_json);
   return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 

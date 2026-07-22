@@ -304,6 +304,35 @@ func qdiscFixtureRaw(stats netops.QdiscStats) string {
 		stats.Dropped, stats.Overlimits, stats.Requeues)
 }
 
+func TestEvaluateGateAttemptedShortfallWithDisconnectsIsSUTFailure(t *testing.T) {
+	controlResult := controlResultWithMargin(10)
+	controlResult.Participants[0].Done.Stats = []byte(`{"invalid_payload":0,"peer_disconnects":8}`)
+	gate := EvaluateGate(GateInput{
+		Control:            controlResult,
+		Metrics:            gateMetrics(100, 80),
+		Processes:          []ProcessResult{{Role: "server", ProcIndex: -1, PID: 10, Exited: true, ExitCode: 0}},
+		AttemptedThreshold: 0.99,
+	})
+	if gate.Verdict != VerdictValid {
+		t.Fatalf("verdict = %s, reasons=%v", gate.Verdict, gate.Reasons)
+	}
+	if !reasonsContain(gate.SUTFailureReasons, "peer_disconnects=8") {
+		t.Fatalf("SUT reasons %v do not attribute the shortfall to disconnects", gate.SUTFailureReasons)
+	}
+}
+
+func TestEvaluateGateAttemptedShortfallWithoutDisconnectsStaysInvalid(t *testing.T) {
+	gate := EvaluateGate(GateInput{
+		Control:            controlResultWithMargin(10),
+		Metrics:            gateMetrics(100, 80),
+		Processes:          []ProcessResult{{Role: "server", ProcIndex: -1, PID: 10, Exited: true, ExitCode: 0}},
+		AttemptedThreshold: 0.99,
+	})
+	if gate.Verdict != VerdictInvalid || !reasonsContain(gate.Reasons, "attempted_ratio") {
+		t.Fatalf("gate = %+v", gate)
+	}
+}
+
 func controlResultWithMargin(margin int64) *control.Result {
 	return &control.Result{
 		Valid: true,
