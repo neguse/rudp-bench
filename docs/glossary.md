@@ -4,6 +4,9 @@
 ここは一覧と平易な言い換え。会話・doc とも、ここに無い専門語を
 定義なしで使わない。
 
+見出しには doc・会話で実際に使う表記(略記・和文・派生形)を全て併記する。
+使われている表記で引けない語があれば、それは glossary のバグとして直す。
+
 ## 登場人物
 
 | 用語 | 意味 |
@@ -48,7 +51,12 @@
 | flap | 同じ条件で測っても境界が ±1 点ずれる揺れ。測定の解像度の内なので異常ではない |
 | range censored | 用意した探索範囲の上限まで壊れなかったため「実力は ≥上限」としか言えない状態(CENSORED の一種) |
 | below_range | 探索窓の最小点ですでに壊れていたため「境界は窓より下」としか言えない状態。confirmatory の統計からは除外して件数を開示する |
-| envbase | environment-baseline scenario の略記。raw_udp で環境と計測器の上限を測る cell、または block 前後の baseline run を指す |
+| envbase(environment baseline / baseline) | environment-baseline scenario の略記。raw_udp で環境と計測器の上限を測る cell、または block 前後の baseline run を指す |
+| seed | 乱数の種。実行順や loss パターンを再現可能にする番号で、confirmatory は seed を変えて block を反復する(seed 1–3 等) |
+| stopping rule(停止規則) | 反復をいつ打ち切るかの事前登録済み規則。連続 3 block の全幅 ≤5% で確定、上限 5 block、未達は INCONCLUSIVE([ADR-0004 §3](adr/0004-reference-preset.md)) |
+| conformance | treatment が scenario の意味論(LT/MD の使い分け等)を正しく実装しているかの適合検査。性能測定の前提条件([ADR-0002](adr/0002-benchmark-methodology.md)) |
+| class-mapping probe | conformance の具体検査。LT/MD をどのチャネルで送るかの開示(class mapping)どおりに動くかを、loss あり/なしの 6 case で確かめる |
+| tune-to-plateau | 追加チューニングで測定値が動かなくなる(頭打ち = plateau)まで実装を詰めた状態。バトル出場の資格条件(ルート CLAUDE.md) |
 
 ## 判定(outcome states — [ADR-0002](adr/0002-benchmark-methodology.md) の 6 状態)
 
@@ -67,10 +75,13 @@
 |---|---|
 | doctor | ホストが測定に適するかの環境検査(時刻源、CPU 隔離など) |
 | calibration | 計測器自体の校正 run |
-| anchor probe | raw_udp 固定 1 条件の短い測定。環境が前回と同じかの見張り番 |
+| anchor(アンカー / anchor probe / anchor gate) | raw_udp 固定 1 条件の短い測定(probe)で環境が同じかを見張る仕組み。gate は判定の方: 各ホストの anchor 値が fleet 中央値 ±10% に収まるか(旧称 fleet median gate)、セッション冒頭では前セッション値との乖離で停止するか([ADR-0005](adr/0005-reference-fleet.md)) |
 | boot gate | fleet 各ホストの起動時受入検査 = doctor + calibration + anchor probe。落ちたホストは使わない([ADR-0005](adr/0005-reference-fleet.md)) |
-| fleet median gate | 各ホストの anchor 値が fleet 中央値 ±10% に収まるかの検査 |
 | drift gate | block の前後に置く baseline run のずれ検査。許容幅を外れた block は INVALID |
 | fleet fingerprint | 「同一構成の fleet は同じ値を出す」ことを検証済みの構成単位。fingerprint が違う環境の値は同じ表に混ぜない([ADR-0005](adr/0005-reference-fleet.md)、[ADR-0002](adr/0002-benchmark-methodology.md)) |
 | Promotable | そのセッションの証跡を reference(公式値)へ昇格してよいか。doctor PASS が必須条件 |
 | MDE | これ未満の差は「同等」とみなす最小の意味ある差 = 10%([ADR-0004](adr/0004-reference-preset.md)) |
+| IQR(四分位幅) | 反復値の散らばりの表し方。中央値(median)とセットで「代表値 ± ばらつき」として報告する |
+| bundle | CI がビルドした実行物一式(全 server/client + orchestrator)。commit に紐づき、fleet が起動時に取得する([ADR-0005](adr/0005-reference-fleet.md)) |
+| queue / job | campaign でホストに配る仕事の列と、その 1 件(= 1 block 等)。中断した job は requeue(列に戻す)する |
+| spot | AWS の余剰計算資源を安く借りる購入形態。予告 2 分で中断されうるが、中断は job の requeue で吸収する([ADR-0005](adr/0005-reference-fleet.md)) |
