@@ -31,6 +31,29 @@ echo workload の追加は TODO 参照。
 | magiconion | **≥128**(farm censored) | **97**(129%) | **81**(176%) | [battle-magiconion](measurements/2026-07-10-battle-magiconion.md) |
 | websocket | **251**(330%) | **141**(188%) | **127**(276%) | [battle-websocket](measurements/2026-07-10-battle-websocket.md) |
 
+## reference campaign 手順(2026-07-23 protocol 凍結後の本測定)
+
+pilot 完了([2026-07-23-pilot-wan-v1](measurements/2026-07-23-pilot-wan-v1.md))
+により確定した手順。1 セッション = raw_udp anchor + 1 library(既定ルール)、
+fleet は ADR-0005 の c8g.16xlarge spot。破断は到達率・鮮度・期限のみで判定
+(kernel drop は開示のみ — ledger #29)。
+
+1. **screening**: 2 倍刻み sweep。conns 上限は auth 系 2048 / room 512
+   (pilot で auth 系が 1024/512 到達のため)
+2. **confirmatory queue 生成**: `scripts/fleet/confirmatory-genqueue.sh
+   <screening capacity.json> <template sweep.json> <queue> <cell>` —
+   境界 ±10% の窓 × seed 3 の block を作る
+3. **dispatch → 判定**: `scripts/fleet/confirmatory-analyze.sh
+   <campaign-summary.json>` — 停止規則(連続 3 block の全幅 ≤5% で確定、
+   不足なら必要 block 数を出力、5 block 未達は INCONCLUSIVE)を機械判定
+4. **block gate**: confirmatory の sweep は `measurement_mode: "reference"`
+   (block 前後の raw_udp baseline + drift gate + doctor_report 必須)
+
+未決: reference mode の drift 許容幅の具体値。凍結値は ±5% だが、staleness
+p99 はヒストグラム量子化(1 bin ≈ 4.4%)があり、delivery=±0.05 /
+staleness=×1.10(2 bin 分)の組が実装候補 — 初回 reference セッションの
+前に owner 合意を取る。
+
 ## セッション手順
 
 1. **契約**: 開始前に「予算 N 分 / 打ち切り M 分 / アウトプット」を合意
