@@ -85,3 +85,4 @@
 | bundle | CI がビルドした実行物一式(全 server/client + orchestrator)。commit に紐づき、fleet が起動時に取得する([ADR-0005](adr/0005-reference-fleet.md)) |
 | queue / job | campaign でホストに配る仕事の列と、その 1 件(= 1 block 等)。中断した job は requeue(列に戻す)する |
 | spot | AWS の余剰計算資源を安く借りる購入形態。予告 2 分で中断されうるが、中断は job の requeue で吸収する([ADR-0005](adr/0005-reference-fleet.md)) |
+| host-hour(ホスト時間) | ホスト 1 台 × 1 時間の使用量。コスト見積もりの単位(4 台で 30 分なら 2 host-hour) |
