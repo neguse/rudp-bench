@@ -66,6 +66,11 @@ while read -r bin; do
 done < <(jq -r '.binaries[].path' bundle-manifest.json)
 [ "$missing" = 0 ] || exit 1
 
+# irqbalance は isolate が固定した IRQ affinity を随時再配分してしまう
+# (Ubuntu 既定で active — ref1 session 1 で doctor irq_cpu_isolation が
+# flap した原因)。隔離 rig では無効化が前提
+systemctl disable --now irqbalance 2>/dev/null || true
+
 # CPU 隔離(system/user/init slice の退避 + IRQ affinity。rig json から)
 ./build-v2/orchestrator isolate -rig "$RIG" setup
 
