@@ -43,6 +43,10 @@ apt-get install -y -qq zstd ethtool iperf3 jq libprotobuf32t64 libnuma1 libsodiu
 printf 'root - nofile 1048576\nubuntu - nofile 1048576\n' > /etc/security/limits.d/99-bench-nofile.conf
 ulimit -n 1048576
 
+# bundle 展開ツリーは root 所有。非 root で走る計測 unit(class-mapping probe
+# 等)の出力先を先に用意する(ref1 session 1 で probe が mkdir 失敗した罠)
+install -d -o ubuntu -g ubuntu results-v2
+
 # farm 凍結構成(client rcvbuf 4MB 明示 — ledger #5)の前提。Ubuntu 既定の
 # rmem_max 208KB では tuned client が fail fast する(ledger #24)。
 # doctor が rig 宣言(min_rmem_max/min_wmem_max)と照合する

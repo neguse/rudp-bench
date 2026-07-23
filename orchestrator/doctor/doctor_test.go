@@ -44,6 +44,23 @@ func TestGovernorCheckTargetsBenchCPUs(t *testing.T) {
 	}
 }
 
+func TestValidateReferenceRigAcceptsGravitonRig(t *testing.T) {
+	// Graviton rig は require_performance_governor と expect_fixed_frequency が
+	// 排他(rig.Validate)なので、reference 要件は「どちらかの周波数固定機構」
+	// で満たす。出荷している fleet rig 現物で回帰を張る
+	r, err := rig.Load(filepath.Join("..", "rigs", "aws-c8g-16xlarge.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReferenceRig(r); err != nil {
+		t.Fatalf("graviton reference rig rejected: %v", err)
+	}
+	r.ExpectFixedFrequency = false
+	if err := validateReferenceRig(r); err == nil {
+		t.Fatal("rig without any frequency stability mechanism accepted")
+	}
+}
+
 func TestGovernorCheckFixedFrequencyPlatform(t *testing.T) {
 	r := rig.Rig{BenchCPUs: "3-4", ExpectFixedFrequency: true}
 	check := governorCheck(r, map[string]string{})

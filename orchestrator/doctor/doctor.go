@@ -784,10 +784,13 @@ func validateReferenceRig(referenceRig rig.Rig) error {
 	if err := referenceRig.Validate(); err != nil {
 		return fmt.Errorf("reference rig: %w", err)
 	}
-	if referenceRig.ExpectedClocksource == "" || !referenceRig.RequirePerformanceGovernor ||
+	// 周波数の固定は governor 要求(x86)か固定周波数宣言(Graviton)の
+	// どちらかで担保する。両方の同時宣言は rig.Validate が排他で弾く
+	if referenceRig.ExpectedClocksource == "" ||
+		!(referenceRig.RequirePerformanceGovernor || referenceRig.ExpectFixedFrequency) ||
 		!referenceRig.RequireIsolation || referenceRig.MinNoFile == 0 ||
 		referenceRig.MinRmemMax == 0 || referenceRig.MinWmemMax == 0 {
-		return fmt.Errorf("reference rig must require clocksource, performance governor, isolation, nofile, and rmem/wmem max")
+		return fmt.Errorf("reference rig must require clocksource, frequency stability (performance governor or fixed frequency), isolation, nofile, and rmem/wmem max")
 	}
 	return nil
 }
