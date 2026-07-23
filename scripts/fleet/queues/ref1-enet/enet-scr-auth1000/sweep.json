@@ -1,0 +1,35 @@
+{
+  "measurement_mode": "screening",
+  "regime": "ref-wan",
+  "preset": "ref-auth-wan-s1000-v1",
+  "transports": {
+    "enet": {
+      "server_command": [
+        "build-v2-enet/enet_server",
+        "--port",
+        "42917"
+      ],
+      "client_command": [
+        "build-v2-enet/enet_client",
+        "--host",
+        "10.200.0.1",
+        "--port",
+        "42917",
+        "--conns",
+        "{conns}",
+        "--proc-index",
+        "{proc_index}",
+        "--origin-base",
+        "{origin_id_start}"
+      ],
+      "client_procs": 8,
+      "steady_min_warmup": "15s"
+    }
+  },
+  "conns": {
+    "min": 4,
+    "max": 2048
+  },
+  "seed": 1,
+  "output_dir": "__JOB__/out/cell"
+}

@@ -34,9 +34,10 @@ echo workload の追加は TODO 参照。
 ## reference campaign 手順(2026-07-23 protocol 凍結後の本測定)
 
 pilot 完了([2026-07-23-pilot-wan-v1](measurements/2026-07-23-pilot-wan-v1.md))
-により確定した手順。1 セッション = raw_udp anchor + 1 library(既定ルール)、
-fleet は ADR-0005 の c8g.16xlarge spot。破断は到達率・鮮度・期限のみで判定
-(kernel drop は開示のみ — ledger #29)。
+により確定した手順。対戦計画(wan 先行 2 段構え・boot まとめ・実行順)は
+[ADR-0006](adr/0006-reference-campaign-v1.md)、queue 生成は
+`scripts/fleet/ref-genqueue.sh`。fleet は ADR-0005 の c8g.16xlarge spot。
+破断は到達率・鮮度・期限のみで判定(kernel drop は開示のみ — ledger #29)。
 
 1. **screening**: 2 倍刻み sweep。conns 上限は auth 系 2048 / room 512
    (pilot で auth 系が 1024/512 到達のため)

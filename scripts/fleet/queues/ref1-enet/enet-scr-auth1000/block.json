@@ -1,0 +1,12 @@
+{
+  "rig": "__RIG__",
+  "seed": 1,
+  "output_dir": "__JOB__/out",
+  "tar": true,
+  "sweeps": [
+    {
+      "name": "enet-scr-auth1000",
+      "config": "__JOB__/sweep.json"
+    }
+  ]
+}

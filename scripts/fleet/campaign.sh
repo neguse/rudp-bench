@@ -172,6 +172,17 @@ PY
       -p AllowedCPUs='$bench_cpus' -p CPUWeight=10000 -p LimitNOFILE=1048576 \
       -p WorkingDirectory=/opt/rudp-bench \
       $orch $kind -config '$hostdir/$kind.json'"
+  if [ "$kind" = block ]; then
+    # reference mode の sweep は「15 分以内の doctor report」を要求する
+    # (doctor.ValidateReferenceReportFreshness)。boot 時の report は job
+    # 実行時点で必ず古いので、job 直前に同ホストで再生成し、sweep.json は
+    # __JOB__/out/doctor.json を参照する。out/ に置くのは回収 tar に環境
+    # スナップショットとして残すため。screening の block でも生成する。
+    # doctor 失敗はここでは止めない(reference config の load 側 gate が弾く)
+    remote_cmd="cd /opt/rudp-bench && sudo install -d -o ubuntu '$hostdir/out' && \
+      sudo ./build-v2/orchestrator doctor -rig '$RIG' -repo . \
+        -output '$hostdir/out/doctor.json'; $remote_cmd"
+  fi
   if [ "$kind" = run ]; then
     # run は非 PASS でも result を残して非ゼロ exit する。破断(3)と
     # inconclusive/censored(5)は ramp のデータなので受理し、tar も自前で作る
