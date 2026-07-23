@@ -50,6 +50,13 @@
   で担保する(ADR-0005)。
 - host fingerprint が異なる rig の値は同じ比較に集約しない(ADR-0002 のとおり)。
 
+## 会話・分業ルール(2026-07-23 owner 指示)
+
+- 会話は平易な日本語。専門用語は `docs/glossary.md` にある語だけ使い、
+  比喩(「網が鳴る」等)で仕組みを説明しない。新しい用語を doc に入れるときは
+  glossary にも追記する。
+- Codex への委任はしない。調査・実装とも自分で行う。
+
 ## v1/v2
 
 v1(`harness/`, `adapters/`, `cmd/rudp-benchctl`, `scripts/`)は凍結中 — 手を入れない。
