@@ -140,12 +140,16 @@ fi
 assert_no_symlink_components "$DOCTOR_REPORT" 'doctor report'
 if [[ ! -e "$DOCTOR_REPORT" ]]; then
   doctor_rc=0
-  setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups \
-    "$ORCHESTRATOR" doctor -rig "$RIG" -repo . -output "$DOCTOR_REPORT" || doctor_rc=$?
+  # doctor は root で実行する。IRQ の steerable 判定は affinity の書き戻しを
+  # 試す設計で、非 root だと判定不能 → FAIL 側に倒れ、managed IRQ(nvme 等)
+  # を持つホストでは irq_cpu_isolation が常に FAIL する(ref1 session 1)。
+  # 出力の所有だけ invoker へ戻す
+  "$ORCHESTRATOR" doctor -rig "$RIG" -repo . -output "$DOCTOR_REPORT" || doctor_rc=$?
   if [[ "$doctor_rc" -ne 0 && "$doctor_rc" -ne 2 ]]; then
     exit "$doctor_rc"
   fi
   assert_no_symlink_components "$DOCTOR_REPORT" 'doctor report'
+  chown "$SUDO_UID:$SUDO_GID" "$DOCTOR_REPORT"
 fi
 if [[ ! -f "$DOCTOR_REPORT" || -L "$DOCTOR_REPORT" ]]; then
   printf 'doctor report is not a regular file: %s\n' "$DOCTOR_REPORT" >&2
