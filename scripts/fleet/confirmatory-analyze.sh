@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # confirmatory の停止規則(ADR-0004 §3、2026-07-23 凍結値)を campaign summary に適用する。
 #   - cell = job 名から seed 接尾辞(-sN)を除いた単位
-#   - 有効(非 censored)block の直近連続 3 個で spread=(max-min)/median を取り、
-#     ≤5% なら FROZEN(値 = その 3 個の median)
+#   - 有効(非 censored・非 below_range)block の直近連続 3 個で
+#     spread=(max-min)/median を取り、≤5% なら FROZEN(値 = その 3 個の median)
 #   - 3 個未満または spread>5% で総 block 数 <5 なら MORE_BLOCKS(残り数を出す)
 #   - 5 block で未達なら INCONCLUSIVE
-#   - censored block は統計から除外して件数を開示
+#   - censored / below_range(窓の min 点で fail = 境界が窓の下)block は
+#     統計から除外して件数を開示
 # usage: confirmatory-analyze.sh <campaign-summary.json>...
 set -euo pipefail
 [ $# -ge 1 ] || { echo "usage: $0 <campaign-summary.json>..." >&2; exit 2; }
@@ -16,8 +17,9 @@ jq -s '
   | group_by(.cell)
   | map(
       . as $g
-      | ($g | map(.cells[] | select(.censored != true) | .capacity) | sort) as $valid
-      | ($g | map(.cells[] | select(.censored == true)) | length) as $censored_n
+      | ($g | map(.cells[] | select(.censored != true and (.below_range // false) != true) | .capacity) | sort) as $valid
+      | ($g | map(.cells[] | select(.censored == true or (.below_range // false) == true)) | length) as $censored_n
+      | ($g | map(.cells[] | select((.below_range // false) == true)) | length) as $below_range_n
       | ($valid | length) as $n
       | (if $n >= 3 then ($valid[-3:]) else $valid end) as $window
       | (if $n >= 3 then
@@ -28,6 +30,7 @@ jq -s '
       | {cell: $g[0].cell,
          blocks: $n,
          censored_blocks: $censored_n,
+         below_range_blocks: $below_range_n,
          values: $valid,
          spread_pct: (if $spread != null then ($spread * 1000 | round / 10) else null end),
          verdict:

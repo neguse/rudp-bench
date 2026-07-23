@@ -65,7 +65,7 @@ const baselineJSON = `"baseline":{
     "client_input":{"traffic_id":1,
       "loss_tolerant":{"rate_hz":50,"payload_bytes":64,"staleness_p99_ns":100000000,"min_delivery_ratio":0.9},
       "must_deliver":{"rate_hz":0,"payload_bytes":0}}},
-  "drift":{"max_delivery_delta":0.01,"max_staleness_p99_ratio":1.5}
+  "drift":{"max_delivery_delta":0.01,"max_staleness_p99_ratio":1.1}
 }`
 
 func writeSweepConfig(t *testing.T, body string) string {
@@ -96,7 +96,7 @@ func TestLoadConfigRejectsBadBaseline(t *testing.T) {
 	for name, mutated := range map[string]string{
 		"wrong-kind": strings.Replace(baselineJSON, "environment_baseline", "room_relay", 1),
 		"zero-delta": strings.Replace(baselineJSON, `"max_delivery_delta":0.01`, `"max_delivery_delta":0`, 1),
-		"low-ratio":  strings.Replace(baselineJSON, `"max_staleness_p99_ratio":1.5`, `"max_staleness_p99_ratio":0.5`, 1),
+		"low-ratio":  strings.Replace(baselineJSON, `"max_staleness_p99_ratio":1.1`, `"max_staleness_p99_ratio":0.5`, 1),
 		"no-conns":   strings.Replace(baselineJSON, `"total_conns":3`, `"total_conns":0`, 1),
 	} {
 		path := writeSweepConfig(t, `{

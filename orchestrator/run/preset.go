@@ -37,6 +37,64 @@ const (
 	refMDMinDeadlineHit   = 0.95
 )
 
+// ConfirmatoryProtocol は pilot から凍結した confirmatory の判定規則
+// (ADR-0004 §3 の手順で導出、2026-07-23 owner 承認)。変更は ADR-0004 を
+// supersede する新 ADR を要する。
+type ConfirmatoryProtocol struct {
+	// block 反復数。境界 flap が IQR を超える cell のみ FlapBlockN へ拡張
+	BlockN     int `json:"block_n"`
+	FlapBlockN int `json:"flap_block_n"`
+	// 停止規則: 直近連続 BlockN block の全幅/median <= StoppingSpreadMax で
+	// 確定。MaxBlocks で未達なら INCONCLUSIVE
+	MaxBlocks         int     `json:"max_blocks"`
+	StoppingSpreadMax float64 `json:"stopping_spread_max"`
+	// block 前後 baseline の drift 許容幅(量ごとの単位):
+	// delivery ratio は前後の絶対差、staleness p99 は前後比の上限
+	DriftMaxDeliveryDelta     float64 `json:"drift_max_delivery_delta"`
+	DriftMaxStalenessP99Ratio float64 `json:"drift_max_staleness_p99_ratio"`
+}
+
+func ConfirmatoryV1() ConfirmatoryProtocol {
+	return ConfirmatoryProtocol{
+		BlockN: 3, FlapBlockN: 5, MaxBlocks: 5, StoppingSpreadMax: 0.05,
+		DriftMaxDeliveryDelta: 0.010, DriftMaxStalenessP99Ratio: 1.10,
+	}
+}
+
+const presetHashVersion = 1
+
+// PresetHash は preset の正規化パラメータと confirmatory protocol 凍結値の
+// 指紋。結果に埋め込み「同じ凍結条件で測った」ことを機械的に保証する
+// (ADR-0004 Consequences)。
+func PresetHash(name string) (string, error) {
+	preset, ok := referencePresets()[name]
+	if !ok {
+		return "", fmt.Errorf("unknown reference preset %q (known: %s)",
+			name, strings.Join(ReferencePresetNames(), ", "))
+	}
+	return HashValue(struct {
+		Version  int                  `json:"version"`
+		Preset   ReferencePreset      `json:"preset"`
+		Protocol ConfirmatoryProtocol `json:"protocol"`
+	}{presetHashVersion, preset, ConfirmatoryV1()}), nil
+}
+
+// LookupReferencePreset は preset を指名する sweep config の展開に使う。
+func LookupReferencePreset(name string) (ReferencePreset, bool) {
+	preset, ok := referencePresets()[name]
+	return preset, ok
+}
+
+// NetemRegime は preset が固定する netem 条件。
+func (p ReferencePreset) NetemRegime() *NetemRegime {
+	return &NetemRegime{
+		LinkMTUBytes:    p.LinkMTUBytes,
+		DisableOffloads: p.DisableOffloads,
+		ServerEgress:    p.ServerEgress,
+		ClientEgress:    p.ClientEgress,
+	}
+}
+
 func refLT(rateHz float64, payloadBytes int) TrafficClassSpec {
 	return TrafficClassSpec{
 		RateHz: rateHz, PayloadBytes: payloadBytes,
@@ -138,12 +196,7 @@ func (cfg *RunConfig) applyPreset() error {
 	}
 	scenario := preset.Scenario
 	cfg.Scenario = &scenario
-	cfg.Netem = &NetemRegime{
-		LinkMTUBytes:    preset.LinkMTUBytes,
-		DisableOffloads: preset.DisableOffloads,
-		ServerEgress:    preset.ServerEgress,
-		ClientEgress:    preset.ClientEgress,
-	}
+	cfg.Netem = preset.NetemRegime()
 	cfg.Warmup = Duration{preset.Warmup}
 	cfg.SteadyWarmup = true
 	cfg.Duration = Duration{preset.Duration}

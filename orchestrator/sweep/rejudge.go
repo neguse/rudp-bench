@@ -197,6 +197,8 @@ func Rejudge(dir string, schedMeasurand map[string]bool) error {
 			Transport:          points[0].Transport,
 			Workload:           points[0].Workload,
 			Scenario:           points[0].Scenario,
+			Preset:             points[0].Preset,
+			PresetHash:         points[0].PresetHash,
 			CampaignIdentity:   points[0].CampaignIdentity,
 			ComparisonIdentity: points[0].ComparisonIdentity,
 			Regime:             points[0].Regime,

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/neguse/rudp-bench/orchestrator/doctor"
+	"github.com/neguse/rudp-bench/orchestrator/rig"
 	"github.com/neguse/rudp-bench/orchestrator/run"
 )
 
@@ -40,15 +41,20 @@ type ConnsRange struct {
 }
 
 type Config struct {
-	MeasurementMode string                   `json:"measurement_mode,omitempty"`
-	DoctorReport    string                   `json:"doctor_report,omitempty"`
-	Regime          string                   `json:"regime"` // 表示・結果行用のラベル(wired 等)
-	Transports      map[string]TransportSpec `json:"transports"`
-	Workloads       []string                 `json:"workloads"`
-	Scenarios       []run.ScenarioSpec       `json:"scenarios,omitempty"`
-	Conns           ConnsRange               `json:"conns"`
-	Seed            int64                    `json:"seed"`
-	Warmup          run.Duration             `json:"warmup"`
+	MeasurementMode string `json:"measurement_mode,omitempty"`
+	DoctorReport    string `json:"doctor_report,omitempty"`
+	// Preset は凍結 reference preset 名(run/preset.go)。指定時は scenario /
+	// netem / warmup / duration / drain / staleness を preset が固定し、
+	// config 側での上書きを拒否する。結果には preset_hash(凍結条件 +
+	// confirmatory protocol の指紋)が入る(ADR-0004)
+	Preset     string                   `json:"preset,omitempty"`
+	Regime     string                   `json:"regime"` // 表示・結果行用のラベル(wired 等)
+	Transports map[string]TransportSpec `json:"transports"`
+	Workloads  []string                 `json:"workloads"`
+	Scenarios  []run.ScenarioSpec       `json:"scenarios,omitempty"`
+	Conns      ConnsRange               `json:"conns"`
+	Seed       int64                    `json:"seed"`
+	Warmup     run.Duration             `json:"warmup"`
 	// SteadyWarmup: 定常判定つき warmup(benchspec v2)。Warmup は上限になる
 	SteadyWarmup      bool             `json:"steady_warmup,omitempty"`
 	Drain             run.Duration     `json:"drain"`
@@ -95,6 +101,11 @@ func LoadConfig(path string) (Config, error) {
 		if cfg.Baseline == nil {
 			return cfg, fmt.Errorf("reference mode requires a baseline block with drift tolerances")
 		}
+		if frozen := run.ConfirmatoryV1(); cfg.Baseline.Drift.MaxDeliveryDelta != frozen.DriftMaxDeliveryDelta ||
+			cfg.Baseline.Drift.MaxStalenessP99Ratio != frozen.DriftMaxStalenessP99Ratio {
+			return cfg, fmt.Errorf("reference mode drift tolerances are frozen (ADR-0004): max_delivery_delta=%.3f, max_staleness_p99_ratio=%.2f",
+				frozen.DriftMaxDeliveryDelta, frozen.DriftMaxStalenessP99Ratio)
+		}
 		if cfg.DoctorReport == "" {
 			return cfg, fmt.Errorf("reference mode requires doctor_report")
 		}
@@ -105,14 +116,19 @@ func LoadConfig(path string) (Config, error) {
 		if err := doctor.ValidateReferenceReport(report, time.Now().UTC()); err != nil {
 			return cfg, fmt.Errorf("reference preflight: %w", err)
 		}
-		if cfg.Conns.Min != 0 && cfg.Conns.Min != 1 {
-			return cfg, fmt.Errorf("reference capacity search must start at conns.min=1 to avoid left censoring")
-		}
+		// conns.min の下限は制約しない: confirmatory は境界 ±10% の窓
+		// (min>1)で探索する。min 点が fail した block は below_range で
+		// 開示され、capacity の主張にならない(search.go)
 	default:
 		return cfg, fmt.Errorf("measurement_mode must be conformance, screening, pilot, or reference")
 	}
 	if len(cfg.Transports) == 0 {
 		return cfg, fmt.Errorf("transports are required")
+	}
+	if cfg.Preset != "" {
+		if err := cfg.applyPreset(); err != nil {
+			return cfg, err
+		}
 	}
 	if cfg.Baseline != nil {
 		if err := cfg.Baseline.validate(); err != nil {
@@ -165,12 +181,67 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
+// applyPreset は凍結 reference preset が固定する値を config へ展開する。
+// run.RunConfig.applyPreset と同じ pin 規則(上書き拒否)を sweep config の
+// 粒度で適用する。server budget の検査は validatePresetBudget(New)で行う。
+func (cfg *Config) applyPreset() error {
+	preset, ok := run.LookupReferencePreset(cfg.Preset)
+	if !ok {
+		return fmt.Errorf("unknown reference preset %q (known: %s)",
+			cfg.Preset, strings.Join(run.ReferencePresetNames(), ", "))
+	}
+	for field, overridden := range map[string]bool{
+		"workloads":           len(cfg.Workloads) != 0,
+		"scenarios":           len(cfg.Scenarios) != 0,
+		"netem":               cfg.Netem != nil,
+		"warmup":              cfg.Warmup.Duration != 0,
+		"duration":            cfg.Duration.Duration != 0,
+		"drain":               cfg.Drain.Duration != 0,
+		"staleness_period_ns": cfg.StalenessPeriodNS != 0,
+		"steady_warmup":       cfg.SteadyWarmup,
+	} {
+		if overridden {
+			return fmt.Errorf("preset %q pins %s; remove it from the config", cfg.Preset, field)
+		}
+	}
+	scenario := preset.Scenario
+	cfg.Scenarios = []run.ScenarioSpec{scenario}
+	cfg.Netem = preset.NetemRegime()
+	cfg.Warmup = run.Duration{Duration: preset.Warmup}
+	cfg.SteadyWarmup = true
+	cfg.Duration = run.Duration{Duration: preset.Duration}
+	cfg.Drain = run.Duration{Duration: preset.Drain}
+	cfg.StalenessPeriodNS = preset.StalenessPeriodNS
+	return nil
+}
+
+// validatePresetBudget は preset の SUT resource budget(server vCPU 数)を
+// 検査する。server_cpus は block 実行では rig から LoadConfig 後に注入される
+// ため、検査は最終 config が揃う New で行う。
+func (cfg Config) validatePresetBudget() error {
+	if cfg.Preset == "" {
+		return nil
+	}
+	preset, ok := run.LookupReferencePreset(cfg.Preset)
+	if !ok {
+		return fmt.Errorf("unknown reference preset %q", cfg.Preset)
+	}
+	serverCPUs, err := rig.ParseCPUSet(cfg.ServerCPUs)
+	if err != nil || len(serverCPUs) != preset.ServerVCPUs {
+		return fmt.Errorf("preset %q requires server_cpus with exactly %d CPUs (resource budget), got %q",
+			cfg.Preset, preset.ServerVCPUs, cfg.ServerCPUs)
+	}
+	return nil
+}
+
 // PointRecord は results.jsonl の 1 行(= 1 run)。resume の実在判定に使う。
 type PointRecord struct {
 	Transport                string      `json:"transport"`
 	Workload                 string      `json:"workload,omitempty"`
 	Scenario                 string      `json:"scenario,omitempty"`
 	Regime                   string      `json:"regime"`
+	Preset                   string      `json:"preset,omitempty"`
+	PresetHash               string      `json:"preset_hash,omitempty"`
 	Conns                    int         `json:"conns"`
 	Verdict                  string      `json:"verdict"`
 	Outcome                  run.Outcome `json:"outcome"`
@@ -200,6 +271,8 @@ type CellRecord struct {
 	Transport          string   `json:"transport"`
 	Workload           string   `json:"workload,omitempty"`
 	Scenario           string   `json:"scenario,omitempty"`
+	Preset             string   `json:"preset,omitempty"`
+	PresetHash         string   `json:"preset_hash,omitempty"`
 	CampaignIdentity   string   `json:"campaign_identity,omitempty"`
 	ComparisonIdentity string   `json:"comparison_identity,omitempty"`
 	EvidenceIDs        []string `json:"evidence_ids,omitempty"`
@@ -246,12 +319,16 @@ type Sweep struct {
 	cache            map[string]PointRecord
 	log              *os.File
 	campaignIdentity string
+	presetHash       string
 	attempts         map[string]int
 	gateVerified     bool // retained for old result compatibility; fresh setups always gate
 	block            *BlockBaseline
 }
 
 func New(cfg Config) (*Sweep, error) {
+	if err := cfg.validatePresetBudget(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -275,7 +352,15 @@ func New(cfg Config) (*Sweep, error) {
 		}
 	}
 	campaignIdentity := sweepCampaignIdentity(cfg, binaries)
-	s := &Sweep{cfg: cfg, cache: map[string]PointRecord{}, attempts: map[string]int{}, campaignIdentity: campaignIdentity}
+	presetHash := ""
+	if cfg.Preset != "" {
+		hash, err := run.PresetHash(cfg.Preset)
+		if err != nil {
+			return nil, err
+		}
+		presetHash = hash
+	}
+	s := &Sweep{cfg: cfg, cache: map[string]PointRecord{}, attempts: map[string]int{}, campaignIdentity: campaignIdentity, presetHash: presetHash}
 	if err := s.loadResume(); err != nil {
 		return nil, err
 	}
@@ -455,10 +540,12 @@ func (s *Sweep) runPoint(ctx context.Context, cell cellDefinition, conns int) (P
 			}
 			return ""
 		}(),
-		Regime:  s.cfg.Regime,
-		Conns:   conns,
-		Verdict: result.Verdict,
-		Outcome: result.Outcome,
+		Regime:     s.cfg.Regime,
+		Preset:     s.cfg.Preset,
+		PresetHash: s.presetHash,
+		Conns:      conns,
+		Verdict:    result.Verdict,
+		Outcome:    result.Outcome,
 		Judgment: func() Judgment {
 			if cell.Scenario != nil {
 				return JudgeScenario(result, *cell.Scenario)
@@ -579,6 +666,7 @@ func (s *Sweep) Run(ctx context.Context) ([]CellRecord, error) {
 		}
 		rec := CellRecord{
 			Transport: cell.Transport, Workload: cell.Workload, Regime: s.cfg.Regime,
+			Preset: s.cfg.Preset, PresetHash: s.presetHash,
 			CampaignIdentity: s.campaignIdentity, ComparisonIdentity: comparisonIdentity(s.cfg, cell),
 			EvidenceIDs: dedupeSorted(evidenceIDs), CellCapacity: cap,
 		}

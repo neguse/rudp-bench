@@ -136,3 +136,55 @@ func TestReferencePresetUnknownName(t *testing.T) {
 		t.Fatal("unknown preset accepted")
 	}
 }
+
+func TestConfirmatoryV1FrozenValues(t *testing.T) {
+	p := ConfirmatoryV1()
+	if p.BlockN != 3 || p.FlapBlockN != 5 || p.MaxBlocks != 5 || p.StoppingSpreadMax != 0.05 {
+		t.Fatalf("stopping rule = %+v", p)
+	}
+	if p.DriftMaxDeliveryDelta != 0.010 || p.DriftMaxStalenessP99Ratio != 1.10 {
+		t.Fatalf("drift tolerances = %+v", p)
+	}
+}
+
+func TestPresetHashCoversAllPresets(t *testing.T) {
+	seen := map[string]string{}
+	for _, name := range ReferencePresetNames() {
+		hash, err := PresetHash(name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if hash == "" {
+			t.Fatalf("%s: empty hash", name)
+		}
+		if prev, ok := seen[hash]; ok {
+			t.Fatalf("hash collision: %s and %s", prev, name)
+		}
+		seen[hash] = name
+		again, err := PresetHash(name)
+		if err != nil || again != hash {
+			t.Fatalf("%s: hash not stable: %s vs %s (%v)", name, hash, again, err)
+		}
+	}
+}
+
+func TestPresetHashUnknownName(t *testing.T) {
+	if _, err := PresetHash("ref-nope-v1"); err == nil {
+		t.Fatal("unknown preset hashed")
+	}
+}
+
+func TestLookupReferencePreset(t *testing.T) {
+	preset, ok := LookupReferencePreset("ref-room-wan-v1")
+	if !ok || preset.Scenario.Kind != ScenarioRoomRelay || preset.ServerVCPUs != 2 {
+		t.Fatalf("lookup = %+v ok=%v", preset, ok)
+	}
+	netem := preset.NetemRegime()
+	if netem == nil || netem.LinkMTUBytes != 1500 || !netem.DisableOffloads ||
+		netem.ClientEgress.DelayMS != 25 || netem.ClientEgress.LossPercent != 1 {
+		t.Fatalf("netem = %+v", netem)
+	}
+	if _, ok := LookupReferencePreset("ref-nope-v1"); ok {
+		t.Fatal("unknown preset found")
+	}
+}
