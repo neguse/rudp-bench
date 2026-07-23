@@ -97,9 +97,11 @@ func EvaluateGate(input GateInput) GateResult {
 	if input.NetemEnabled && (input.UDPDropDelta.InErrors != 0 || input.UDPDropDelta.RcvbufErrors != 0) {
 		reasons = append(reasons, fmt.Sprintf("client netns UDP drop delta non-zero: InErrors=%d RcvbufErrors=%d", input.UDPDropDelta.InErrors, input.UDPDropDelta.RcvbufErrors))
 	}
-	if input.NetemEnabled && (input.ServerUDPDropDelta.InErrors != 0 || input.ServerUDPDropDelta.RcvbufErrors != 0) {
-		sutReasons = append(sutReasons, fmt.Sprintf("server netns UDP drop delta non-zero: InErrors=%d RcvbufErrors=%d", input.ServerUDPDropDelta.InErrors, input.ServerUDPDropDelta.RcvbufErrors))
-	}
+	// server 側の kernel drop は破断条件にしない(2026-07-23 owner 決定)。
+	// 到達率・鮮度・期限がゴール指標で、drop はその従属機構 — 品質に効くなら
+	// SLO に現れ、現れないなら測定上意味がない。カウンタ自体は result の
+	// netem 欄と summary に開示済み(client 側は測定器の取り落とし = 計測無効の
+	// 根拠なので従来どおり)
 	reasons = append(reasons, ValidateOffloadIntervalEvidence(input.Config, input.Offloads, input.OffloadsAfter, len(sutReasons) > 0)...)
 	reasons = append(reasons, ValidateNetemLossEvidence(input.Config, input.Control, input.LossEvidence)...)
 

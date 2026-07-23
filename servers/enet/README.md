@@ -8,17 +8,26 @@ benchspec/README.md 準拠の実装対。「ライブラリが想定する最速
 
 | class | channel | ENet 送信フラグ |
 |---|---|---|
-| loss-tolerant | 1 | `ENET_PACKET_FLAG_UNSEQUENCED`(unreliable, unsequenced) |
+| loss-tolerant | 1 | `ENET_PACKET_FLAG_UNSEQUENCED \| ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT` |
 | must-deliver | 0 | `ENET_PACKET_FLAG_RELIABLE` |
 
 reliable と unreliable を別 channel に分けているのは、同一 channel だと
 channel 内 sequence 維持のため reliable 未到着時に unreliable が
 HoL blocking されるため(`docs/log/dev-notes.md` §1.3 参照)。
 
-**制約**: unsequenced packet は 1 fragment 長
-(≈ MTU 1392 − ヘッダ ≈ 1350B)を超えると reliable fragment に格上げされる
-(`third_party/enet/peer.c:136-146`)。loss-tolerant の意味論が保てるのは
-その payload 長まで。
+**MTU 超の loss-tolerant(state-4000 等)**: `UNRELIABLE_FRAGMENT` フラグに
+より「落ちてよい分割」で送る(`third_party/enet/peer.c:136-140`)。フラグが
+無いと reliable fragment へ格上げされ意味論が変わるため必須。1 fragment 長
+(≈ MTU − ヘッダ ≈ 1350B)以内では無効果で、従来の unsequenced のまま。
+分割時の挙動:
+
+- 全 fragment が届いた場合のみ再構成される(再送なし)。per-link loss p、
+  分割数 k のとき実効到達率は (1−p)^k(4000B ≈ 3 fragment、loss 1% で ≈0.97)
+- 再構成後の受信 packet は `UNRELIABLE_FRAGMENT` フラグを持つ
+  (`third_party/enet/protocol.c:740`)。受信側 validation はこれを
+  loss-tolerant として受理する
+- fragment 列は unreliable **sequenced**(unsequenced ではない)。最新値
+  用途では古い列の破棄として作用する
 
 ## イベントループ設計
 

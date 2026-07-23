@@ -14,10 +14,11 @@
 #include <string.h>
 #include <unistd.h>
 
-// ENet promotes oversized UNSEQUENCED packets to reliable fragmentation.
-// Keep the advertised common-class limit below the negotiated MTU so LT never
-// changes transport semantics behind the benchmark's back.
-#define ENET_BENCH_MAX_PAYLOAD_BYTES 1000u
+// MTU 超の payload は class ごとに ENet の fragmentation へ振り分ける:
+// LT は ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT の「落ちてよい分割」
+// (peer.c:136-140。全 fragment 到達時のみ再構成 = 実効到達率 (1-p)^k)、
+// MD は reliable fragmentation(peer.c:143-145)。上限 4096 は state-4000 対応。
+#define ENET_BENCH_MAX_PAYLOAD_BYTES 4096u
 #define ENET_BENCH_MAX_CONNS 4095u
 #define ENET_CHANNEL_RELIABLE 0u
 #define ENET_CHANNEL_UNRELIABLE 1u
@@ -73,7 +74,7 @@ typedef struct {
 static void print_describe(void) {
   puts("{\"transport\":\"enet\","
        "\"class_mapping\":{"
-       "\"loss_tolerant\":{\"primitive\":\"unreliable-unsequenced\","
+       "\"loss_tolerant\":{\"primitive\":\"unreliable-unsequenced (over-MTU: unreliable-fragmented, peer.c:136)\","
        "\"delivery\":\"best_effort\",\"ordering\":\"unordered\","
        "\"realization\":\"native\"},"
        "\"must_deliver\":{\"primitive\":\"reliable\","
@@ -85,7 +86,7 @@ static void print_describe(void) {
        "\"encryption\":false,"
        "\"payload_pattern\":\"splitmix64-v1\","
        "\"wire_compression\":\"none\","
-       "\"max_payload_bytes\":1000,"
+       "\"max_payload_bytes\":4096,"
        "\"scenarios\":[\"environment_baseline\","
        "\"authoritative_state\",\"room_relay\"],"
        "\"tuning\":["
@@ -387,14 +388,17 @@ static enet_uint8 channel_from_flags(uint8_t flags) {
 
 static bool route_matches_header(const ENetEvent *event,
                                  const bk_header *header) {
-  const enet_uint32 class_mask =
-      ENET_PACKET_FLAG_RELIABLE | ENET_PACKET_FLAG_UNSEQUENCED;
-  const enet_uint32 expected =
+  const enet_uint32 class_mask = ENET_PACKET_FLAG_RELIABLE |
+                                 ENET_PACKET_FLAG_UNSEQUENCED |
+                                 ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT;
+  const enet_uint32 got = event->packet->flags & class_mask;
+  // MTU 超の LT は再構成後 UNRELIABLE_FRAGMENT flag で届く(protocol.c:740)
+  const bool class_ok =
       (header->flags & BK_FLAG_MUST_DELIVER) != 0
-          ? ENET_PACKET_FLAG_RELIABLE
-          : ENET_PACKET_FLAG_UNSEQUENCED;
-  return event->channelID == channel_from_flags(header->flags) &&
-         (event->packet->flags & class_mask) == expected;
+          ? got == ENET_PACKET_FLAG_RELIABLE
+          : (got == ENET_PACKET_FLAG_UNSEQUENCED ||
+             got == ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT);
+  return event->channelID == channel_from_flags(header->flags) && class_ok;
 }
 
 static void enet_class_route(uint8_t flags, enet_uint8 *channel,
@@ -403,7 +407,10 @@ static void enet_class_route(uint8_t flags, enet_uint8 *channel,
   if ((flags & BK_FLAG_MUST_DELIVER) != 0) {
     *packet_flags = ENET_PACKET_FLAG_RELIABLE;
   } else {
-    *packet_flags = ENET_PACKET_FLAG_UNSEQUENCED;
+    // UNRELIABLE_FRAGMENT: MTU 超は reliable 昇格でなく「落ちてよい分割」に
+    // 振る(peer.c:136-140)。MTU 内では無効果
+    *packet_flags =
+        ENET_PACKET_FLAG_UNSEQUENCED | ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT;
   }
 }
 

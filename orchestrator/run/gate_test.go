@@ -92,7 +92,7 @@ func TestEvaluateGateRejectsTimestampOrderViolations(t *testing.T) {
 	}
 }
 
-func TestEvaluateGateServerUDPDropIsSUTFailure(t *testing.T) {
+func TestEvaluateGateServerUDPDropIsDisclosureOnly(t *testing.T) {
 	gate := EvaluateGate(GateInput{
 		Control:            controlResultWithMargin(10),
 		Metrics:            gateMetrics(100, 100),
@@ -104,8 +104,8 @@ func TestEvaluateGateServerUDPDropIsSUTFailure(t *testing.T) {
 	if gate.Verdict != VerdictValid {
 		t.Fatalf("server receive drop must not invalidate the measurement: %+v", gate)
 	}
-	if !reasonsContain(gate.SUTFailureReasons, "server netns UDP drop delta") {
-		t.Fatalf("server receive drop must be attributed to the SUT: %+v", gate)
+	if len(gate.SUTFailureReasons) != 0 {
+		t.Fatalf("server receive drop must not break the run by itself (goal metrics decide): %+v", gate)
 	}
 }
 
