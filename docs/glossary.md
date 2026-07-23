@@ -47,6 +47,7 @@
 | confirmatory | screening で見つけた境界の ±10% を block 反復つきで確認する本測定 |
 | pilot | 本測定のパラメータ(block 反復数、停止規則、drift 許容幅)を決めるための予備測定。pilot の値は比較表に混ぜない([ADR-0004 §3](adr/0004-reference-preset.md)) |
 | pre-registration | 測る前に条件・打ち切り時刻・判定基準を文書に固定すること。後出しの変更はしない |
+| ADR / supersede | ADR = 意思決定の記録文書(`docs/adr/`)。決定を変えるときは旧 ADR を書き換えず、新 ADR で「置き換えて廃止」と宣言する = supersede。履歴が残り、いつ何が変わったか追える |
 | preset | 測定条件の凍結された一式(送信レート、payload サイズ、warmup 時間、合格ラインなど)。**preset hash** はその一式から計算した指紋で、結果に埋め込んで「同じ条件で測った」ことを機械的に保証する([ADR-0004](adr/0004-reference-preset.md)) |
 | flap | 同じ条件で測っても境界が ±1 点ずれる揺れ。測定の解像度の内なので異常ではない |
 | range censored | 用意した探索範囲の上限まで壊れなかったため「実力は ≥上限」としか言えない状態(CENSORED の一種) |
