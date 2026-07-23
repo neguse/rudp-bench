@@ -47,6 +47,8 @@
 | preset | 測定条件の凍結された一式(送信レート、payload サイズ、warmup 時間、合格ラインなど)。**preset hash** はその一式から計算した指紋で、結果に埋め込んで「同じ条件で測った」ことを機械的に保証する([ADR-0004](adr/0004-reference-preset.md)) |
 | flap | 同じ条件で測っても境界が ±1 点ずれる揺れ。測定の解像度の内なので異常ではない |
 | range censored | 用意した探索範囲の上限まで壊れなかったため「実力は ≥上限」としか言えない状態(CENSORED の一種) |
+| below_range | 探索窓の最小点ですでに壊れていたため「境界は窓より下」としか言えない状態。confirmatory の統計からは除外して件数を開示する |
+| envbase | environment-baseline scenario の略記。raw_udp で環境と計測器の上限を測る cell、または block 前後の baseline run を指す |
 
 ## 判定(outcome states — [ADR-0002](adr/0002-benchmark-methodology.md) の 6 状態)
 
