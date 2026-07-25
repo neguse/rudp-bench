@@ -7,6 +7,16 @@
 見出しには doc・会話で実際に使う表記(略記・和文・派生形)を全て併記する。
 使われている表記で引けない語があれば、それは glossary のバグとして直す。
 
+## 前提知識(外部リファレンス)
+
+以下のリファレンスで引ける語は、doc・会話で定義なしに使ってよい。
+ただし文書中の表記のまま引けること(略記で書くならリファレンスの見出しに
+ある略記に限る。例: 「AZ」は引けるが「SG」は引けないので
+「security group(SG)」と初出で開く)。
+
+- AWS 用語(S3、AZ、IAM、SQS など。収載確認済みはこの 4 語):
+  [AWS Glossary](https://docs.aws.amazon.com/glossary/latest/reference/glos-chap.html)
+
 ## 登場人物
 
 | 用語 | 意味 |
@@ -84,6 +94,7 @@
 | MDE | これ未満の差は「同等」とみなす最小の意味ある差 = 10%([ADR-0004](adr/0004-reference-preset.md)) |
 | IQR(四分位幅) | 反復値の散らばりの表し方。中央値(median)とセットで「代表値 ± ばらつき」として報告する |
 | bundle | CI がビルドした実行物一式(全 server/client + orchestrator)。commit に紐づき、fleet が起動時に取得する([ADR-0005](adr/0005-reference-fleet.md)) |
+| heartbeat | ホストの生存信号。host agent が定期的に発信し、coordinator が途絶を死亡判定の材料にする。間隔・閾値・経路は出典 [ADR-0007](adr/0007-spot-execution-model.md) が正。**出典 ADR は Draft — accept 前の仮登録** |
 | queue / job | campaign でホストに配る仕事の列と、その 1 件(= 1 block 等)。中断した job は requeue(列に戻す)する |
 | spot | AWS の余剰計算資源を安く借りる購入形態。予告 2 分で中断されうるが、中断は job の requeue で吸収する([ADR-0005](adr/0005-reference-fleet.md)) |
 | host-hour(ホスト時間) | ホスト 1 台 × 1 時間の使用量。コスト見積もりの単位(4 台で 30 分なら 2 host-hour) |
