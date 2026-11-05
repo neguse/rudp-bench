@@ -44,6 +44,9 @@
 | scenario | 通信形状 3 種: environment-baseline(環境の校正。raw_udp 担当)/ authoritative-state(1 server 対 N client の状態配信)/ room-relay(room 内 N 人の相互配信)([ADR-0001](adr/0001-battle-purpose.md)) |
 | regime | 回線条件。`lan` = 遅延 1 ms・ロス 0% / `wan` = 遅延 25 ms・ロス 1%([ADR-0004](adr/0004-reference-preset.md)) |
 | cell | treatment × scenario × regime の 1 マス。測定表の 1 セル |
+| 劣悪ベンチ | 少ない接続数で回線の悪さ(ロス・遅延・ゆらぎ・帯域)を振り、「使える」の各条件の合否を見るベンチ([ADR-0008](adr/0008-purpose-reset.md)。出典は Draft) |
+| 大規模ベンチ | 接続数を増やして CPU や上限を見るベンチ。ADR-0008 では劣悪ベンチに残った候補を想定人数 1 点で確かめる従の役割(出典は Draft) |
+| bufferbloat | 回線の容量を超えて送り続けた結果、経路上の待ち行列にパケットが溜まり遅延が膨らむこと |
 
 ## 実験の単位と手順
 
