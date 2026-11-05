@@ -273,6 +273,14 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 		}
 	}
 
+	var scheduleCh chan []AppliedNetemStep
+	if len(cfg.NetemSchedule) > 0 {
+		scheduleCh = make(chan []AppliedNetemStep, 1)
+		go func() {
+			scheduleCh <- runNetemSchedule(runCtx, ctrl.MeasurementWindow(), netemPair, cfg.NetemSchedule)
+		}()
+	}
+
 	var handles []processHandle
 	waitCh := make(chan waitEvent, cfg.ClientProcs+1)
 	startedOK := true
@@ -366,6 +374,9 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 		}
 		if lossEvidenceCh != nil {
 			result.Netem.LossEvidence = <-lossEvidenceCh
+		}
+		if scheduleCh != nil {
+			result.Netem.Schedule = <-scheduleCh
 		}
 		return finishRunResult(result, GateInput{
 			Control:            result.Control,
@@ -490,6 +501,17 @@ func Run(ctx context.Context, cfg RunConfig) (_ *Result, returnErr error) {
 
 	if lossEvidenceCh != nil {
 		result.Netem.LossEvidence = <-lossEvidenceCh
+	}
+	if scheduleCh != nil {
+		result.Netem.Schedule = <-scheduleCh
+		if len(result.Netem.Schedule) != len(cfg.NetemSchedule) {
+			extraReasons = append(extraReasons, fmt.Sprintf("netem schedule applied %d of %d steps", len(result.Netem.Schedule), len(cfg.NetemSchedule)))
+		}
+		for _, step := range result.Netem.Schedule {
+			if step.Error != "" {
+				extraReasons = append(extraReasons, "netem schedule step failed: "+step.Error)
+			}
+		}
 	}
 	if cfg.Netem != nil && result.Netem != nil {
 		pair := cfg.Netem.pairSpec()

@@ -142,6 +142,8 @@ type RunConfig struct {
 	StalenessPeriodNS uint64       `json:"staleness_period_ns"`
 	Netem             *NetemRegime `json:"netem,omitempty"`
 	NetemGateOff      bool         `json:"netem_gate_off,omitempty"`
+	// NetemSchedule は run の途中で netem を差し替える(回線断・劣化からの回復を見る劣悪ベンチ用)。
+	NetemSchedule []NetemStep `json:"netem_schedule,omitempty"`
 	// 役割別 CPU 割当(taskset -c 形式)。v1 の役割隔離レイアウトを流用:
 	// OS/background 0-2,8-10 / client 3-6,11-14 / server 7,15。
 	// OS 側 slice の退避は `orchestrator isolate setup` で行う
@@ -448,6 +450,7 @@ func (cfg RunConfig) validate() error {
 			}
 		}
 	}
+	errs = append(errs, cfg.validateNetemSchedule()...)
 	if cfg.ControlTimeout.Duration < 0 || cfg.SamplerInterval.Duration < 0 || cfg.ProcessExitTimeout.Duration < 0 {
 		errs = append(errs, fmt.Errorf("timeouts and sampler_interval must be >= 0"))
 	}
