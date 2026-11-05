@@ -68,6 +68,10 @@ orchestrator 自身の SLO 判定(`outcome`)は参考とし、上の基準で置
 smoke 用の現 PC(smolcenter)で実行する。ゲームサーバと CPU を分け合わないよう、rig 設定(`orchestrator/rigs/home.json`)の bench_cpus に限定した bench.slice の中で動かす。
 doctor の合否は問わない。本 ADR の問いは結果が大きく割れるものに限っており、数 % の環境差では答えが変わらないためである。
 
+run 前の netem gate(ping と iperf3)は切る。iperf3 は UDP 試験の開始時に UDP の合図を 1 往復だけ交わして再送しないため、ロス 20% では 12 回中 3 回失敗した。
+ロスは計測窓の中の qdisc の送信・破棄カウンタ(loss evidence)で、遅延は `base` 条件の遅延で確かめる。
+ARP も netem を通るため、veth の MAC を固定して近隣エントリを恒久登録する(ARP が落ちると ping や SUT のパケットが秒単位で止まる。ロス 10% で ping の平均が 376 ms になった)。
+
 ## Non-goals
 
 - 接続数を振った限界の測定(ADR-0008 の大規模ベンチ)

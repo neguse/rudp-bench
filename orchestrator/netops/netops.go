@@ -229,6 +229,17 @@ func DefaultPair(prefix string) PairSpec {
 	}
 }
 
+// veth の MAC を固定し、近隣エントリを恒久登録する。ARP も egress の netem を通るため、
+// ロス下では ARP の解決・再確認が落ちて ping や SUT のパケットが秒単位で止まるのを防ぐ。
+const (
+	serverVethMAC = "02:00:0a:c8:00:01"
+	clientVethMAC = "02:00:0a:c8:00:02"
+)
+
+func hostAddr(cidr string) string {
+	return strings.SplitN(cidr, "/", 2)[0]
+}
+
 func BuildSetupCommands(spec PairSpec) ([]Command, error) {
 	if err := validatePair(spec); err != nil {
 		return nil, err
@@ -236,13 +247,15 @@ func BuildSetupCommands(spec PairSpec) ([]Command, error) {
 	cmds := []Command{
 		{"ip", []string{"netns", "add", spec.ServerNS}},
 		{"ip", []string{"netns", "add", spec.ClientNS}},
-		{"ip", []string{"link", "add", spec.ServerVeth, "type", "veth", "peer", "name", spec.ClientVeth}},
+		{"ip", []string{"link", "add", spec.ServerVeth, "address", serverVethMAC, "type", "veth", "peer", "name", spec.ClientVeth, "address", clientVethMAC}},
 		{"ip", []string{"link", "set", spec.ServerVeth, "netns", spec.ServerNS}},
 		{"ip", []string{"link", "set", spec.ClientVeth, "netns", spec.ClientNS}},
 		{"ip", []string{"-n", spec.ServerNS, "link", "set", "dev", spec.ServerVeth, "mtu", strconv.Itoa(spec.LinkMTUBytes)}},
 		{"ip", []string{"-n", spec.ClientNS, "link", "set", "dev", spec.ClientVeth, "mtu", strconv.Itoa(spec.LinkMTUBytes)}},
 		{"ip", []string{"-n", spec.ServerNS, "addr", "add", spec.ServerAddrCIDR, "dev", spec.ServerVeth}},
 		{"ip", []string{"-n", spec.ClientNS, "addr", "add", spec.ClientAddrCIDR, "dev", spec.ClientVeth}},
+		{"ip", []string{"-n", spec.ServerNS, "neigh", "replace", hostAddr(spec.ClientAddrCIDR), "lladdr", clientVethMAC, "dev", spec.ServerVeth, "nud", "permanent"}},
+		{"ip", []string{"-n", spec.ClientNS, "neigh", "replace", hostAddr(spec.ServerAddrCIDR), "lladdr", serverVethMAC, "dev", spec.ClientVeth, "nud", "permanent"}},
 		{"ip", []string{"-n", spec.ServerNS, "link", "set", "lo", "up"}},
 		{"ip", []string{"-n", spec.ClientNS, "link", "set", "lo", "up"}},
 		{"ip", []string{"-n", spec.ServerNS, "link", "set", spec.ServerVeth, "up"}},

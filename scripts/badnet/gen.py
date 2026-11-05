@@ -102,6 +102,9 @@ def config(transport, cond, outdir):
         "duration": f"{WINDOW if schedule else STEADY}s",
         "drain": "10s" if schedule else "5s",
         "staleness_period_ns": 10_000_000,
+        # 事前ゲートの iperf3 は高ロスで開始時の UDP の合図が落ちて失敗する(ADR-0009 §5)。
+        # ロスは計測窓内の qdisc カウンタ(loss evidence)で検証する。
+        "netem_gate_off": True,
         "server_cpus": "7,15",
         "client_cpus": "3,4,5,6,11,12,13,14",
         "output_dir": os.path.join(outdir, cond, transport),
