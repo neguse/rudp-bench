@@ -33,8 +33,9 @@ jobs:
       - name: Test Go packages
         run: go test ./internal/...
 
+      # third_party/kcp は cmake_minimum_required(VERSION 2.6) を宣言しており、CMake 4 は 3.5 未満の互換を受け付けない。
       - name: Configure
-        run: cmake -S . -B build -G Ninja
+        run: cmake -S . -B build -G Ninja -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build
         run: cmake --build build
