@@ -233,23 +233,7 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 
 	// loss: iperf3 UDP。ベンチ相当のレートで十分なパケット数を流す
 	// (2000 pkt 級: 1% なら期待 20 損失、σ≈4.4)。server は netns 内で -1(1接続で終了)
-	srv := exec.CommandContext(ctx, "ip", "netns", "exec", spec.ServerNS,
-		"iperf3", "-s", "-1", "-B", serverAddr, "--json")
-	var srvOut bytes.Buffer
-	srv.Stdout = &srvOut
-	srv.Stderr = &srvOut
-	if err := srv.Start(); err != nil {
-		return report, fmt.Errorf("iperf3 server: %w", err)
-	}
-	srvReaped := false
-	time.Sleep(500 * time.Millisecond) // listener 起動待ち(client にリトライがない)
-	defer func() {
-		if !srvReaped {
-			_ = srv.Process.Kill()
-			_ = srv.Wait()
-		}
-	}()
-
+	// なので、試行ごとに server を起動し直す(使い終わった server への再試行は必ず refused になる)
 	runClient := func(reverse bool) (IperfLossSample, error) {
 		args := []string{"netns", "exec", spec.ClientNS,
 			"iperf3", "-c", serverAddr, "-u", "-b", "1M", "-l", "128",
@@ -257,22 +241,20 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 		if reverse {
 			args = append(args, "-R")
 		}
-		// iperf3 は接続タイミングで一過性に失敗することがある(listener 準備
-		// レース等)。tooling の flake で測定点を汚さないよう1回だけリトライ
-		var lastErr error
-		for attempt := 0; attempt < 2; attempt++ {
+		// iperf3 は UDP 試験の開始時に UDP の合図を 1 往復だけ交わし、再送しない。
+		// この合図も設定した loss で落ちる(20% なら往復で約 36%)ので、数回試行する
+		var errs []string
+		for attempt := 0; attempt < 5; attempt++ {
 			if attempt > 0 {
 				time.Sleep(time.Second)
 			}
-			cmd := exec.CommandContext(ctx, "ip", args...)
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				lastErr = fmt.Errorf("iperf3 client(reverse=%v): %w (%s)", reverse, err, strings.TrimSpace(string(out)))
-				continue
+			sample, err := runIperfOnce(ctx, spec.ServerNS, serverAddr, args)
+			if err == nil {
+				return sample, nil
 			}
-			return ParseIperfLossSample(string(out))
+			errs = append(errs, fmt.Sprintf("attempt %d: %v", attempt+1, err))
 		}
-		return IperfLossSample{}, lastErr
+		return IperfLossSample{}, fmt.Errorf("iperf3 client(reverse=%v): %s", reverse, strings.Join(errs, "; "))
 	}
 
 	// c→s(client egress のみ通る)
@@ -280,11 +262,6 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 	if err != nil {
 		return report, err
 	}
-	if err := srv.Wait(); err != nil {
-		srvReaped = true
-		return report, fmt.Errorf("iperf3 server: %w (%s)", err, strings.TrimSpace(srvOut.String()))
-	}
-	srvReaped = true
 	report.LossC2SPct = loss.LossPercent
 	report.LossC2SPackets = loss.Packets
 	// 決定的 loss 注入(loss_seed)では iperf3 のサンプル窓が固定 trace の
@@ -299,32 +276,10 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 		}
 	}
 
-	// s→c は別セッション(iperf3 -s -1 は1接続で終わるため再起動)
-	srv2 := exec.CommandContext(ctx, "ip", "netns", "exec", spec.ServerNS,
-		"iperf3", "-s", "-1", "-B", serverAddr, "--json")
-	var srv2Out bytes.Buffer
-	srv2.Stdout = &srv2Out
-	srv2.Stderr = &srv2Out
-	if err := srv2.Start(); err != nil {
-		return report, fmt.Errorf("iperf3 server(2): %w", err)
-	}
-	srv2Reaped := false
-	time.Sleep(500 * time.Millisecond)
-	defer func() {
-		if !srv2Reaped {
-			_ = srv2.Process.Kill()
-			_ = srv2.Wait()
-		}
-	}()
 	loss, err = runClient(true)
 	if err != nil {
 		return report, err
 	}
-	if err := srv2.Wait(); err != nil {
-		srv2Reaped = true
-		return report, fmt.Errorf("iperf3 server(2): %w (%s)", err, strings.TrimSpace(srv2Out.String()))
-	}
-	srv2Reaped = true
 	report.LossS2CPct = loss.LossPercent
 	report.LossS2CPackets = loss.Packets
 	if spec.ServerEgress.LossSeed == 0 {
@@ -334,4 +289,26 @@ func RunNetemGate(ctx context.Context, spec PairSpec) (NetemGateReport, error) {
 	}
 
 	return report, nil
+}
+
+func runIperfOnce(ctx context.Context, serverNS, serverAddr string, clientArgs []string) (IperfLossSample, error) {
+	srv := exec.CommandContext(ctx, "ip", "netns", "exec", serverNS,
+		"iperf3", "-s", "-1", "-B", serverAddr, "--json")
+	var srvOut bytes.Buffer
+	srv.Stdout = &srvOut
+	srv.Stderr = &srvOut
+	if err := srv.Start(); err != nil {
+		return IperfLossSample{}, fmt.Errorf("iperf3 server: %w", err)
+	}
+	time.Sleep(500 * time.Millisecond) // listener 起動待ち(client にリトライがない)
+	out, err := exec.CommandContext(ctx, "ip", clientArgs...).CombinedOutput()
+	if err != nil {
+		_ = srv.Process.Kill()
+		_ = srv.Wait()
+		return IperfLossSample{}, fmt.Errorf("%w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	if err := srv.Wait(); err != nil {
+		return IperfLossSample{}, fmt.Errorf("iperf3 server: %w (%s)", err, strings.TrimSpace(srvOut.String()))
+	}
+	return ParseIperfLossSample(string(out))
 }

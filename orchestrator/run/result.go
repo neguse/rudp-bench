@@ -173,6 +173,7 @@ type NetemResult struct {
 	Offloads      *netops.OffloadEvidence `json:"offloads,omitempty"`
 	OffloadsAfter *netops.OffloadEvidence `json:"offloads_after,omitempty"`
 	LossEvidence  *NetemLossEvidence      `json:"loss_evidence,omitempty"`
+	Schedule      []AppliedNetemStep      `json:"schedule,omitempty"`
 }
 
 // NetemLossEvidence records qdisc counters sampled strictly inside the
