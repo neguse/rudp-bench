@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""劣悪ベンチ(ADR-0009)の run config を生成する。条件と判定の正は ADR-0009。"""
+"""劣悪ベンチの run config を生成する。条件と判定の正は README の「劣悪ベンチ」。"""
 import argparse
 import json
 import os
@@ -102,7 +102,7 @@ def config(transport, cond, outdir):
         "duration": f"{WINDOW if schedule else STEADY}s",
         "drain": "10s" if schedule else "5s",
         "staleness_period_ns": 10_000_000,
-        # 事前ゲートの iperf3 は高ロスで開始時の UDP の合図が落ちて失敗する(ADR-0009 §5)。
+        # 事前ゲートの iperf3 は高ロスで開始時の UDP の合図が落ちて失敗する。
         # ロスは計測窓内の qdisc カウンタ(loss evidence)で検証する。
         "netem_gate_off": True,
         "server_cpus": "7,15",
