@@ -10,7 +10,6 @@ CONNS = 8
 TRANSPORTS = {
     "raw_udp": ("build-v2-raw_udp/raw_udp_sut", 42911, {}),
     "enet": ("build-v2-enet/enet_sut", 42917, {}),
-    "enet-legacy": ("build-v2-enet/enet_legacy_sut", 42918, {}),
     "kcp": ("build-v2-kcp/kcp_sut", 42923, {}),
     "gns": ("build-v2-gns/gns_sut", 42921, {}),
     "msquic": ("build-v2-msquic/msquic_sut", 42919, {}),

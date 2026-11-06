@@ -85,7 +85,6 @@
 - ライブラリごとに書くのは、接続、送信(LT と MD の振り分け)、受信、切断の検知、送信待ちの量の取得だけにする(`servers/<lib>/` の 1 ファイル)。
 - 各ライブラリは、まずライブラリの既定の設定で測る。既定から変えるときは、ゲームで実際にそう使う理由を書く。性能を上げるためだけの変更はしない。
 - LT と MD をどのチャネル・送信方法に載せるかは、ライブラリの文書かソースが勧める使い方に従い、各ファイルの先頭に出典を書く。
-- `enet-legacy` は [2026-11-05 の結果](docs/measurements/2026-11-05-badnet-local.md)と同じ設定の ENet で、作り直した共通部分が以前と同じ合否を出すかを確かめるために置いている。
 
 対象は 7 つ(ENet、KCP、GNS、msquic、LiteNetLib、websocket、MagicOnion)。追加の候補(yojimbo、SLikeNet、quiche、lsquic、自作の coop_rudp)は未定。
 
