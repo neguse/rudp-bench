@@ -20,7 +20,10 @@ add_subdirectory(../../third_party/msquic msquic-build EXCLUDE_FROM_ALL)
 find_package(Threads REQUIRED)
 find_library(NUMA_LIB numa REQUIRED)
 
+# libmsquic.a が libnuma を使うので、msquic の後ろに並ぶよう msquic 側に付ける
+target_link_libraries(msquic INTERFACE ${NUMA_LIB} Threads::Threads)
+
 add_executable(msquic_sut msquic.cc)
-target_link_libraries(msquic_sut PRIVATE benchkit msquic ${NUMA_LIB} Threads::Threads)
+target_link_libraries(msquic_sut PRIVATE benchkit msquic)
 target_include_directories(msquic_sut SYSTEM PRIVATE ../../third_party/msquic/src/inc)
 target_compile_options(msquic_sut PRIVATE -Wall -Wextra -Wpedantic -Werror)
