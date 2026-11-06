@@ -15,10 +15,8 @@ import (
 // bench プロセス側の割当は RunConfig の server_cpus / client_cpus(taskset)で
 // 行い、ここでは OS 側 slice の退避・IRQ affinity・governor を設定する。
 //
-// 注意: setup 後は user.slice も OS コアに退避されるため、sweep/boundary/block は
-// bench slice の scope で起動しないと taskset が EINVAL になる:
-//   sudo systemd-run --scope --slice=bench.slice -p AllowedCPUs=<bench_cpus> \
-//     -p CPUWeight=10000 --quiet ./build-v2/orchestrator block -config ...
+// 注意: setup 後は user.slice も OS コアに退避されるため、run は bench slice の中で
+// 起動しないと taskset が EINVAL になる(scripts/badnet/run.sh がこれを行う)。
 func isolateMain(args []string) {
 	fs := flag.NewFlagSet("isolate", flag.ExitOnError)
 	rigPath := fs.String("rig", "orchestrator/rigs/home.json", "rig description JSON")

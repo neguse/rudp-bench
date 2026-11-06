@@ -13,7 +13,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # v2 が必要とする submodule のみ(全 recursive は v1 の資産で重い)
       - name: Init required submodules
         run: git submodule update --init third_party/enet third_party/kcp
 
@@ -83,21 +82,6 @@ jobs:
       # 校正: duration 不変性(loopback、netem なし)
       - name: calibration duration invariance
         run: ./calibration/duration_invariance.sh
-
-      # 軽量 loopback ramp ベンチ(単一 run 内で接続を増やし、最初の
-      # SLO 破断接続数を診断 score 化。SUT の FAIL/INVALID では落とさない —
-      # CI の合否は上の smoke が担う)。結果は artifact のみ
-      - name: light ramp bench (diagnostic)
-        run: ./scripts/run-ci-bench.sh
-
-      - name: upload bench results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-bench
-          path: results-v2/ci-bench/
-          retention-days: 30
-          if-no-files-found: ignore
 
   native-solution-tests:
     runs-on: ubuntu-latest
