@@ -80,15 +80,13 @@
 
 ## SUT の作り
 
-`servers/<lib>` を次の形に作り直す。
-
-- 負荷の生成、計測、orchestrator とのやり取りは、言語ごとに共通の 1 つだけ持つ(C と C++ は `benchkit`、C# は 1 つの共有ライブラリ)。
-- ライブラリごとに書くのは、接続、送信(LT と MD の振り分け)、受信、切断の検知、送信待ちの量の取得だけにする。
+- 負荷の生成、計測、orchestrator とのやり取りは、言語ごとに共通の 1 つだけ持つ(C と C++ は [`benchkit/src/sut.c`](benchkit/src/sut.c)、C# は [`servers/dotnet/BenchKit.CS`](servers/dotnet/BenchKit.CS))。
+- ライブラリごとに書くのは、接続、送信(LT と MD の振り分け)、受信、切断の検知、送信待ちの量の取得だけにする(`servers/<lib>/` の 1 ファイル)。
 - 各ライブラリは、まずライブラリの既定の設定で測る。既定から変えるときは、ゲームで実際にそう使う理由を書く。性能を上げるためだけの変更はしない。
-- LT と MD をどのチャネル・送信方法に載せるかは、ライブラリの文書かソースが勧める使い方に従い、出典を書く。
-- 最初に共通部分、raw_udp、ENet を作る。ENet は今の実装と同じ設定でも作り、劣悪ベンチの合否が [2026-11-05 の結果](docs/measurements/2026-11-05-badnet-local.md)と一致することを確かめてから、他のライブラリに進む。
+- LT と MD をどのチャネル・送信方法に載せるかは、ライブラリの文書かソースが勧める使い方に従い、各ファイルの先頭に出典を書く。
+- `enet-legacy` は [2026-11-05 の結果](docs/measurements/2026-11-05-badnet-local.md)と同じ設定の ENet で、作り直した共通部分が以前と同じ合否を出すかを確かめるために置いている。
 
-対象は今ある 7 つ(ENet、KCP、GNS、msquic、LiteNetLib、websocket、MagicOnion)。追加の候補(yojimbo、SLikeNet、quiche、lsquic、自作の coop_rudp)は未定。
+対象は 7 つ(ENet、KCP、GNS、msquic、LiteNetLib、websocket、MagicOnion)。追加の候補(yojimbo、SLikeNet、quiche、lsquic、自作の coop_rudp)は未定。
 
 ## 回し方
 
@@ -97,14 +95,11 @@ Linux、Go、CMake、C/C++ の toolchain、.NET 10、`iproute2`、`jq` が要る
 ```sh
 go build -o build-v2/orchestrator ./orchestrator/cmd/orchestrator
 
-for t in enet kcp gns msquic; do
+for t in raw_udp enet kcp gns msquic; do
   cmake -S servers/$t -B build-v2-$t -DCMAKE_BUILD_TYPE=Release && cmake --build build-v2-$t -j
 done
-for s in litenetlib/LiteNetLibBench websocket/WebSocketBench magiconion/MagicOnionBench; do
-  for role in Server Client; do
-    dotnet publish -c Release -r linux-x64 --self-contained true \
-      -o build-v2-dotnet/${s#*/}.$role servers/$s.$role/${s#*/}.$role.csproj
-  done
+for p in litenetlib/LiteNetLibBench websocket/WebSocketBench magiconion/MagicOnionBench; do
+  dotnet publish -c Release -o build-v2-dotnet/${p#*/} servers/$p.csproj
 done
 
 scripts/badnet/gen.py --out <出力先>                                      # 条件ごとの run config を作る
@@ -112,10 +107,15 @@ sudo scripts/badnet/run.sh build-v2/orchestrator <出力先>/configs/*.json
 scripts/badnet/analyze.py <出力先>                                        # 判定表を出す
 ```
 
+回線を絞らずに一通り動くかだけを見るときは、`gen.py --loopback` で作った config を `build-v2/orchestrator run -config` で回す(root 不要)。
+
 テスト:
 
 ```sh
 go vet ./orchestrator/... && go test -count=1 ./orchestrator/...
+cmake -S benchkit -B build-v2-benchkit && cmake --build build-v2-benchkit && ctest --test-dir build-v2-benchkit
+dotnet run -c Release --project servers/dotnet/BenchKit.CS.Tests/BenchKit.CS.Tests.csproj
+calibration/duration_invariance.sh
 ```
 
 ## 用語

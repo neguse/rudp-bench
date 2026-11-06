@@ -3,7 +3,7 @@
 #
 # 同一条件で duration だけ変えて2回走らせ、delivery が一致することを検査する。
 # 「delivery が duration 非依存の一定割合で欠ける」= 計測窓ズレ系バグの検出器
-# (v1 dev-notes §1.7 の教訓)。loopback・netem なし・sudo 不要。
+# loopback・netem なし・sudo 不要。raw_udp を使う。
 #
 # 環境変数: DUR_SHORT / DUR_LONG(既定 4s / 12s。手元での本式は 10s / 30s)
 #             CALIBRATION_DIR(指定時はshort/longのrun bundleとsummary.jsonを保存)
@@ -26,42 +26,22 @@ else
   trap 'rm -rf "$WORK"' EXIT
 fi
 
-# ビルド(toolchain がある環境のみ。fleet ホストは toolchain を持たず、
-# bundle の prebuilt を ORCHESTRATOR 環境変数経由で使う)
-ORCH="${ORCHESTRATOR:-$ROOT/build-v2-go/orchestrator}"
-if command -v cmake >/dev/null; then
-  cmake -S "$ROOT/servers/enet" -B "$ROOT/build-v2-enet" >/dev/null
-  cmake --build "$ROOT/build-v2-enet" -j >/dev/null
-fi
-if command -v go >/dev/null && [[ "$ORCH" == "$ROOT/build-v2-go/orchestrator" ]]; then
-  go build -o "$ORCH" "$ROOT/orchestrator/cmd/orchestrator" >/dev/null
-fi
-[[ -x "$ROOT/build-v2-enet/enet_server" ]] || { echo "enet_server が無い(build するか bundle を使う)" >&2; exit 1; }
-[[ -x "$ORCH" ]] || { echo "orchestrator が無い: $ORCH" >&2; exit 1; }
+ORCH="${ORCHESTRATOR:-$ROOT/build-v2/orchestrator}"
+SUT="$ROOT/build-v2-raw_udp/raw_udp_sut"
+cmake -S "$ROOT/servers/raw_udp" -B "$ROOT/build-v2-raw_udp" >/dev/null
+cmake --build "$ROOT/build-v2-raw_udp" -j >/dev/null
+go build -o "$ORCH" "$ROOT/orchestrator/cmd/orchestrator"
+
+"$ROOT/scripts/badnet/gen.py" --loopback --transports raw_udp --out "$WORK/gen" >/dev/null
 
 run_once() {
   local duration="$1" out="$2" port="$3"
   mkdir -p "$out"
-  cat > "$out/config.json" <<EOF
-{
-  "transport": "enet",
-  "server_command": ["$ROOT/build-v2-enet/enet_server", "--port", "$port"],
-  "client_command": ["$ROOT/build-v2-enet/enet_client",
-    "--host", "127.0.0.1", "--port", "$port",
-    "--conns", "{conns}", "--proc-index", "{proc_index}",
-    "--origin-base", "{origin_id_start}",
-    "--rate-lt", "50", "--rate-md", "50", "--payload", "64",
-    "--deadline-ns", "150000000", "--staleness-period-ns", "10000000"],
-  "client_procs": 2,
-  "total_conns": 4,
-  "warmup": "1s",
-  "duration": "$duration",
-  "drain": "1s",
-  "deadline_ns": 150000000,
-  "staleness_period_ns": 10000000,
-  "output_dir": "$out"
-}
-EOF
+  jq --arg d "$duration" --arg o "$out" --arg p "$port" --arg sut "$SUT" '
+    .duration = $d | .output_dir = $o
+    | .server_command[0] = $sut | .client_command[0] = $sut
+    | .server_command[3] = $p | .client_command[5] = $p' \
+    "$WORK/gen/configs/base__raw_udp.json" > "$out/config.json"
   # orchestrator run は非 PASS(FAIL/INVALID 等)でも result/summary を出力して
   # 無言で非ゼロ exit する(rc=2..5)。失敗時に outcome を表面化する
   local rc=0

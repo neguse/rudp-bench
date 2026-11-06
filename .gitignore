@@ -8,9 +8,5 @@ __pycache__/
 
 # .NET build artifacts
 results-v2/
-servers/magiconion/**/bin/
-servers/magiconion/**/obj/
-servers/litenetlib/**/bin/
-servers/litenetlib/**/obj/
-servers/websocket/**/bin/
-servers/websocket/**/obj/
+servers/**/bin/
+servers/**/obj/
