@@ -70,7 +70,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        adapter: [gns, msquic]
+        include:
+          - adapter: gns
+            transports: gns
+          - adapter: msquic
+            transports: msquic,msquic-cancel-on-blocked
 
     steps:
       - uses: actions/checkout@v4
@@ -92,5 +96,7 @@ jobs:
           go build -o build-v2/orchestrator ./orchestrator/cmd/orchestrator
           cmake -S servers/${{ matrix.adapter }} -B build-v2-${{ matrix.adapter }} -DCMAKE_BUILD_TYPE=Release
           cmake --build build-v2-${{ matrix.adapter }} -j2
-          scripts/badnet/gen.py --loopback --out build-v2-loopback --transports ${{ matrix.adapter }}
-          build-v2/orchestrator run -config build-v2-loopback/configs/base__${{ matrix.adapter }}.json
+          scripts/badnet/gen.py --loopback --out build-v2-loopback --transports ${{ matrix.transports }}
+          for c in build-v2-loopback/configs/*.json; do
+            build-v2/orchestrator run -config "$c" || { echo "FAIL: $c"; exit 1; }
+          done

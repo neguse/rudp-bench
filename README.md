@@ -85,6 +85,7 @@
 - ライブラリごとに書くのは、接続、送信(LT と MD の振り分け)、受信、切断の検知、送信待ちの量の取得だけにする(`servers/<lib>/` の 1 ファイル)。
 - 各ライブラリは、まずライブラリの既定の設定で測る。既定から変えるときは、ゲームで実際にそう使う理由を書く。性能を上げるためだけの変更はしない。
 - LT と MD をどのチャネル・送信方法に載せるかは、ライブラリの文書かソースが勧める使い方に従い、各ファイルの先頭に出典を書く。
+- `msquic-cancel-on-blocked` は、LT の datagram を `QUIC_SEND_FLAG_CANCEL_ON_BLOCKED` で送る msquic。既定では送れない datagram が上限なく溜まるが、LT は最新の値が届けばよいので、ゲームでは送れない古いものを捨てる使い方をする。
 
 対象は 7 つ(ENet、KCP、GNS、msquic、LiteNetLib、websocket、MagicOnion)。追加の候補(yojimbo、SLikeNet、quiche、lsquic、自作の coop_rudp)は未定。
 

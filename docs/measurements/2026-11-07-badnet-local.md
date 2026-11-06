@@ -111,6 +111,19 @@ C1 = 勝手に切らない、C2 = reliable の遅れに上限、C3 = 混雑と�
 | outage5 C4(下り MD max 6291 ms、2 回とも) | probe timeout は送るたびに 2 倍で上限がない。断の後、持続的な輻輳と判定して輻輳ウィンドウを 2 パケットに落とし、断の間に溜まった datagram(LT)を先に送るので、MD はその後ろで待つ | `core/loss_detection.c:326-331`, `core/cubic.c:307-327`, `core/send.c:1358-1378` |
 | congest1m C2/C3(下り LT staleness p99 11.5 秒、MD 到達率 0.556) | DATAGRAM の送信要求は数の上限なしに列へ足され、時間でも捨てない(捨てるのは `QUIC_SEND_FLAG_CANCEL_ON_BLOCKED` を付けたものだけ)。datagram は stream より先に詰められる。下りの LT が回線を超えているので datagram の列が伸び続け、MD の stream はその後ろで待つ | `core/datagram.c:350-355`, `:600-628`, `core/send.c:1358-1378` |
 
+### msquic-cancel-on-blocked
+
+LT の datagram を `QUIC_SEND_FLAG_CANCEL_ON_BLOCKED` で送る msquic(commit `3ccc1d0`、`results-v2/badnet-20261107-msquic-cob`)。送れずに列に残った datagram は捨てられる(`core/datagram.c:600-628`)。LT は最新の値が届けばよいので、ゲームでもこう使う。他の設定は既定の msquic と同じ。
+
+| 条件 | msquic | msquic-cancel-on-blocked |
+|---|---|---|
+| congest1m | FAIL C2/C3(下り LT staleness p99 11534 ms、MD 到達率 0.556、MD p99 33554 ms) | FAIL C3(下り LT staleness p99 950 ms、MD 到達率 1、MD p99 1835 ms) |
+| outage5 | FAIL C4(下り MD max 6291 ms、2 回とも) | PASS(MD max 5505 ms、2 回とも) |
+| outage15 | FAIL C1/C2/C4(切断 8) | FAIL C1/C2/C4(切断 8) |
+| 残りの 9 条件 | PASS | PASS |
+
+datagram が溜まらなくなり、MD の stream が datagram の後ろで待たされなくなった。congest1m の残りの遅れは回線の待ち行列(約 1 秒)と、溢れた MD の再送による。outage15 の切断は `DisconnectTimeout` によるもので、送り方では変わらない。
+
 ### LiteNetLib
 
 出典は LiteNetLib 2.1.4(`https://github.com/RevenantX/LiteNetLib/blob/2.1.4/LiteNetLib/`)。
