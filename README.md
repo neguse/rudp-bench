@@ -136,7 +136,3 @@ calibration/duration_invariance.sh
 | 混雑 | 送る量が回線の容量を超え、経路上の待ち行列が溜まる状態。これによるロスは送る量を減らせば減る |
 | bufferbloat | 混雑時に送り続けた結果、待ち行列が溜まって遅延が膨らむこと |
 | 回線断 | 一定時間、上下ともパケットが全く通らない状態 |
-
-## 以前の記録
-
-以前の目的(横並びの比較、接続数を振る大規模な測定)の設計、ADR、測定記録、ledger は、ブランチ [`archive/before-reset`](https://github.com/neguse/rudp-bench/tree/archive/before-reset) に残してある。
