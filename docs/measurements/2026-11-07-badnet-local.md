@@ -157,7 +157,7 @@ outage5 は、4 回目の再送(約 5 秒)が断が明けた直後に来たの�
 | msquic | 一部見える | 輻輳ウィンドウ(`QUIC_STATISTICS_V2.SendCongestionWindow`、`src/inc/msquic.h:630`)と stream の推奨送信バッファ量(`QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE`、`:1574`)は取れる。datagram の送信待ちの量を返す API はなく、アプリが `QUIC_DATAGRAM_SEND_SENT` の通知を数える必要がある |
 | KCP | 見える | `ikcp_waitsnd` が送信待ちのセグメント数を返す(`ikcp.h:390-391`) |
 | LiteNetLib | 一部見える | `NetPeer.GetPacketsCountInReliableQueue` は reliable の窓に入っていない数だけを返す(`NetPeer.cs#L191-L204`)。窓が埋まるまでは 0〜1 のまま。推定帯域はない |
-| ENet | 見えない | 送信待ちの量を返す関数がない。`ENetPeer` の構造体は公開されており、内部のリスト(`outgoingCommands` など、`enet.h:317-318`)を数えれば件数は出る |
+| ENet | 見える(件数) | 送信待ちの量を返す関数はないが、公開ヘッダの `ENetPeer` のリスト(`outgoingSendReliableCommands` と `outgoingCommands`、`enet.h:317-318`)を `enet_list_size`(`list.h:29`)で数えれば件数が出る。推定帯域はない |
 | websocket | 見えない | `WebSocket` の公開メンバーに送信待ちの量も帯域もない。下のソケットを自分で用意すれば Linux の `TCP_INFO` でカーネル内の分だけは読める |
 | magiconion | 見えない | MagicOnion と gRPC の公開 API にない。キューは `internal` / `private` |
 

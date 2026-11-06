@@ -128,6 +128,13 @@ static int enet_service(void *t, uint64_t timeout_ns) {
   return rc < 0 ? -1 : 0;
 }
 
+// 送信待ちの件数。取得用の関数はないので、公開ヘッダの ENetPeer のリストを数える
+static int64_t enet_send_queue(void *t, int conn) {
+  ENetPeer *peer = &((enet_t *)t)->host->peers[conn];
+  return (int64_t)(enet_list_size(&peer->outgoingSendReliableCommands) +
+                   enet_list_size(&peer->outgoingCommands));
+}
+
 static const bk_transport transport = {
     .name = NAME,
     .describe =
@@ -146,6 +153,8 @@ static const bk_transport transport = {
     .connect = enet_connect,
     .send = enet_send,
     .service = enet_service,
+    .send_queue = enet_send_queue,
+    .send_queue_unit = "commands",
     .close = enet_close,
 };
 
