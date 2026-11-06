@@ -1,8 +1,6 @@
 // ENet の層。LT は unreliable(既定の sequenced)、MD は reliable で送り、
 // 互いに待たされないよう別のチャネルに載せる(docs/design.dox の
 // 「Sequencing」「Channels」)。
-//
-// ENET_LEGACY を定義すると、2026-11-05 の測定と同じ設定になる。
 #include "bk_sut.h"
 
 #include <enet/enet.h>
@@ -20,27 +18,12 @@ typedef struct {
   bk_sut *sut;
 } enet_t;
 
-#ifdef ENET_LEGACY
-#define NAME "enet-legacy"
-#define LT_FLAGS (ENET_PACKET_FLAG_UNSEQUENCED | ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT)
-#define LT_PRIMITIVE "unreliable unsequenced (channel 1)"
-#define LT_ORDERING "unordered"
-#define CC_ALGO "enet packet throttle with deceleration=0"
-#define TUNING                                                              \
-  "[{\"knob\":\"enet_peer_throttle_configure\",\"value\":\"deceleration=0\"," \
-  "\"upstream_ref\":\"include/enet/enet.h\"},"                              \
-  "{\"knob\":\"enet_peer_timeout\",\"value\":\"minimum=10s,maximum=60s\","  \
-  "\"upstream_ref\":\"include/enet/enet.h\"},"                              \
-  "{\"knob\":\"socket_buffers\",\"value\":\"4MiB\","                        \
-  "\"upstream_ref\":\"include/enet/enet.h\"}]"
-#else
 #define NAME "enet"
 #define LT_FLAGS 0
 #define LT_PRIMITIVE "unreliable sequenced (channel 1)"
 #define LT_ORDERING "ordered"
 #define CC_ALGO "enet packet throttle (default)"
 #define TUNING "[]"
-#endif
 
 static int conn_of(const enet_t *e, const ENetPeer *peer) {
   return (int)(peer - e->host->peers);
@@ -60,10 +43,6 @@ static void *create(bk_sut *sut, const ENetAddress *address, int peers) {
     free(e);
     return NULL;
   }
-#ifdef ENET_LEGACY
-  enet_socket_set_option(e->host->socket, ENET_SOCKOPT_RCVBUF, 4 << 20);
-  enet_socket_set_option(e->host->socket, ENET_SOCKOPT_SNDBUF, 4 << 20);
-#endif
   return e;
 }
 
@@ -117,12 +96,6 @@ static void dispatch(enet_t *e, ENetEvent *event) {
   const int conn = conn_of(e, event->peer);
   switch (event->type) {
     case ENET_EVENT_TYPE_CONNECT:
-#ifdef ENET_LEGACY
-      enet_peer_throttle_configure(event->peer,
-                                   ENET_PEER_PACKET_THROTTLE_INTERVAL,
-                                   ENET_PEER_PACKET_THROTTLE_SCALE, 0);
-      enet_peer_timeout(event->peer, ENET_PEER_TIMEOUT_LIMIT, 10000, 60000);
-#endif
       bk_sut_on_connect(e->sut, conn);
       break;
     case ENET_EVENT_TYPE_RECEIVE:
