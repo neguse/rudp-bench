@@ -33,53 +33,34 @@ jobs:
         run: |
           go vet ./orchestrator/...
           go test -count=1 ./orchestrator/...
+          go build -o build-v2/orchestrator ./orchestrator/cmd/orchestrator
 
       # 校正スイート(会計零点・既知故障注入を含む。sudo/netns 不要)
       - name: benchkit build + calibration tests
         run: |
-          cmake -S benchkit -B build-v2
-          cmake --build build-v2 -j
-          ctest --test-dir build-v2 --output-on-failure
+          cmake -S benchkit -B build-v2-benchkit
+          cmake --build build-v2-benchkit -j
+          ctest --test-dir build-v2-benchkit --output-on-failure
+          dotnet run -c Release --project servers/dotnet/BenchKit.CS.Tests/BenchKit.CS.Tests.csproj
 
-      - name: enet transport build + smoke
+      - name: build SUTs
         run: |
-          cmake -S servers/enet -B build-v2-enet
-          cmake --build build-v2-enet -j
-          ctest --test-dir build-v2-enet --output-on-failure
+          for t in raw_udp enet kcp; do
+            cmake -S servers/$t -B build-v2-$t -DCMAKE_BUILD_TYPE=Release
+            cmake --build build-v2-$t -j
+          done
+          for p in litenetlib/LiteNetLibBench websocket/WebSocketBench magiconion/MagicOnionBench; do
+            dotnet publish -c Release -o build-v2-dotnet/${p#*/} servers/$p.csproj
+          done
 
-      - name: kcp transport build + smoke
+      - name: loopback run
         run: |
-          cmake -S servers/kcp -B build-v2-kcp
-          cmake --build build-v2-kcp -j
-          ctest --test-dir build-v2-kcp -R kcp_loopback_smoke --output-on-failure
+          scripts/badnet/gen.py --loopback --out build-v2-loopback \
+            --transports raw_udp,enet,enet-legacy,kcp,litenetlib,websocket,magiconion
+          for c in build-v2-loopback/configs/*.json; do
+            build-v2/orchestrator run -config "$c" || { echo "FAIL: $c"; exit 1; }
+          done
 
-      - name: raw transport build + three-scenario no-loss smoke
-        run: |
-          cmake -S servers/raw_udp -B build-v2-rawudp
-          cmake --build build-v2-rawudp -j
-          ctest --test-dir build-v2-rawudp --output-on-failure
-          go build -o build-v2/orchestrator ./orchestrator/cmd/orchestrator
-          build-v2/orchestrator run -config orchestrator/examples/local-baseline-rawudp.json
-          build-v2/orchestrator run -config orchestrator/examples/local-authoritative-rawudp.json
-          build-v2/orchestrator run -config orchestrator/examples/local-room-relay-rawudp.json
-
-      - name: managed solution build + scenario no-loss smoke
-        run: |
-          dotnet build -c Release -m:1 servers/litenetlib/LiteNetLibBench.sln
-          dotnet build -c Release -m:1 servers/websocket/WebSocketBench.sln
-          dotnet build -c Release -m:1 servers/magiconion/MagicOnionBench.sln
-          dotnet run --no-build -c Release --project servers/magiconion/BenchKit.CS.Tests/BenchKit.CS.Tests.csproj
-          python3 servers/litenetlib/smoke_test.py \
-            servers/litenetlib/LiteNetLibBench.Server/bin/Release/net10.0/LiteNetLibBench.Server \
-            servers/litenetlib/LiteNetLibBench.Client/bin/Release/net10.0/LiteNetLibBench.Client
-          python3 servers/websocket/smoke_test.py \
-            servers/websocket/WebSocketBench.Server/bin/Release/net10.0/WebSocketBench.Server \
-            servers/websocket/WebSocketBench.Client/bin/Release/net10.0/WebSocketBench.Client
-          python3 servers/magiconion/smoke_test.py \
-            servers/magiconion/MagicOnionBench.Server/bin/Release/net10.0/MagicOnionBench.Server \
-            servers/magiconion/MagicOnionBench.Client/bin/Release/net10.0/MagicOnionBench.Client
-
-      # 校正: duration 不変性(loopback、netem なし)
       - name: calibration duration invariance
         run: ./calibration/duration_invariance.sh
 
@@ -97,13 +78,19 @@ jobs:
       - name: Init adapter submodule
         run: git submodule update --init --recursive third_party/${{ matrix.adapter }}
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - name: Install native prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake libnuma-dev libprotobuf-dev libssl-dev libsodium-dev protobuf-compiler
 
-      - name: Build and run scenario no-loss smoke
+      - name: build + loopback run
         run: |
+          go build -o build-v2/orchestrator ./orchestrator/cmd/orchestrator
           cmake -S servers/${{ matrix.adapter }} -B build-v2-${{ matrix.adapter }} -DCMAKE_BUILD_TYPE=Release
           cmake --build build-v2-${{ matrix.adapter }} -j2
-          ctest --test-dir build-v2-${{ matrix.adapter }} --output-on-failure
+          scripts/badnet/gen.py --loopback --out build-v2-loopback --transports ${{ matrix.adapter }}
+          build-v2/orchestrator run -config build-v2-loopback/configs/base__${{ matrix.adapter }}.json

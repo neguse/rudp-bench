@@ -12,6 +12,7 @@ add_library(benchkit
   src/metrics.c
   src/payload.c
   src/plan.c
+  src/sut.c
 )
 
 target_include_directories(benchkit PUBLIC include)

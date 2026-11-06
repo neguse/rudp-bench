@@ -8,18 +8,15 @@ BASE_DELAY_MS = 50  # RFC 8867 §4.2 の既定片道遅延
 CONNS = 8
 
 TRANSPORTS = {
-    "enet": ("build-v2-enet/enet_server", "build-v2-enet/enet_client", 42917, {}),
-    "kcp": ("build-v2-kcp/kcp_server", "build-v2-kcp/kcp_client", 42923, {}),
-    "gns": ("build-v2-gns/gns_server", "build-v2-gns/gns_client", 42921, {}),
-    "msquic": ("build-v2-msquic/msquic_server", "build-v2-msquic/msquic_client", 42919, {}),
-    "litenetlib": ("build-v2-dotnet/LiteNetLibBench.Server/LiteNetLibBench.Server",
-                   "build-v2-dotnet/LiteNetLibBench.Client/LiteNetLibBench.Client", 42941, {}),
-    "websocket": ("build-v2-dotnet/WebSocketBench.Server/WebSocketBench.Server",
-                  "build-v2-dotnet/WebSocketBench.Client/WebSocketBench.Client", 42933,
-                  {"sched_is_measurand": True}),
-    "magiconion": ("build-v2-dotnet/MagicOnionBench.Server/MagicOnionBench.Server",
-                   "build-v2-dotnet/MagicOnionBench.Client/MagicOnionBench.Client", 42931,
-                   {"sched_is_measurand": True}),
+    "raw_udp": ("build-v2-raw_udp/raw_udp_sut", 42911, {}),
+    "enet": ("build-v2-enet/enet_sut", 42917, {}),
+    "enet-legacy": ("build-v2-enet/enet_legacy_sut", 42918, {}),
+    "kcp": ("build-v2-kcp/kcp_sut", 42923, {}),
+    "gns": ("build-v2-gns/gns_sut", 42921, {}),
+    "msquic": ("build-v2-msquic/msquic_sut", 42919, {}),
+    "litenetlib": ("build-v2-dotnet/LiteNetLibBench/LiteNetLibBench", 42941, {}),
+    "websocket": ("build-v2-dotnet/WebSocketBench/WebSocketBench", 42933, {"sched_is_measurand": True}),
+    "magiconion": ("build-v2-dotnet/MagicOnionBench/MagicOnionBench", 42931, {"sched_is_measurand": True}),
 }
 
 
@@ -85,31 +82,38 @@ def scenario():
             "server_state": {"traffic_id": 2, "loss_tolerant": lt(20, 1000), "must_deliver": md}}
 
 
-def config(transport, cond, outdir):
-    server, client, port, extra = TRANSPORTS[transport]
+def config(transport, cond, outdir, loopback=False):
+    sut, port, extra = TRANSPORTS[transport]
     netem, schedule = CONDITIONS[cond]
+    host = "127.0.0.1" if loopback else "10.200.0.1"
     cfg = {
         "transport": transport,
-        "server_command": [server, "--port", str(port)],
-        "client_command": [client, "--host", "10.200.0.1", "--port", str(port),
+        "server_command": [sut, "server", "--port", str(port)],
+        "client_command": [sut, "client", "--host", host, "--port", str(port),
                            "--conns", "{conns}", "--proc-index", "{proc_index}",
                            "--origin-base", "{origin_id_start}"],
         "client_procs": 1,
         "total_conns": CONNS,
         "scenario": scenario(),
-        "netem": dict(link_mtu_bytes=1500, disable_offloads=True, **netem),
         "warmup": "20s",
         "duration": f"{WINDOW if schedule else STEADY}s",
         "drain": "10s" if schedule else "5s",
         "staleness_period_ns": 10_000_000,
+        "output_dir": os.path.join(outdir, cond, transport),
+        **extra,
+    }
+    if loopback:
+        # 回線を絞らない手元の確認(root 不要)。短くして steady warmup で窓を早める。
+        cfg.update(warmup="5s", steady_warmup=True, duration="3s", drain="1s")
+        return cfg
+    cfg.update({
+        "netem": dict(link_mtu_bytes=1500, disable_offloads=True, **netem),
         # 事前ゲートの iperf3 は高ロスで開始時の UDP の合図が落ちて失敗する。
         # ロスは計測窓内の qdisc カウンタ(loss evidence)で検証する。
         "netem_gate_off": True,
         "server_cpus": "7,15",
         "client_cpus": "3,4,5,6,11,12,13,14",
-        "output_dir": os.path.join(outdir, cond, transport),
-        **extra,
-    }
+    })
     if schedule:
         cfg["netem_schedule"] = schedule
     return cfg
@@ -120,13 +124,17 @@ def main():
     ap.add_argument("--out", required=True, help="session directory")
     ap.add_argument("--transports", default=",".join(TRANSPORTS))
     ap.add_argument("--conditions", default=",".join(CONDITIONS))
+    ap.add_argument("--loopback", action="store_true",
+                    help="netem なしの 127.0.0.1 で短く回す(条件は base のみ)")
     args = ap.parse_args()
+    if args.loopback:
+        args.conditions = "base"
     os.makedirs(os.path.join(args.out, "configs"), exist_ok=True)
     for cond in args.conditions.split(","):
         for t in args.transports.split(","):
             path = os.path.join(args.out, "configs", f"{cond}__{t}.json")
             with open(path, "w") as f:
-                json.dump(config(t, cond, args.out), f, indent=2)
+                json.dump(config(t, cond, args.out, args.loopback), f, indent=2)
             print(path)
 
 
