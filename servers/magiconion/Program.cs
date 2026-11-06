@@ -1,5 +1,7 @@
 // MagicOnion(StreamingHub、gRPC の HTTP/2 の上)の層。LT も MD も 1 本の TCP の上の
 // hub の呼び出しで送るため、LT は reliable_fallback と開示する。設定は既定のまま。
+// client からの送信は応答を待たない FireAndForget() で呼ぶ(呼び出しごとに往復を待つと、
+// 送る間隔より往復が長い回線で送信が詰まる)。
 // client は接続ごとに GrpcChannel を作る(1 接続 = 1 本の HTTP/2 接続)。
 using BenchKit.CS;
 using Grpc.Net.Client;
@@ -59,7 +61,7 @@ public sealed class MagicOnionTransport : ISutTransport
 
     private BenchSut sut = null!;
     private IBenchHubReceiver?[] serverPeers = [];
-    private SerialSender?[] senders = [];
+    private IBenchHub?[] senders = [];
     private readonly List<IBenchHub> owned = [];
     private WebApplication? app;
     private int accepted;
@@ -106,7 +108,7 @@ public sealed class MagicOnionTransport : ISutTransport
     public void Connect(BenchSut sut, string host, ushort port, int conns)
     {
         this.sut = sut;
-        senders = new SerialSender?[conns];
+        senders = new IBenchHub?[conns];
         for (var i = 0; i < conns; ++i)
         {
             var index = i;
@@ -122,14 +124,11 @@ public sealed class MagicOnionTransport : ISutTransport
                     {
                         owned.Add(hub);
                     }
-                    var sender = new SerialSender();
-                    Volatile.Write(ref senders[index], sender);
+                    Volatile.Write(ref senders[index], hub.FireAndForget());
                     Events.Connected(index);
-                    var writer = sender.RunAsync(p => hub.SendAsync(p).AsTask());
                     await hub.WaitForDisconnect().ConfigureAwait(false);
-                    sender.Complete();
+                    Volatile.Write(ref senders[index], null);
                     Events.Disconnected(index);
-                    await writer.ConfigureAwait(false);
                 }
                 catch (Exception e)
                 {
@@ -151,7 +150,18 @@ public sealed class MagicOnionTransport : ISutTransport
             peer.OnPayload(data.ToArray());
             return true;
         }
-        return Volatile.Read(ref senders[conn]) is SerialSender s && s.Enqueue(data);
+        if (Volatile.Read(ref senders[conn]) is not IBenchHub hub)
+        {
+            return false;
+        }
+        var sent = hub.SendAsync(data.ToArray());
+        if (!sent.IsCompleted)
+        {
+            sent.AsTask().ContinueWith(
+                t => Console.Error.WriteLine($"magiconion: send failed: {t.Exception?.GetBaseException().Message}"),
+                TaskContinuationOptions.OnlyOnFaulted);
+        }
+        return !sent.IsFaulted;
     }
 
     public void Service(TimeSpan timeout) => Events.Drain(sut, timeout);
