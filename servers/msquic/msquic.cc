@@ -3,6 +3,10 @@
 // 2 つ(datagram の受信、相手が開く stream の数)だけ有効にする。
 //
 // msquic のイベントは msquic のスレッドで届くので、ここで溜めて service() で渡す。
+//
+// MSQUIC_CANCEL_ON_BLOCKED を定義すると、LT の datagram を
+// QUIC_SEND_FLAG_CANCEL_ON_BLOCKED で送る(docs/api/DatagramSend.md)。LT は最新の値が
+// 届けばよいので、輻輳で送れずに残った古い datagram は捨ててよい。
 #include "bk_sut.h"
 
 #include <msquic.h>
@@ -18,6 +22,18 @@
 #include <mutex>
 #include <string>
 #include <vector>
+
+#ifdef MSQUIC_CANCEL_ON_BLOCKED
+#define NAME "msquic-cancel-on-blocked"
+#define LT_FLAGS QUIC_SEND_FLAG_CANCEL_ON_BLOCKED
+#define LT_TUNING                                                     \
+  ",{\"knob\":\"QUIC_SEND_FLAG_CANCEL_ON_BLOCKED\",\"value\":\"LT\"," \
+  "\"upstream_ref\":\"docs/api/DatagramSend.md\"}"
+#else
+#define NAME "msquic"
+#define LT_FLAGS QUIC_SEND_FLAG_NONE
+#define LT_TUNING ""
+#endif
 
 namespace {
 
@@ -324,7 +340,7 @@ int quic_send(void *t, int conn, bool must_deliver, const void *data,
     std::lock_guard<std::mutex> lock(q->mu);
     Conn &c = q->conns[static_cast<size_t>(conn)];
     if (!must_deliver && c.conn != nullptr) {
-      status = MsQuic->DatagramSend(c.conn, &b->buffer, 1, QUIC_SEND_FLAG_NONE, b);
+      status = MsQuic->DatagramSend(c.conn, &b->buffer, 1, LT_FLAGS, b);
     } else if (must_deliver && c.stream != nullptr) {
       status = MsQuic->StreamSend(c.stream, &b->buffer, 1, QUIC_SEND_FLAG_NONE, b);
     }
@@ -363,7 +379,7 @@ int quic_service(void *t, uint64_t timeout_ns) {
 
 const bk_transport transport = [] {
   bk_transport t{};
-  t.name = "msquic";
+  t.name = NAME;
   t.describe =
       "\"class_mapping\":{"
       "\"loss_tolerant\":{\"primitive\":\"quic datagram\","
@@ -378,7 +394,7 @@ const bk_transport transport = [] {
       "{\"knob\":\"DatagramReceiveEnabled\",\"value\":\"true\","
       "\"upstream_ref\":\"docs/Settings.md\"},"
       "{\"knob\":\"PeerBidiStreamCount\",\"value\":\"1 (server)\","
-      "\"upstream_ref\":\"docs/Settings.md\"}]";
+      "\"upstream_ref\":\"docs/Settings.md\"}" LT_TUNING "]";
   t.max_payload = 1000;
   t.listen = quic_listen;
   t.connect = quic_connect;
