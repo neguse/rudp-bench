@@ -1,7 +1,7 @@
 # 2026-11-05 劣悪ベンチ(ローカル)
 
-[ADR-0009](../adr/0009-bad-network-bench.md) の全条件 × 7 treatment を smolcenter で 1 回ずつ測った記録。
-smoke rig の値であり、reference ではない(doctor は問わない — ADR-0009 §5)。
+[劣悪ベンチ](../../README.md#劣悪ベンチ)の全条件 × 7 treatment を smolcenter で 1 回ずつ測った記録。
+SUT は以前の目的に合わせた性能寄りの設定のまま測っており、ライブラリの既定の設定での結果ではない(例: GNS は送信速度の上限を既定の 256 KB/s から 256 MB/s に、msquic は切断までの時間を既定の 16 秒から 60 秒にしている。各 `servers/<lib>/README.md` 参照)。
 
 ## 実行条件
 
@@ -31,7 +31,7 @@ smoke rig の値であり、reference ではない(doctor は問わない — AD
 
 GNS は混雑(congest1m)以外のすべての条件で合格した。msquic と KCP は、ロスには強いが長い回線断からの戻りが遅い。ENet・LiteNetLib・TCP 系(websocket・magiconion)は、ロス 10% 以上で reliable が秒単位で遅れる。
 
-C1 = 勝手に切らない、C2 = reliable の遅れに上限、C3 = 混雑とロスを取り違えない、C4 = 回線が戻れば品質も戻る(基準は ADR-0009 §3)。
+C1 = 勝手に切らない、C2 = reliable の遅れに上限、C3 = 混雑とロスを取り違えない、C4 = 回線が戻れば品質も戻る(基準は README の「判定」)。
 
 ### 主要な数値(上り / 下り、ms)
 
@@ -47,7 +47,7 @@ C1 = 勝手に切らない、C2 = reliable の遅れに上限、C3 = 混雑と�
 
 遅延の最大値はヒストグラムの bin 上端で、分解能は約 6%。
 
-### 境目の再測定(ADR-0009 §4)
+### 境目の再測定
 
 基準値の ±10% 以内だった 8 セルを測り直した(`results-v2/badnet-20261105b-rerun`)。
 
@@ -121,4 +121,4 @@ UDP 系(GNS・KCP・LiteNetLib・msquic)は LT の staleness p99 が 1.0〜1.2 �
 ## 測り直した経緯
 
 最初のセッション(`results-v2/badnet-20261105`、29 run で中止)は採用していない。ARP も netem のロスを受けるため、ロス 10% で netem gate の ping 平均が 376 ms になり、SUT のパケットも ARP 待ちで止まりうる状態だった。
-veth の MAC を固定して近隣エントリを恒久登録し、全条件を測り直した(ADR-0009 §5)。
+veth の MAC を固定して近隣エントリを恒久登録し、全条件を測り直した。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""劣悪ベンチ(ADR-0009)の result.json 群を判定し、markdown 表と JSON を出す。判定規則の正は ADR-0009。"""
+"""劣悪ベンチの result.json 群を判定し、markdown 表と JSON を出す。判定規則の正は README の「劣悪ベンチ」。"""
 import argparse
 import glob
 import json
