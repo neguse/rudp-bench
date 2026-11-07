@@ -23,7 +23,7 @@
 ## 劣悪ベンチ
 
 少ない接続数で回線の悪さを振り、C1〜C5 の合否を見る。
-結果は `docs/measurements/` に日付ごとに置く。最新は [2026-11-07(ライブラリの既定の設定)](docs/measurements/2026-11-07-badnet-local.md)。
+結果は `docs/measurements/` に日付ごとに置く。最新は [2026-11-07(ライブラリの既定の設定)](docs/measurements/2026-11-07-badnet-local.md) と [2026-11-07(追加の 5 ライブラリ)](docs/measurements/2026-11-07-badnet-added.md)。
 
 ### 負荷
 
@@ -87,16 +87,16 @@
 - LT と MD をどのチャネル・送信方法に載せるかは、ライブラリの文書かソースが勧める使い方に従い、各ファイルの先頭に出典を書く。
 - `msquic-cancel-on-blocked` は、LT の datagram を `QUIC_SEND_FLAG_CANCEL_ON_BLOCKED` で送る msquic。既定では送れない datagram が上限なく溜まるが、LT は最新の値が届けばよいので、ゲームでは送れない古いものを捨てる使い方をする。
 
-対象は 7 つ(ENet、KCP、GNS、msquic、LiteNetLib、websocket、MagicOnion)。追加の候補(yojimbo、SLikeNet、quiche、lsquic、自作の coop_rudp)は未定。
+対象は 12(ENet、KCP、GNS、msquic、LiteNetLib、websocket、MagicOnion、yojimbo、SLikeNet、quiche、lsquic、自作の coop_rudp)。
 
 ## 回し方
 
-Linux、Go、CMake、C/C++ の toolchain、.NET 10、`iproute2`、`jq` が要る。ゲームサーバなど他の処理と CPU を分け合わないよう、ビルドも測定も `orchestrator/rigs/home.json` の `bench_cpus` に限った systemd の slice の中で動かす。
+Linux、Go、CMake、C/C++ の toolchain、Rust(quiche)、.NET 10、`iproute2`、`jq` が要る。ゲームサーバなど他の処理と CPU を分け合わないよう、ビルドも測定も `orchestrator/rigs/home.json` の `bench_cpus` に限った systemd の slice の中で動かす。
 
 ```sh
 go build -o build-v2/orchestrator ./orchestrator/cmd/orchestrator
 
-for t in raw_udp enet kcp gns msquic; do
+for t in raw_udp enet kcp gns msquic yojimbo slikenet quiche lsquic coop_rudp; do
   cmake -S servers/$t -B build-v2-$t -DCMAKE_BUILD_TYPE=Release && cmake --build build-v2-$t -j
 done
 for p in litenetlib/LiteNetLibBench websocket/WebSocketBench magiconion/MagicOnionBench; do

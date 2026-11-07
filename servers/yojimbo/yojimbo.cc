@@ -50,7 +50,8 @@ struct yojimbo_t : public Adapter {
   ClientServerConfig config;
   Server *server = nullptr;
   std::vector<Client *> clients;
-  std::vector<bool> up;  // client: on_connect を出したか
+  std::vector<bool> up;    // client: on_connect を出したか
+  std::vector<bool> gone;  // client: on_disconnect を出したか(切れた後も状態は ERROR のまま残る)
   uint64_t last_send_ns = 0;
 
   MessageFactory *CreateMessageFactory(Allocator &allocator) override {
@@ -125,6 +126,7 @@ void *yojimbo_connect(bk_sut *sut, const char *host, uint16_t port, int conns) {
     c->InsecureConnect(key, id, Address(host, port));
   }
   y->up.assign(static_cast<size_t>(conns), false);
+  y->gone.assign(static_cast<size_t>(conns), false);
   return y;
 }
 
@@ -191,7 +193,8 @@ void pump(yojimbo_t *y) {
     Client *c = y->clients[i];
     const int idx = static_cast<int>(i);
     c->ReceivePackets();
-    for (int ch = 0; ch < kChannels; ++ch) {
+    // 切れた Client は Connection を解放しているので(yojimbo_client.cpp の Client::Disconnect)、ReceiveMessage を呼べない。
+    for (int ch = 0; ch < kChannels && c->IsConnected(); ++ch) {
       while (Message *m = c->ReceiveMessage(ch)) {
         deliver(y, idx, m);
         c->ReleaseMessage(m);
@@ -201,11 +204,11 @@ void pump(yojimbo_t *y) {
     if (c->IsConnected() && !y->up[i]) {
       y->up[i] = true;
       bk_sut_on_connect(y->sut, idx);
-    } else if (c->GetClientState() == CLIENT_STATE_ERROR ||
-               (y->up[i] && c->IsDisconnected())) {
+    } else if (!y->gone[i] && (c->GetClientState() == CLIENT_STATE_ERROR ||
+                               (y->up[i] && c->IsDisconnected()))) {
       std::fprintf(stderr, "yojimbo: client %d disconnected: %s\n", idx,
                    GetClientDisconnectReasonString(c->GetDisconnectReason()));
-      y->up[i] = false;
+      y->gone[i] = true;
       bk_sut_on_disconnect(y->sut, idx);
     }
   }
