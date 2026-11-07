@@ -51,8 +51,19 @@ sl_t *create(bk_sut *sut, bool server, size_t peers, int conns) {
   s->sut = sut;
   s->server = server;
   s->addrs.assign(static_cast<size_t>(conns), SLNet::UNASSIGNED_SYSTEM_ADDRESS);
-  for (size_t i = 0; i < peers; ++i) {
-    s->peers.push_back(SLNet::RakPeerInterface::GetInstance());
+  // Linux では GUID が作った時刻のマイクロ秒なので(RakPeer.cpp の Get64BitUniqueRandomNumber)、同じマイクロ秒に作った RakPeer は GUID が重なり、server は 2 本目を ID_ALREADY_CONNECTED で断る。
+  // 重ならなくなるまで作り直す。
+  while (s->peers.size() < peers) {
+    SLNet::RakPeerInterface *p = SLNet::RakPeerInterface::GetInstance();
+    const bool dup = std::any_of(
+        s->peers.begin(), s->peers.end(), [p](SLNet::RakPeerInterface *q) {
+          return q->GetMyGUID() == p->GetMyGUID();
+        });
+    if (dup) {
+      SLNet::RakPeerInterface::DestroyInstance(p);
+    } else {
+      s->peers.push_back(p);
+    }
   }
   return s;
 }
