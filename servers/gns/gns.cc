@@ -2,10 +2,25 @@
 // 終わりに FlushMessagesOnConnection で Nagle の待ちを切る
 // (steamnetworkingtypes.h の k_nSteamNetworkingSend_NoNagle の説明にある使い方)。
 // 設定は既定のまま(暗号も既定で有効)。
+//
+// GNS_TIMEOUT30 を定義すると、切断までの時間を既定の 10 秒から 30 秒にする(steamnetworkingtypes.h の k_ESteamNetworkingConfig_TimeoutConnected)。
+// トンネルやエレベーター、Wi-Fi と携帯回線の切り替えで回線が十数秒切れても、接続を保ちたいゲームで使う。
 #include "bk_sut.h"
 
 #include <steam/isteamnetworkingutils.h>
 #include <steam/steamnetworkingsockets.h>
+
+#ifdef GNS_TIMEOUT30
+#define NAME "gns-timeout30"
+#define TUNING                                                              \
+  "[{\"knob\":\"k_ESteamNetworkingConfig_TimeoutConnected\","                \
+  "\"value\":\"30000 ms\","                                                 \
+  "\"reason\":\"keep the session through outages of a few tens of seconds\"," \
+  "\"upstream_ref\":\"include/steam/steamnetworkingtypes.h\"}]"
+#else
+#define NAME "gns"
+#define TUNING "[]"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -85,6 +100,10 @@ gns_t *create(bk_sut *sut, bool server, int conns) {
   }
   SteamNetworkingUtils()->SetGlobalCallback_SteamNetConnectionStatusChanged(
       on_status);
+#ifdef GNS_TIMEOUT30
+  SteamNetworkingUtils()->SetGlobalConfigValueInt32(
+      k_ESteamNetworkingConfig_TimeoutConnected, 30000);
+#endif
   g_gns = new gns_t;
   g_gns->sut = sut;
   g_gns->server = server;
@@ -220,7 +239,7 @@ int64_t gns_send_queue(void *t, int conn) {
 
 const bk_transport transport = [] {
   bk_transport t{};
-  t.name = "gns";
+  t.name = NAME;
   t.describe =
       "\"class_mapping\":{"
       "\"loss_tolerant\":{\"primitive\":\"unreliable\","
@@ -232,7 +251,7 @@ const bk_transport transport = [] {
       "\"coalescing\":\"nagle, flushed at the end of each tick\","
       "\"cc_algo\":\"gns default (SendRateMin/Max 256KB/s)\","
       "\"thread_model\":\"internal_worker\",\"encryption\":true,"
-      "\"tuning\":[]";
+      "\"tuning\":" TUNING;
   t.max_payload = 1200;
   t.listen = gns_listen;
   t.connect = gns_connect;

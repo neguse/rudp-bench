@@ -22,6 +22,10 @@ target_compile_options(slikenet_vendor PRIVATE -w)
 
 find_package(Threads REQUIRED)
 
-add_executable(slikenet_sut slikenet.cc)
-target_link_libraries(slikenet_sut PRIVATE benchkit slikenet_vendor Threads::Threads)
-target_compile_options(slikenet_sut PRIVATE -Wall -Wextra -Wpedantic -Werror)
+# slikenet_timeout30_sut は切断までの時間を 30 秒にする(slikenet.cc)
+foreach(target IN ITEMS slikenet_sut slikenet_timeout30_sut)
+  add_executable(${target} slikenet.cc)
+  target_link_libraries(${target} PRIVATE benchkit slikenet_vendor Threads::Threads)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endforeach()
+target_compile_definitions(slikenet_timeout30_sut PRIVATE SLIKENET_TIMEOUT30)

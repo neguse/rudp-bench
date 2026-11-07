@@ -19,11 +19,15 @@ add_custom_target(quiche_cargo
 
 find_package(Threads REQUIRED)
 
-add_executable(quiche_sut quiche.c)
-add_dependencies(quiche_sut quiche_cargo)
-target_include_directories(quiche_sut SYSTEM PRIVATE ${QUICHE_DIR}/include)
-# libquiche.a に入る BoringSSL が libstdc++ を使う
-target_link_libraries(quiche_sut PRIVATE benchkit ${QUICHE_LIB} stdc++ Threads::Threads ${CMAKE_DL_LIBS} m)
-target_compile_definitions(quiche_sut PRIVATE _DEFAULT_SOURCE
-  QUICHE_EXAMPLES_DIR="${QUICHE_DIR}/examples")
-target_compile_options(quiche_sut PRIVATE -Wall -Wextra -Wpedantic -Werror)
+# quiche_drop_old_dgram_sut は LT の datagram を送信待ちに足す前に古いものを捨てる(quiche.c)
+foreach(target IN ITEMS quiche_sut quiche_drop_old_dgram_sut)
+  add_executable(${target} quiche.c)
+  add_dependencies(${target} quiche_cargo)
+  target_include_directories(${target} SYSTEM PRIVATE ${QUICHE_DIR}/include)
+  # libquiche.a に入る BoringSSL が libstdc++ を使う
+  target_link_libraries(${target} PRIVATE benchkit ${QUICHE_LIB} stdc++ Threads::Threads ${CMAKE_DL_LIBS} m)
+  target_compile_definitions(${target} PRIVATE _DEFAULT_SOURCE
+    QUICHE_EXAMPLES_DIR="${QUICHE_DIR}/examples")
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endforeach()
+target_compile_definitions(quiche_drop_old_dgram_sut PRIVATE QUICHE_DROP_OLD_DGRAM)
