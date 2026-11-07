@@ -1,8 +1,5 @@
-// yojimbo の層。LT は unreliable-unordered チャネル、MD は reliable-ordered チャネルに載せる
-// (include/yojimbo_config.h の ChannelType と ChannelConfig の説明、USAGE.md の
-// 「reliable は頻度の低い重要なメッセージ、unreliable は毎フレーム送る状態」)。
-// 接続は insecure 経路(matchmaker なし)。バックエンドなしで試すための文書化された経路
-// (client.cpp / server.cpp の "insecure" の例)。
+// yojimbo の層。LT は unreliable-unordered チャネル、MD は reliable-ordered チャネルに載せる(include/yojimbo_config.h の ChannelType と ChannelConfig の説明、USAGE.md の「reliable は頻度の低い重要なメッセージ、unreliable は毎フレーム送る状態」)。
+// 接続は matchmaker を使わない insecure の経路にする(client.cpp / server.cpp の "insecure" の例)。
 // チャネルの種類以外の設定は既定のまま。
 #include "bk_sut.h"
 
