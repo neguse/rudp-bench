@@ -7,6 +7,9 @@
 // MSQUIC_CANCEL_ON_BLOCKED を定義すると、LT の datagram を
 // QUIC_SEND_FLAG_CANCEL_ON_BLOCKED で送る(docs/api/DatagramSend.md)。LT は最新の値が
 // 届けばよいので、輻輳で送れずに残った古い datagram は捨ててよい。
+//
+// MSQUIC_TIMEOUT30 を定義すると、切断までの時間(DisconnectTimeoutMs)を既定の 16 秒から 30 秒にする(docs/Settings.md)。
+// トンネルやエレベーター、Wi-Fi と携帯回線の切り替えで回線が十数秒切れても、接続を保ちたいゲームで使う。
 #include "bk_sut.h"
 
 #include <msquic.h>
@@ -29,6 +32,13 @@
 #define LT_TUNING                                                     \
   ",{\"knob\":\"QUIC_SEND_FLAG_CANCEL_ON_BLOCKED\",\"value\":\"LT\"," \
   "\"upstream_ref\":\"docs/api/DatagramSend.md\"}"
+#elif defined(MSQUIC_TIMEOUT30)
+#define NAME "msquic-timeout30"
+#define LT_FLAGS QUIC_SEND_FLAG_NONE
+#define LT_TUNING                                                       \
+  ",{\"knob\":\"DisconnectTimeoutMs\",\"value\":\"30000\","              \
+  "\"reason\":\"keep the session through outages of a few tens of seconds\"," \
+  "\"upstream_ref\":\"docs/Settings.md\"}"
 #else
 #define NAME "msquic"
 #define LT_FLAGS QUIC_SEND_FLAG_NONE
@@ -249,6 +259,10 @@ quic_t *create(bk_sut *sut, bool server, int conns) {
   QUIC_SETTINGS settings{};
   settings.DatagramReceiveEnabled = TRUE;
   settings.IsSet.DatagramReceiveEnabled = TRUE;
+#ifdef MSQUIC_TIMEOUT30
+  settings.DisconnectTimeoutMs = 30000;
+  settings.IsSet.DisconnectTimeoutMs = TRUE;
+#endif
   if (server) {
     settings.PeerBidiStreamCount = 1;
     settings.IsSet.PeerBidiStreamCount = TRUE;

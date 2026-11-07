@@ -54,7 +54,7 @@ typedef struct rudp_endpoint_config {
   uint32_t recv_batch_size;
   uint32_t send_batch_size;
   /* RTT サンプルが無いときの初期 RTO。サンプル取得後は SRTT+4*RTTVAR による
-     適応 RTO（min_rto_ms..max_rto_ms でクランプ）が使われる。 */
+     適応 RTO（min_rto_ms..max_rto_ms でクランプ）が使われる。0 なら 1000ms。 */
   uint32_t rto_ms;
   /* 適応 RTO の下限/上限。0 なら既定（20ms / 10000ms）。 */
   uint32_t min_rto_ms;

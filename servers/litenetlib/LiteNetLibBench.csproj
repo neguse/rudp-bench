@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="timeout30/**" />
     <PackageReference Include="LiteNetLib" Version="2.1.4" />
   </ItemGroup>
 

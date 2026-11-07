@@ -103,8 +103,8 @@ go build -o build-v2/orchestrator ./orchestrator/cmd/orchestrator
 for t in raw_udp enet kcp gns msquic yojimbo slikenet quiche lsquic coop_rudp; do
   cmake -S servers/$t -B build-v2-$t -DCMAKE_BUILD_TYPE=Release && cmake --build build-v2-$t -j
 done
-for p in litenetlib/LiteNetLibBench websocket/WebSocketBench magiconion/MagicOnionBench; do
-  dotnet publish -c Release -o build-v2-dotnet/${p#*/} servers/$p.csproj
+for p in litenetlib/LiteNetLibBench litenetlib/timeout30/LiteNetLibBenchTimeout30 websocket/WebSocketBench magiconion/MagicOnionBench; do
+  dotnet publish -c Release -o build-v2-dotnet/${p##*/} servers/$p.csproj
 done
 
 scripts/badnet/gen.py --out <出力先>                                      # 条件ごとの run config を作る
