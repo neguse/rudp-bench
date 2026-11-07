@@ -47,6 +47,10 @@ void bk_sut_on_connect(bk_sut *sut, int conn);
 void bk_sut_on_receive(bk_sut *sut, int conn, const void *data, size_t len);
 void bk_sut_on_disconnect(bk_sut *sut, int conn);
 
+// --host の値。server でも指定すれば取れる(指定がなければ NULL)。
+// 自分のアドレスを知る必要がある server 用(yojimbo の接続トークンなど)。
+const char *bk_sut_host(const bk_sut *sut);
+
 // argv[1] が server / client / --describe。戻り値は main の終了コード。
 int bk_sut_main(int argc, char **argv, const bk_transport *transport);
 

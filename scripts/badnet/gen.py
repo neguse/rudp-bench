@@ -6,6 +6,8 @@ import os
 
 BASE_DELAY_MS = 50  # RFC 8867 §4.2 の既定片道遅延
 CONNS = 8
+# server が自分のアドレスを知る必要がある transport(接続トークンの宛先と照合する)
+SERVER_HOST = {"yojimbo"}
 
 TRANSPORTS = {
     "raw_udp": ("build-v2-raw_udp/raw_udp_sut", 42911, {}),
@@ -14,6 +16,8 @@ TRANSPORTS = {
     "gns": ("build-v2-gns/gns_sut", 42921, {}),
     "msquic": ("build-v2-msquic/msquic_sut", 42919, {}),
     "msquic-cancel-on-blocked": ("build-v2-msquic/msquic_cancel_on_blocked_sut", 42920, {}),
+    "yojimbo": ("build-v2-yojimbo/yojimbo_sut", 42925, {}),
+    "quiche": ("build-v2-quiche/quiche_sut", 42929, {}),
     "lsquic": ("build-v2-lsquic/lsquic_sut", 42935, {}),
     "litenetlib": ("build-v2-dotnet/LiteNetLibBench/LiteNetLibBench", 42941, {}),
     "websocket": ("build-v2-dotnet/WebSocketBench/WebSocketBench", 42933, {"sched_is_measurand": True}),
@@ -89,7 +93,7 @@ def config(transport, cond, outdir, loopback=False):
     host = "127.0.0.1" if loopback else "10.200.0.1"
     cfg = {
         "transport": transport,
-        "server_command": [sut, "server", "--port", str(port)],
+        "server_command": [sut, "server", "--port", str(port)] + (["--host", host] if transport in SERVER_HOST else []),
         "client_command": [sut, "client", "--host", host, "--port", str(port),
                            "--conns", "{conns}", "--proc-index", "{proc_index}",
                            "--origin-base", "{origin_id_start}"],
