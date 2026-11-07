@@ -416,6 +416,8 @@ void bk_sut_on_connect(bk_sut *s, int conn) {
   }
 }
 
+const char *bk_sut_host(const bk_sut *s) { return s->cfg.host; }
+
 void bk_sut_on_disconnect(bk_sut *s, int conn) {
   if (!valid_conn(s, conn)) {
     return;
