@@ -66,10 +66,17 @@ func EvaluateGate(input GateInput) GateResult {
 			// peer 切断が開示されている run の attempted 不足は、切断された
 			// conn の slot が未送計上された結果 = SUT の切断帰属(ADR-0002 の
 			// 「切断は FAIL」)。開示なしの不足は従来どおり farm 側疑いの INVALID
+			// ライブラリが断った送信は SUT の振る舞いで、届かなかったものとして数える。
+			// 断った分を足して閾値に届くときだけ SUT に帰属させ、残りの不足は従来どおり INVALID にする
+			refused := totalSendRefused(input.Control)
 			if disconnects := totalPeerDisconnects(input.Control); disconnects > 0 {
 				sutReasons = append(sutReasons, fmt.Sprintf(
 					"attempted_ratio=%g below threshold=%g with peer_disconnects=%d: unsent slots attributed to SUT disconnects",
 					attempted, input.AttemptedThreshold, disconnects))
+			} else if refused > 0 && input.Metrics.attemptedRatioWith(refused) >= input.AttemptedThreshold {
+				sutReasons = append(sutReasons, fmt.Sprintf(
+					"attempted_ratio=%g below threshold=%g with send_refused=%d: the SUT refused the sends",
+					attempted, input.AttemptedThreshold, refused))
 			} else {
 				reasons = append(reasons, fmt.Sprintf("attempted_ratio=%g below threshold=%g", attempted, input.AttemptedThreshold))
 			}
@@ -432,6 +439,7 @@ type authoritativeProgress struct {
 type scenarioDoneStats struct {
 	InvalidPayload        *uint64                `json:"invalid_payload"`
 	PeerDisconnects       *uint64                `json:"peer_disconnects"`
+	SendRefused           *uint64                `json:"send_refused"`
 	AuthoritativeProgress *authoritativeProgress `json:"authoritative_progress"`
 }
 
@@ -451,6 +459,26 @@ func totalPeerDisconnects(controlResult *control.Result) uint64 {
 		}
 		if stats.PeerDisconnects != nil {
 			total += *stats.PeerDisconnects
+		}
+	}
+	return total
+}
+
+// totalSendRefused sums the slots whose send the SUT's library refused across
+// all participants. Absence means zero.
+func totalSendRefused(controlResult *control.Result) uint64 {
+	if controlResult == nil {
+		return 0
+	}
+	var total uint64
+	for _, participant := range controlResult.Participants {
+		var stats scenarioDoneStats
+		if len(participant.Done.Stats) == 0 ||
+			json.Unmarshal(participant.Done.Stats, &stats) != nil {
+			continue
+		}
+		if stats.SendRefused != nil {
+			total += *stats.SendRefused
 		}
 	}
 	return total

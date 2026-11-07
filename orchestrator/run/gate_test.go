@@ -333,6 +333,37 @@ func TestEvaluateGateAttemptedShortfallWithoutDisconnectsStaysInvalid(t *testing
 	}
 }
 
+func TestEvaluateGateAttemptedShortfallFromRefusedSendsIsSUTFailure(t *testing.T) {
+	controlResult := controlResultWithMargin(10)
+	controlResult.Participants[0].Done.Stats = []byte(`{"invalid_payload":0,"peer_disconnects":0,"send_refused":20}`)
+	gate := EvaluateGate(GateInput{
+		Control:            controlResult,
+		Metrics:            gateMetrics(100, 80),
+		Processes:          []ProcessResult{{Role: "server", ProcIndex: -1, PID: 10, Exited: true, ExitCode: 0}},
+		AttemptedThreshold: 0.99,
+	})
+	if gate.Verdict != VerdictValid {
+		t.Fatalf("verdict = %s, reasons=%v", gate.Verdict, gate.Reasons)
+	}
+	if !reasonsContain(gate.SUTFailureReasons, "send_refused=20") {
+		t.Fatalf("SUT reasons %v do not attribute the shortfall to refused sends", gate.SUTFailureReasons)
+	}
+}
+
+func TestEvaluateGateShortfallBeyondRefusedSendsStaysInvalid(t *testing.T) {
+	controlResult := controlResultWithMargin(10)
+	controlResult.Participants[0].Done.Stats = []byte(`{"invalid_payload":0,"peer_disconnects":0,"send_refused":5}`)
+	gate := EvaluateGate(GateInput{
+		Control:            controlResult,
+		Metrics:            gateMetrics(100, 80),
+		Processes:          []ProcessResult{{Role: "server", ProcIndex: -1, PID: 10, Exited: true, ExitCode: 0}},
+		AttemptedThreshold: 0.99,
+	})
+	if gate.Verdict != VerdictInvalid || !reasonsContain(gate.Reasons, "attempted_ratio") {
+		t.Fatalf("gate = %+v", gate)
+	}
+}
+
 func controlResultWithMargin(margin int64) *control.Result {
 	return &control.Result{
 		Valid: true,

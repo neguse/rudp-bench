@@ -62,6 +62,7 @@ struct bk_sut {
   bool failed;
   uint64_t invalid_payload;
   uint64_t peer_disconnects;
+  uint64_t send_refused;  // transport の send が断った slot の数
   uint64_t state_ticks;
   int64_t send_queue_max;
   uint8_t *buf;
@@ -361,8 +362,10 @@ static int finish(bk_sut *s, bk_control *control, const char *progress) {
   char stats[1024];
   const int n = snprintf(stats, sizeof(stats),
                          "{\"invalid_payload\":%" PRIu64
-                         ",\"peer_disconnects\":%" PRIu64 "%s,%s}",
-                         s->invalid_payload, s->peer_disconnects, queue,
+                         ",\"peer_disconnects\":%" PRIu64
+                         ",\"send_refused\":%" PRIu64 "%s,%s}",
+                         s->invalid_payload, s->peer_disconnects,
+                         s->send_refused, queue,
                          progress);
   if (n <= 0 || (size_t)n >= sizeof(stats) ||
       bk_control_done(control, stats) != 0) {
@@ -512,6 +515,14 @@ void bk_sut_on_receive(bk_sut *s, int conn, const void *data, size_t len) {
   }
 }
 
+static bool send_or_count(bk_sut *s, int conn, bool md, size_t len) {
+  if (s->tr->send(s->t, conn, md, s->buf, len) == 0) {
+    return true;
+  }
+  s->send_refused++;
+  return false;
+}
+
 // ---- client ----------------------------------------------------------------
 
 static void client_send_slot(bk_sut *s, int conn, const bk_slot *slot) {
@@ -528,7 +539,7 @@ static void client_send_slot(bk_sut *s, int conn, const bk_slot *slot) {
   };
   const bool ok = bk_payload_write(s->buf, len, &h) == 0 &&
                   bk_payload_fill_body(s->buf, len, &h) == 0 &&
-                  s->tr->send(s->t, conn, md, s->buf, len) == 0;
+                  send_or_count(s, conn, md, len);
   bk_metrics_on_slot(s->metrics, &h, ok);
   if (ok && !md) {
     c->input_seq = max_u64(c->input_seq, h.seq);
@@ -710,7 +721,7 @@ static void server_send_slot(bk_sut *s, const bk_slot *slot, bool submit) {
            bk_authoritative_state_write_applied_input_seq(
                s->buf, len, s->conns[conn].input_seq) == 0 &&
            bk_authoritative_state_fill_target_pad(s->buf, len, target) == 0 &&
-           s->tr->send(s->t, (int)conn, md, s->buf, len) == 0;
+           send_or_count(s, (int)conn, md, len);
     }
     bk_metrics_on_slot(s->metrics, &h, ok);
   }
