@@ -75,6 +75,8 @@ jobs:
             transports: gns
           - adapter: msquic
             transports: msquic,msquic-cancel-on-blocked
+          - adapter: yojimbo
+            transports: yojimbo
           - adapter: quiche
             transports: quiche
 
