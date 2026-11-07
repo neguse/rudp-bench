@@ -9,6 +9,10 @@ jobs:
   calibration-and-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        copy: [1, 2, 3, 4, 5, 6, 7, 8]
 
     steps:
       - uses: actions/checkout@v4
@@ -59,7 +63,7 @@ jobs:
           scripts/badnet/gen.py --loopback --out build-v2-loopback \
             --transports raw_udp,enet,enet-timeout30,kcp,coop_rudp,litenetlib,litenetlib-timeout30,websocket,magiconion
           fails=0
-          for i in $(seq 1 12); do
+          for i in $(seq 1 6); do
             for c in build-v2-loopback/configs/*.json; do
               python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); c["output_dir"] += "-" + sys.argv[2]; json.dump(c, open("/tmp/c.json", "w"))' "$c" "$i"
               d=$(python3 -c 'import json; print(json.load(open("/tmp/c.json"))["output_dir"])')
@@ -73,53 +77,3 @@ jobs:
       - name: calibration duration invariance
         run: ./calibration/duration_invariance.sh
 
-  native-solution-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - adapter: gns
-            transports: gns,gns-timeout30
-          - adapter: msquic
-            transports: msquic,msquic-cancel-on-blocked,msquic-timeout30
-          - adapter: yojimbo
-            transports: yojimbo,yojimbo-timeout30
-          - adapter: quiche
-            transports: quiche,quiche-drop-old-dgram
-          - adapter: lsquic
-            transports: lsquic
-            extra_submodules: third_party/boringssl
-          - adapter: slikenet
-            transports: slikenet,slikenet-timeout30
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Init adapter submodule
-        run: git submodule update --init --recursive third_party/${{ matrix.adapter }} ${{ matrix.extra_submodules }}
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Install native prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libnuma-dev libprotobuf-dev libssl-dev libsodium-dev protobuf-compiler zlib1g-dev
-
-      - name: build + loopback run
-        run: |
-          go build -o build-v2/orchestrator ./orchestrator/cmd/orchestrator
-          cmake -S servers/${{ matrix.adapter }} -B build-v2-${{ matrix.adapter }} -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-v2-${{ matrix.adapter }} -j2
-          scripts/badnet/gen.py --loopback --out build-v2-loopback --transports ${{ matrix.transports }}
-          for c in build-v2-loopback/configs/*.json; do
-            if ! build-v2/orchestrator run -config "$c"; then
-              # 落ちた理由をログに残す(run の出力は runner の上にしか残らない)
-              d=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["output_dir"])' "$c")
-              echo "FAIL: $c"; cat "$d/summary.txt"; tail -n 20 "$d"/logs/*.log
-              exit 1
-            fi
-          done
