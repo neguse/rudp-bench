@@ -82,6 +82,8 @@ jobs:
           - adapter: lsquic
             transports: lsquic
             extra_submodules: third_party/boringssl
+          - adapter: slikenet
+            transports: slikenet
 
     steps:
       - uses: actions/checkout@v4
