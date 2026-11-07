@@ -10,3 +10,6 @@
 [submodule "third_party/msquic"]
 	path = third_party/msquic
 	url = https://github.com/microsoft/msquic.git
+[submodule "third_party/yojimbo"]
+	path = third_party/yojimbo
+	url = https://github.com/mas-bandwidth/yojimbo
