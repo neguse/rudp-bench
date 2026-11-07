@@ -23,7 +23,7 @@
 ## 劣悪ベンチ
 
 少ない接続数で回線の悪さを振り、C1〜C5 の合否を見る。
-結果は `docs/measurements/` に日付ごとに置く。最新は [2026-11-07(ライブラリの既定の設定)](docs/measurements/2026-11-07-badnet-local.md) と [2026-11-07(追加の 5 ライブラリ)](docs/measurements/2026-11-07-badnet-added.md)。
+結果は `docs/measurements/` に日付ごとに置く。最新は [2026-11-07(ライブラリの既定の設定)](docs/measurements/2026-11-07-badnet-local.md) 、[2026-11-07(追加の 5 ライブラリ)](docs/measurements/2026-11-07-badnet-added.md)、[2026-11-07(直した coop_rudp)](docs/measurements/2026-11-07-badnet-coop-rudp.md)。
 
 ### 負荷
 

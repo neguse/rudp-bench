@@ -125,7 +125,8 @@ congest1m の MD(p99 1507 ms)は、datagram と交互にパケットへ詰めら
 
 ### coop_rudp
 
-出典はこのリポジトリの `coop_rudp/rudp.c`。
+出典はこのリポジトリの `coop_rudp/rudp.c`(`2ea5b12` の時点)。
+ここに書いた不合格は直した。直した後の結果は [2026-11-07(直した coop_rudp)](2026-11-07-badnet-coop-rudp.md) にある。
 
 | 不合格 | 仕組み | 出典 |
 |---|---|---|
