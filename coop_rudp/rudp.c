@@ -231,6 +231,8 @@ struct rudp_conn {
   uint32_t sent_seq_head;
   uint32_t sent_seq_tail;
   uint32_t sent_seq_count;
+  /* この flush で reliable が SACK 窓に入らなかったか。立っている間は unreliable だけを送る。 */
+  uint8_t reliable_blocked;
   /* この flush で発行した最初の reliable seq（record 前のウィンドウ計算用）。
      flush の conn 処理開始時にリセットされる。 */
   uint32_t batch_reliable_first_seq;
@@ -1754,6 +1756,10 @@ static int pick_from_queue(rudp_conn* c, rudp_flow_state* f, rudp_ring* q,
 
 static int pick_from_flow(rudp_conn* c, rudp_flow_state* f, uint64_t now_ns,
                           uint32_t* out, uint8_t* out_source) {
+  if (c->reliable_blocked) {
+    return pick_from_queue(c, f, &f->unreliable_q, now_ns,
+                           RUDP_QUEUE_UNRELIABLE, 1, out, out_source);
+  }
   if (f->retry_q.count > 0) {
     if (pick_from_queue(c, f, &f->retry_q, now_ns, RUDP_QUEUE_RETRY, 0,
                         out, out_source)) {
@@ -2214,6 +2220,7 @@ void rudp_endpoint_flush(rudp_endpoint* ep, uint64_t now_ns) {
     if (!c->active) continue;
     refill_pace_tokens(c, now_ns);
     c->batch_reliable_first_seq = 0;
+    c->reliable_blocked = 0;
     uint32_t mi;
     uint8_t source = RUDP_QUEUE_NONE;
     uint32_t guard = ep->cfg.max_messages;
@@ -2226,7 +2233,15 @@ void rudp_endpoint_flush(rudp_endpoint* ep, uint64_t now_ns) {
       }
       if (!pick_next_msg(c, now_ns, &mi, &source)) break;
       if (!append_packet_for_msg(c, mi, source)) {
+        const int window_full = msg_is_reliable(&ep->msgs[mi]) &&
+                                ep->send_count < ep->cfg.send_batch_size;
         requeue_unsent_msg(c, mi, source);
+        /* reliable が SACK 窓に入らなくても unreliable は送り続ける。
+           止めると回線断の後、次の RTO まで相手に何も届かず、回復が数秒遅れる。 */
+        if (window_full && !c->reliable_blocked) {
+          c->reliable_blocked = 1;
+          continue;
+        }
         break;
       }
       pace_consume(c, (uint64_t)ep->msgs[mi].len +

@@ -51,6 +51,7 @@ typedef struct {
 
 struct sim {
   uint64_t now_ns;
+  uint64_t outage_from_ns, outage_to_ns;  // この間は両向きとも全部落とす
   uint64_t rng;
   link_t links[2];  // links[i] は side i から送る向き
   node_t nodes[2];
@@ -71,6 +72,7 @@ static int node_send(void *user, const rudp_out_packet *packets, size_t count) {
   link_t *l = &s->links[n->side];
   for (size_t i = 0; i < count; ++i) {
     if (rnd(s) < l->loss) continue;
+    if (s->now_ns >= s->outage_from_ns && s->now_ns < s->outage_to_ns) continue;
     uint64_t depart = s->now_ns;
     if (l->rate_bytes_per_s != 0) {
       const uint64_t start = l->busy_until_ns > s->now_ns ? l->busy_until_ns : s->now_ns;
@@ -184,6 +186,7 @@ typedef struct {
   uint64_t md_recv;
   uint64_t md_late;  // 400 ms を超えて届いた MD
   uint64_t lt_late;  // 500 ms を超えて古い LT
+  uint64_t md_max_ns;
 } stats_t;
 
 static void count_recv(void *ctx, int side, const uint8_t *data, size_t len, rudp_reliability rel) {
@@ -195,6 +198,7 @@ static void count_recv(void *ctx, int side, const uint8_t *data, size_t len, rud
   const uint64_t age = st->now_ns - sent;
   if (rel == RUDP_RELIABLE_ORDERED) {
     st->md_recv++;
+    if (age > st->md_max_ns) st->md_max_ns = age;
     if (age > 400 * MS) st->md_late++;
   } else {
     st->lt_recv++;
@@ -250,6 +254,18 @@ static void test_jitter_does_not_throttle(void) {
   sim_free(&s);
 }
 
+// 5 秒の回線断の後、MD は断の長さ + 1 秒以内に届く。
+static void test_outage_recovers_promptly(void) {
+  sim_t s;
+  sim_init(&s, 0.0);
+  s.outage_from_ns = 10000 * MS;
+  s.outage_to_ns = 15000 * MS;
+  const stats_t st = run_downlink(&s, 20, 5);
+  fprintf(stderr, "outage: md_recv=%llu md_max=%llums\n", (unsigned long long)st.md_recv, (unsigned long long)(st.md_max_ns / MS));
+  CHECK(st.md_max_ns <= 6000 * MS);
+  sim_free(&s);
+}
+
 // 混雑では送る量を減らし、待ち行列を溜めない。
 static void test_congestion_keeps_delay_low(void) {
   sim_t s;
@@ -289,6 +305,7 @@ int main(int argc, char **argv) {
       {"sequenced_keeps_only_latest", test_sequenced_keeps_only_latest},
       {"random_loss_does_not_throttle", test_random_loss_does_not_throttle},
       {"jitter_does_not_throttle", test_jitter_does_not_throttle},
+      {"outage_recovers_promptly", test_outage_recovers_promptly},
       {"congestion_keeps_delay_low", test_congestion_keeps_delay_low},
   };
   for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); ++i) {
