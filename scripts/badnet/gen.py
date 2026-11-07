@@ -7,7 +7,7 @@ import os
 BASE_DELAY_MS = 50  # RFC 8867 §4.2 の既定片道遅延
 CONNS = 8
 # server が自分のアドレスを知る必要がある transport(接続トークンの宛先と照合する)
-SERVER_HOST = {"yojimbo"}
+SERVER_HOST = {"yojimbo", "yojimbo-timeout30"}
 
 TRANSPORTS = {
     "raw_udp": ("build-v2-raw_udp/raw_udp_sut", 42911, {}),
@@ -15,13 +15,17 @@ TRANSPORTS = {
     "kcp": ("build-v2-kcp/kcp_sut", 42923, {}),
     "coop_rudp": ("build-v2-coop_rudp/coop_rudp_sut", 42937, {}),
     "gns": ("build-v2-gns/gns_sut", 42921, {}),
+    "gns-timeout30": ("build-v2-gns/gns_timeout30_sut", 42922, {}),
     "msquic": ("build-v2-msquic/msquic_sut", 42919, {}),
     "msquic-cancel-on-blocked": ("build-v2-msquic/msquic_cancel_on_blocked_sut", 42920, {}),
     "yojimbo": ("build-v2-yojimbo/yojimbo_sut", 42925, {}),
+    "yojimbo-timeout30": ("build-v2-yojimbo/yojimbo_timeout30_sut", 42926, {}),
     "quiche": ("build-v2-quiche/quiche_sut", 42929, {}),
+    "quiche-drop-old-dgram": ("build-v2-quiche/quiche_drop_old_dgram_sut", 42930, {}),
     "lsquic": ("build-v2-lsquic/lsquic_sut", 42935, {}),
     "litenetlib": ("build-v2-dotnet/LiteNetLibBench/LiteNetLibBench", 42941, {}),
     "slikenet": ("build-v2-slikenet/slikenet_sut", 42927, {}),
+    "slikenet-timeout30": ("build-v2-slikenet/slikenet_timeout30_sut", 42928, {}),
     "websocket": ("build-v2-dotnet/WebSocketBench/WebSocketBench", 42933, {"sched_is_measurand": True}),
     "magiconion": ("build-v2-dotnet/MagicOnionBench/MagicOnionBench", 42931, {"sched_is_measurand": True}),
 }

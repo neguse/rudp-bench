@@ -1,6 +1,9 @@
 // yojimbo の層。LT は unreliable-unordered チャネル、MD は reliable-ordered チャネルに載せる(include/yojimbo_config.h の ChannelType と ChannelConfig の説明、USAGE.md の「reliable は頻度の低い重要なメッセージ、unreliable は毎フレーム送る状態」)。
 // 接続は matchmaker を使わない insecure の経路にする(client.cpp / server.cpp の "insecure" の例)。
 // チャネルの種類以外の設定は既定のまま。
+//
+// YOJIMBO_TIMEOUT30 を定義すると、切断までの時間を既定の 10 秒から 30 秒にする(include/yojimbo_config.h の ClientServerConfig::timeout)。
+// トンネルやエレベーター、Wi-Fi と携帯回線の切り替えで回線が十数秒切れても、接続を保ちたいゲームで使う。
 #include "bk_sut.h"
 
 #include "benchkit.h"
@@ -21,6 +24,18 @@ using namespace yojimbo;
 constexpr int kChannelMd = 0;
 constexpr int kChannelLt = 1;
 constexpr int kChannels = 2;
+#ifdef YOJIMBO_TIMEOUT30
+#define NAME "yojimbo-timeout30"
+#define TUNING                                                              \
+  "[{\"knob\":\"ClientServerConfig::timeout\",\"value\":\"30 s\","            \
+  "\"reason\":\"keep the session through outages of a few tens of seconds\"," \
+  "\"upstream_ref\":\"include/yojimbo_config.h\"}]"
+constexpr int kTimeoutS = 30;
+#else
+#define NAME "yojimbo"
+#define TUNING "[]"
+constexpr int kTimeoutS = YOJIMBO_DEFAULT_TIMEOUT;
+#endif
 constexpr int kMaxPayload = 1200;
 // サンプル(client.cpp / server.cpp)の SendPackets と ReceivePackets の周期
 constexpr uint64_t kPumpNs = 10 * 1000 * 1000;
@@ -75,6 +90,7 @@ yojimbo_t *create(bk_sut *sut) {
   yojimbo_t *y = new yojimbo_t;
   y->sut = sut;
   y->config.channel[kChannelLt].type = CHANNEL_TYPE_UNRELIABLE_UNORDERED;
+  y->config.timeout = kTimeoutS;
   return y;
 }
 
@@ -235,7 +251,7 @@ int yojimbo_service(void *t, uint64_t timeout_ns) {
 
 const bk_transport transport = [] {
   bk_transport t{};
-  t.name = "yojimbo";
+  t.name = NAME;
   t.describe =
       "\"class_mapping\":{"
       "\"loss_tolerant\":{\"primitive\":\"unreliable-unordered channel\","
@@ -247,7 +263,7 @@ const bk_transport transport = [] {
       "\"coalescing\":\"one packet per SendPackets, flushed at the end of each tick\","
       "\"cc_algo\":\"none\","
       "\"thread_model\":\"single\",\"encryption\":true,"
-      "\"tuning\":[]";
+      "\"tuning\":" TUNING;
   t.max_payload = kMaxPayload;
   t.listen = yojimbo_listen;
   t.connect = yojimbo_connect;

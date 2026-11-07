@@ -73,18 +73,18 @@ jobs:
       matrix:
         include:
           - adapter: gns
-            transports: gns
+            transports: gns,gns-timeout30
           - adapter: msquic
             transports: msquic,msquic-cancel-on-blocked
           - adapter: yojimbo
-            transports: yojimbo
+            transports: yojimbo,yojimbo-timeout30
           - adapter: quiche
-            transports: quiche
+            transports: quiche,quiche-drop-old-dgram
           - adapter: lsquic
             transports: lsquic
             extra_submodules: third_party/boringssl
           - adapter: slikenet
-            transports: slikenet
+            transports: slikenet,slikenet-timeout30
 
     steps:
       - uses: actions/checkout@v4

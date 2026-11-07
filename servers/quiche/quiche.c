@@ -8,6 +8,9 @@
 //
 // 既定から変えるのは、既定のままでは stream と datagram を使えない値と、既定では無効な idle timeout だけにする。
 // 値は quiche の apps(apps/src/args.rs と apps/src/bin/quiche-server.rs)に合わせる。
+//
+// QUICHE_DROP_OLD_DGRAM を定義すると、LT の datagram を送信待ちに足す前に、まだ送っていない datagram を捨てる(include/quiche.h の quiche_conn_dgram_purge_outgoing)。
+// LT は最新の値が届けばよいので、送れずに残った古い値は捨ててよい。
 #include "bk_sut.h"
 
 #include "../udp_conns.h"
@@ -19,6 +22,16 @@
 #include <sys/random.h>
 
 #define STREAM_ID 0
+#ifdef QUICHE_DROP_OLD_DGRAM
+#define NAME "quiche-drop-old-dgram"
+#define LT_TUNING                                                   \
+  ",{\"knob\":\"quiche_conn_dgram_purge_outgoing\",\"value\":\"LT\"," \
+  "\"reason\":\"LT only needs the latest value\","                   \
+  "\"upstream_ref\":\"include/quiche.h\"}"
+#else
+#define NAME "quiche"
+#define LT_TUNING ""
+#endif
 #define CID_LEN 16
 
 static const uint8_t kAlpn[] = "\x0arudp-bench";
@@ -221,6 +234,14 @@ static void *quiche_connect_t(bk_sut *sut, const char *host, uint16_t port,
   return t;
 }
 
+#ifdef QUICHE_DROP_OLD_DGRAM
+static bool purge_all(uint8_t *data, size_t len) {
+  (void)data;
+  (void)len;
+  return true;
+}
+#endif
+
 static int quiche_send_t(void *p, int i, bool must_deliver, const void *data,
                          size_t len) {
   quiche_t *t = p;
@@ -229,6 +250,9 @@ static int quiche_send_t(void *p, int i, bool must_deliver, const void *data,
     return -1;
   }
   if (!must_deliver) {
+#ifdef QUICHE_DROP_OLD_DGRAM
+    quiche_conn_dgram_purge_outgoing(c->q, purge_all);
+#endif
     return quiche_conn_dgram_send(c->q, data, len) < 0 ? -1 : 0;
   }
   const uint32_t nlen = htonl((uint32_t)len);
@@ -325,7 +349,7 @@ static int64_t quiche_send_queue(void *p, int i) {
 }
 
 static const bk_transport transport = {
-    .name = "quiche",
+    .name = NAME,
     .describe =
         "\"class_mapping\":{"
         "\"loss_tolerant\":{\"primitive\":\"quic datagram\","
@@ -354,7 +378,7 @@ static const bk_transport transport = {
         "\"upstream_ref\":\"apps/src/bin/quiche-server.rs\"},"
         "{\"knob\":\"max_idle_timeout\",\"value\":\"30000 ms\","
         "\"reason\":\"default none never closes a dead connection\","
-        "\"upstream_ref\":\"apps/src/args.rs\"}]",
+        "\"upstream_ref\":\"apps/src/args.rs\"}" LT_TUNING "]",
     .max_payload = 1000,
     .listen = quiche_listen,
     .connect = quiche_connect_t,
