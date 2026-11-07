@@ -66,6 +66,9 @@ C1 = 勝手に切らない、C2 = reliable の遅れに上限、C3 = 混雑と�
 | congest1m coop_rudp | INVALID(送れた割合 0.824) | INVALID(0.778)。断った送信を判定に含めて FAIL C2/C3(断った 3777 件) | FAIL |
 | loss20 coop_rudp | INVALID(送れた割合 0.968) | INVALID(0.951)。断った送信を判定に含めて FAIL C2/C3(断った 808 件) | FAIL |
 | outage5 coop_rudp | INVALID(client の UDP 受信バッファあふれ 3 件) | INVALID(11 件) | INVALID |
+| loss5 / loss10 / loss20-then-clean yojimbo | PASS(下り LT 到達率 0.930 / 0.856 / 0.862、基準 0.855 / 0.810 / 0.810) | PASS(0.924 / 0.855 / 0.857) | PASS |
+| jitter30-loss2 lsquic | PASS(上り LT 到達率 0.969、基準 0.882) | PASS(0.972) | PASS |
+| outage15 coop_rudp | PASS(最大 15729 ms、基準 16000 ms) | PASS(15729 ms) | PASS |
 
 jitter30-loss2 の slikenet と coop_rudp は、下りの LT 到達率(0.872 / 0.875)が基準 0.882 に近いが、上り(0.757 / 0.758)が基準から 14% 離れて不合格なので、測り直していない。
 
@@ -73,7 +76,7 @@ yojimbo の client の SUT は、切れた `Client` に `ReceiveMessage` を呼�
 
 coop_rudp の loss20 と congest1m の INVALID は、ライブラリが送信を断った(`rudp_send` が `RUDP_SEND_QUEUE_FULL` を返した)分が 1% を超えたことによる。断った分を届かなかったものとして判定に含めるよう README を改め(`e60913c`)、3 回目で判定した。仕組みは下の coop_rudp の節に書く。
 
-結果は `results-v2/badnet-20261107-added{,-rerun,-yojimbo,-yojimbo2}` と `results-v2/badnet-20261107-refused`(リポジトリには入れていない)。
+結果は `results-v2/badnet-20261107-added{,-rerun,-yojimbo,-yojimbo2}`、`results-v2/badnet-20261107-refused`、`results-v2/badnet-20261107-near`(リポジトリには入れていない)。
 
 ## 不合格の仕組み
 

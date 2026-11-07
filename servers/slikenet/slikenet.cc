@@ -3,12 +3,26 @@
 // 優先度は HIGH_PRIORITY(同ディレクトリの tutorialsample3.html の Send の例)。
 // 設定は既定のままで、受け付ける接続数だけ SetMaximumIncomingConnections で上げる(既定の 0 では接続を受けない。Source/include/slikenet/peerinterface.h)。
 // 1 つの RakPeer は同じ相手に 1 本しか接続できないので、client は接続ごとに RakPeer を持つ。
+//
+// SLIKENET_TIMEOUT30 を定義すると、切断までの時間を既定の 10 秒から 30 秒にする(peerinterface.h の SetTimeoutTime)。
+// トンネルやエレベーター、Wi-Fi と携帯回線の切り替えで回線が十数秒切れても、接続を保ちたいゲームで使う。
 #include "bk_sut.h"
 
 #include <slikenet/MessageIdentifiers.h>
 #include <slikenet/peerinterface.h>
 #include <slikenet/statistics.h>
 #include <slikenet/types.h>
+
+#ifdef SLIKENET_TIMEOUT30
+#define NAME "slikenet-timeout30"
+#define TIMEOUT_TUNING                                                  \
+  ",{\"knob\":\"SetTimeoutTime\",\"value\":\"30000 ms\","                \
+  "\"reason\":\"keep the session through outages of a few tens of seconds\"," \
+  "\"upstream_ref\":\"Source/include/slikenet/peerinterface.h\"}"
+#else
+#define NAME "slikenet"
+#define TIMEOUT_TUNING ""
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -87,6 +101,9 @@ void *sl_listen(bk_sut *sut, uint16_t port, int max_conns) {
   }
   s->peers[0]->SetMaximumIncomingConnections(
       static_cast<unsigned short>(max_conns));
+#ifdef SLIKENET_TIMEOUT30
+  s->peers[0]->SetTimeoutTime(30000, SLNet::UNASSIGNED_SYSTEM_ADDRESS);
+#endif
   return s;
 }
 
@@ -96,7 +113,12 @@ void *sl_connect(bk_sut *sut, const char *host, uint16_t port, int conns) {
   for (int i = 0; ok && i < conns; ++i) {
     SLNet::SocketDescriptor sd;
     ok = s->peers[static_cast<size_t>(i)]->Startup(1, &sd, 1) ==
-             SLNet::RAKNET_STARTED &&
+             SLNet::RAKNET_STARTED;
+#ifdef SLIKENET_TIMEOUT30
+    s->peers[static_cast<size_t>(i)]->SetTimeoutTime(
+        30000, SLNet::UNASSIGNED_SYSTEM_ADDRESS);
+#endif
+    ok = ok &&
          s->peers[static_cast<size_t>(i)]->Connect(host, port, nullptr, 0) ==
              SLNet::CONNECTION_ATTEMPT_STARTED;
   }
@@ -205,7 +227,7 @@ int64_t sl_send_queue(void *t, int conn) {
 
 const bk_transport transport = [] {
   bk_transport t{};
-  t.name = "slikenet";
+  t.name = NAME;
   t.describe =
       "\"class_mapping\":{"
       "\"loss_tolerant\":{\"primitive\":\"UNRELIABLE_SEQUENCED (ordering channel 1)\","
@@ -219,7 +241,7 @@ const bk_transport transport = [] {
       "\"thread_model\":\"internal_worker\",\"encryption\":false,"
       "\"tuning\":[{\"knob\":\"SetMaximumIncomingConnections\","
       "\"value\":\"number of clients (server)\","
-      "\"upstream_ref\":\"Source/include/slikenet/peerinterface.h\"}]";
+      "\"upstream_ref\":\"Source/include/slikenet/peerinterface.h\"}" TIMEOUT_TUNING "]";
   t.max_payload = 1200;
   t.listen = sl_listen;
   t.connect = sl_connect;
