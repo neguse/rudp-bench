@@ -35,6 +35,7 @@ typedef struct {
   pkt *q;
   size_t count;
   double loss;
+  double delay_ms;  // 片道。0 なら 50 ms
   double jitter_ms;
   uint64_t rate_bytes_per_s;  // 0 なら制限なし
   uint64_t queue_limit_bytes;
@@ -83,7 +84,7 @@ static int node_send(void *user, const rudp_out_packet *packets, size_t count) {
     }
     CHECK(l->count < MAX_PKTS);
     pkt *p = &l->q[l->count++];
-    double delay_ms = 50.0;
+    double delay_ms = l->delay_ms > 0 ? l->delay_ms : 50.0;
     if (l->jitter_ms > 0) {
       const double u1 = rnd(s) + 1e-12, u2 = rnd(s);
       delay_ms += l->jitter_ms * sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
@@ -117,7 +118,7 @@ static int node_recv(void *user, rudp_in_packet *packets, size_t max_count) {
   return (int)got;
 }
 
-static void sim_init(sim_t *s, double loss) {
+static void sim_init_rto(sim_t *s, double loss, uint32_t rto_ms) {
   memset(s, 0, sizeof(*s));
   s->rng = 88172645463325252ull;
   for (int i = 0; i < 2; ++i) {
@@ -133,10 +134,13 @@ static void sim_init(sim_t *s, double loss) {
         .max_conns = 1,
         .max_flows = 1,
         .max_channels = 2,
+        .rto_ms = rto_ms,
     };
     CHECK(rudp_endpoint_create(&n->ep, &cfg) == 0);
   }
 }
+
+static void sim_init(sim_t *s, double loss) { sim_init_rto(s, loss, 0); }
 
 static void sim_free(sim_t *s) {
   for (int i = 0; i < 2; ++i) {
@@ -206,8 +210,8 @@ static void count_recv(void *ctx, int side, const uint8_t *data, size_t len, rud
   }
 }
 
-// server から client へ、LT 1000 B を 20 Hz、MD 64 B を 10 Hz で送る(劣悪ベンチの下りの 1 接続分)。
-static stats_t run_downlink(sim_t *s, uint64_t seconds, uint64_t measure_from_s) {
+// server から client へ LT 1000 B を 20 Hz と MD 64 B を 10 Hz、client から server へ LT 64 B を 30 Hz で送る(劣悪ベンチの 1 接続分)。
+static stats_t run_downlink_up(sim_t *s, uint64_t seconds, uint64_t measure_from_s, uint64_t up_period_ms) {
   sim_connect(s);
   // client の接続を server に知らせるため、client から一度送る
   rudp_conn *cc = rudp_endpoint_find_conn(s->nodes[1].ep, 1);
@@ -221,11 +225,16 @@ static stats_t run_downlink(sim_t *s, uint64_t seconds, uint64_t measure_from_s)
       sc = rudp_endpoint_find_conn(s->nodes[0].ep, 1);
       continue;
     }
+    if (ms % up_period_ms == 0) send_msg(cc, s->now_ns, 64, 0);
     if (ms % 50 == 0) send_msg(sc, s->now_ns, 1000, 0);
     if (ms % 100 == 0) send_msg(sc, s->now_ns, 64, 1);
   }
   CHECK(sc != NULL);
   return st;
+}
+
+static stats_t run_downlink(sim_t *s, uint64_t seconds, uint64_t measure_from_s) {
+  return run_downlink_up(s, seconds, measure_from_s, 33);
 }
 
 // 混雑によらないロスでは送る量を絞らない。
@@ -251,6 +260,19 @@ static void test_jitter_does_not_throttle(void) {
   rudp_get_status(rudp_endpoint_find_conn(s.nodes[0].ep, 1), &status);
   fprintf(stderr, "jitter: safe_bps=%u\n", status.safe_bps);
   CHECK(status.safe_bps == UINT32_MAX);
+  sim_free(&s);
+}
+
+// 初期 RTO が RTT より短く、送ったパケットが ACK の前に時間切れで失ったと扱われても、RTT を測れる。
+// 相手から絶えず受信するので、RTO の倍化は毎回 0 に戻る。
+static void test_measures_rtt_longer_than_initial_rto(void) {
+  sim_t s;
+  sim_init_rto(&s, 0.0, 20);
+  run_downlink_up(&s, 5, 5, 5);
+  rudp_status status;
+  rudp_get_status(rudp_endpoint_find_conn(s.nodes[0].ep, 1), &status);
+  fprintf(stderr, "long rtt: rtt_ms=%u\n", status.rtt_ms);
+  CHECK(status.rtt_ms >= 100 && status.rtt_ms <= 130);
   sim_free(&s);
 }
 
@@ -306,6 +328,7 @@ int main(int argc, char **argv) {
       {"random_loss_does_not_throttle", test_random_loss_does_not_throttle},
       {"jitter_does_not_throttle", test_jitter_does_not_throttle},
       {"outage_recovers_promptly", test_outage_recovers_promptly},
+      {"measures_rtt_longer_than_initial_rto", test_measures_rtt_longer_than_initial_rto},
       {"congestion_keeps_delay_low", test_congestion_keeps_delay_low},
   };
   for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); ++i) {

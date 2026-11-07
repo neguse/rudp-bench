@@ -231,6 +231,11 @@ struct rudp_conn {
   uint32_t sent_seq_head;
   uint32_t sent_seq_tail;
   uint32_t sent_seq_count;
+  uint32_t largest_acked_seq;
+  /* RTT を測るための、送った全パケット（unreliable だけのものを含む）の seq と時刻（seq の下位 6 bit で引く）。
+     reliable の送信記録は時間切れで失ったと扱うと消えるので、別に持つ。 */
+  uint32_t tx_seq[64];
+  uint64_t tx_ns[64];
   /* この flush で reliable が SACK 窓に入らなかったか。立っている間は unreliable だけを送る。 */
   uint8_t reliable_blocked;
   /* この flush で発行した最初の reliable seq（record 前のウィンドウ計算用）。
@@ -850,10 +855,6 @@ static void release_sent_packet(rudp_conn* c, uint32_t seq, uint64_t now_ns,
                 (seq % ep->cfg.sent_packet_count);
   rudp_sent_packet* sp = &ep->sent_packets[slot];
   if (!sp->used || sp->conn_index != c->index || sp->seq != seq) return;
-  if (complete_refs && now_ns >= sp->sent_ns) {
-    note_packet_rtt(c, now_ns - sp->sent_ns);
-    adjust_rate(c, now_ns, now_ns - sp->sent_ns);
-  }
   if (complete_refs) ++c->acked_packets;
   for (uint16_t r = 0; r < sp->ref_count; ++r) {
     uint32_t mi = sp->refs[r];
@@ -1148,6 +1149,16 @@ static void release_acked_packets(rudp_conn* c, uint32_t ack, uint64_t bits,
                                   uint64_t now_ns) {
   if (ack == 0) return;
   rudp_endpoint* ep = c->ep;
+  /* RTT は、この ACK で新しく確認された最大の packet seq から測る。
+     packet seq は送るたびに新しいので、時間切れで失ったと扱った後の ACK でも、どの送信への ACK かは決まる。
+     失ったと扱ったものを除くと、RTT が RTO を超えたときに標本が入らず、RTO も送信率も古い RTT のままになる。 */
+  if (c->largest_acked_seq == 0 || seq32_after(ack, c->largest_acked_seq)) {
+    c->largest_acked_seq = ack;
+    if (c->tx_seq[ack % 64u] == ack && now_ns >= c->tx_ns[ack % 64u]) {
+      note_packet_rtt(c, now_ns - c->tx_ns[ack % 64u]);
+      adjust_rate(c, now_ns, now_ns - c->tx_ns[ack % 64u]);
+    }
+  }
   uint32_t cap = ep->cfg.sent_packet_count;
   if (cap > 0 && ep->sent_seq_queue && c->sent_seq_count > 0) {
     size_t base = (size_t)c->index * cap;
@@ -1967,6 +1978,11 @@ static int flush_send_batch(rudp_endpoint* ep, uint64_t now_ns) {
     if (c) {
       c->ack_dirty = 0;
       c->last_tx_ns = now_ns;
+      uint32_t seq = load_u32(ep->send_batch[i].data + 12);
+      if (seq != 0) {
+        c->tx_seq[seq % 64u] = seq;
+        c->tx_ns[seq % 64u] = now_ns;
+      }
     }
     record_sent_packet(ep, i, now_ns);
     if (!ep->send_batch_ack_only[i]) {
