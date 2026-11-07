@@ -82,6 +82,8 @@ C1 = 勝手に切らない、C2 = reliable の遅れに上限、C3 = 混雑と�
 | loss20 C1(切断 1)・C2・C3 | 送信 1 回の失敗率は 1 − 0.8² = 0.36。7 回続けて失敗すると経過 64R ≈ 7.7 秒で既定の 5 秒を超えて切れる。切れた 1 接続の LT が止まり、staleness p99 が 16 秒になった。legacy は 10 秒なので 8 回連続が要り、切れずに MD が数秒遅れる(C2) | `protocol.c:1374-1377`, `:914` |
 | congest1m C3 | throttle が間引くのは unreliable だけで、reliable は止めない。基準 RTT は直前 5 秒の最小で、待ち行列が溜まったままだと基準ごと膨らみ、throttle がほとんど下がらない(混雑していない上りでも LT を 4% 落とした程度)。平滑化 RTT が待ち行列分に膨らみ、溢れた MD の再送が R・3R と遅れる | `protocol.c:1522-1550`, `:903-910`, `peer.c:62-90` |
 
+loss20 の切断の本数は run ごとにばらつく。時間切れのたびに記録を出すビルドで loss20 を 8 回測ると、切断は 1 回あたり 2〜6 本(平均 3 本)、再送 1 回ごとの失敗率は 0.33〜0.35 で、独立に落ちるとした 0.36 と合った。最初に失敗した reliable は 1 回あたり約 2500 件で、これが続けて 6 回失敗する(失敗率 0.35)件数を見積もると約 4.5 件になる。同じ接続に重なる分と、run の終わり近くに送ったものが 7 回目の時間切れの前に終わる分を引くと約 3 本で、測定と合う。上の表の 1 本は少ない側の結果。結果は `results-v2/dbg-20261107/enet*`。
+
 ### KCP
 
 既定の設定(`ikcp_create` のまま)では、MD の遅延の大半は KCP の送信キューでの待ち時間だった。計測窓の間の `ikcp_waitsnd` の最大(セグメント数、1 セグメント = MD 1 件 = 100 ms 分)が、MD 遅延の最大とほぼ一致する(loss10 31 / 36 → 3.0 / 3.7 秒、loss20 178 / 186 → 18.9 秒、outage15 266 / 186 → 27.3 / 18.9 秒)。
@@ -142,6 +144,7 @@ datagram が溜まらなくなり、MD の stream が datagram の後ろで待�
 | 不合格 | 仕組み | 出典 |
 |---|---|---|
 | loss10 / loss20 / burst5x10 C2/C3 | TCP の再送の待ち時間は最小約 0.3 秒(RTT 100 ms のとき)で、失敗ごとに 2 倍。受信側は欠けたバイトが埋まるまで後ろのバイトをアプリに渡さないので、1 個のロスで LT も MD も一緒に止まる(下りの MD p99 と LT staleness p99 が同じ値になる) | K`/net/ipv4/tcp_timer.c#L677-L678`, K`/net/ipv4/tcp_input.c#L5387` |
+| loss20 の接続の失敗(1 回目は INVALID) | SYN を再送して張れた接続では、server は再送された SYN に最初の SYN のタイムスタンプを返し、client はそれを RTT の最初の標本にする(Karn の規則で再送した SYN の送信時刻からは測らない)。RTT が SYN の再送の分(1 回で約 1.1 秒、2 回で約 2.1 秒)に膨らみ、RTO はその 3 倍(3.3 秒、6.4 秒)になる。続く upgrade の要求か応答が落ちると、その RTO で待つので 10 秒を超える。パケットを記録して websocket の loss20 を 25 回測ると、失敗は 1 回(8 本中 7 本)で、7 秒を超えた接続はどちらも SYN を再送したあと RTO が膨らんでいた | K`/net/ipv4/tcp_minisocks.c#L724-L755`, K`/net/ipv4/tcp_input.c#L3259-L3261`, K`/net/ipv4/tcp_input.c#L1095` |
 | outage15 C4(最大 21 秒) | 断の間に再送の待ち時間が倍々に伸び、断が明けた後の次の再送が約 19〜21 秒になる。切断は tcp_retries2=15(約 925 秒)まで起きず、WebSocket・HTTP/2・MagicOnion の生存確認も既定で無効なので切れない | K`/net/ipv4/tcp_timer.c#L186-L229` |
 | congest1m C2/C3(下り LT staleness p99 27〜29 秒、MD 到達率 0.53〜0.57) | TCP は混雑に合わせて送る量を落とすが、送れない分は送信側の上限のないキューに溜まる。websocket は `SendAsync` を同時に 1 つしか呼べないので、SUT が上限のないキューで 1 件ずつ送る(`servers/dotnet/BenchKit.CS/BenchSut.cs:800-814`)。magiconion は MagicOnion の server が同じ形のキューを持つ。遅れは経過時間に比例して伸び、最も遅い接続は 25〜29 秒遅れた | `https://github.com/Cysharp/MagicOnion/blob/7.10.2/src/MagicOnion.Server/Internal/QueuedResponseWriter.cs#L17` |
 
@@ -153,6 +156,7 @@ outage5 は、4 回目の再送(約 5 秒)が断が明けた直後に来たの�
 
 - 自分のキューを持たずに回線の待ち行列(約 1 秒)へ出す実装(ENet、GNS、LiteNetLib)は、LT staleness p99 が 1.1〜1.2 秒で止まる。
 - 自分の中に上限のないキューを持つ実装(msquic の datagram、KCP の MD、TCP 系)は、遅れが経過時間に比例して 10〜35 秒まで伸びる。
+- KCP と raw_udp は LT を毎 tick、接続の番号順に続けて `sendto` する(`benchkit/src/sut.c:697`)。満杯の待ち行列には前の tick から空いた分しか入らず、後から入る接続が毎回落ちる(K`/net/sched/sch_netem.c#L525-L531`)。接続ごとの受信数を数えるビルドで測ると、0〜4 番は 949〜1000 件、5 番は 664〜992 件、6 番と 7 番は 46〜91 件だった。下りの LT staleness p99(28 秒)は、ほとんど届かない後ろの接続の値。結果は `results-v2/dbg-20261107/{kcp,raw_udp}`。
 
 送る量が容量を超え続ける状況は、ライブラリの側では解決しない。アプリが送る量を落とすには、送信待ちの量が見えること(C5)が前提になる。
 
@@ -174,8 +178,3 @@ outage5 は、4 回目の再送(約 5 秒)が断が明けた直後に来たの�
 | websocket | 見えない | `WebSocket` の公開メンバーに送信待ちの量も帯域もない。下のソケットを自分で用意すれば Linux の `TCP_INFO` でカーネル内の分だけは読める |
 | magiconion | 見えない | MagicOnion と gRPC の公開 API にない。キューは `internal` / `private` |
 
-## 未解明
-
-- loss20 で websocket と magiconion が 10 秒以内に全接続を張れなかった(8 本中 6 本と 7 本)。TCP の SYN の再送間隔(Linux 6.18 では最初の 4 回は 1 秒おき)と upgrade の往復を、ロスが独立に起きるとして数えた見積もりでは、8 本中 2 本が 10 秒を超える確率は 0.2% 以下で、観測と合わない。
-- congest1m で KCP と raw_udp だけ、下りの LT の 8 つの流れのうち 1 つが計測窓の間に 1 件も届かなかった(LT staleness p99 28 秒)。どちらも LT を server が接続順に続けて `sendto` している。満杯の待ち行列で毎回後ろの接続が落ちると推測しているが、どの接続かは記録しておらず確かめていない。
-- ENet の loss20 で、ロスが独立に起きるとした切断の期待値(既定 8 接続中約 4.6 本、legacy 約 2 本)より、実測(1 本と 0 本)が少ない。
