@@ -89,7 +89,7 @@
 - LT と MD をどのチャネル・送信方法に載せるかは、ライブラリの文書かソースが勧める使い方に従い、各ファイルの先頭に出典を書く。
 - `msquic-cancel-on-blocked` は、LT の datagram を `QUIC_SEND_FLAG_CANCEL_ON_BLOCKED` で送る msquic。既定では送れない datagram が上限なく溜まるが、LT は最新の値が届けばよいので、ゲームでは送れない古いものを捨てる使い方をする。
 - `quiche-drop-old-dgram` は、LT の datagram を送信待ちに足す前に、まだ送っていない datagram を `quiche_conn_dgram_purge_outgoing` で捨てる quiche。理由は `msquic-cancel-on-blocked` と同じ。
-- `gns-timeout30`・`slikenet-timeout30`・`yojimbo-timeout30` は、切断までの時間を既定の 10 秒から 30 秒にしたもの。トンネルやエレベーター、Wi-Fi と携帯回線の切り替えで回線が十数秒切れても、接続を保ちたいゲームで使う。
+- `gns-timeout30`・`slikenet-timeout30`・`yojimbo-timeout30`・`enet-timeout30`・`litenetlib-timeout30`・`msquic-timeout30` は、切断までの時間を既定(5〜16 秒)から 30 秒にしたもの。トンネルやエレベーター、Wi-Fi と携帯回線の切り替えで回線が十数秒切れても、接続を保ちたいゲームで使う。
 
 対象は 12(ENet、KCP、GNS、msquic、LiteNetLib、websocket、MagicOnion、yojimbo、SLikeNet、quiche、lsquic、自作の coop_rudp)。
 
@@ -103,8 +103,8 @@ go build -o build-v2/orchestrator ./orchestrator/cmd/orchestrator
 for t in raw_udp enet kcp gns msquic yojimbo slikenet quiche lsquic coop_rudp; do
   cmake -S servers/$t -B build-v2-$t -DCMAKE_BUILD_TYPE=Release && cmake --build build-v2-$t -j
 done
-for p in litenetlib/LiteNetLibBench websocket/WebSocketBench magiconion/MagicOnionBench; do
-  dotnet publish -c Release -o build-v2-dotnet/${p#*/} servers/$p.csproj
+for p in litenetlib/LiteNetLibBench litenetlib/timeout30/LiteNetLibBenchTimeout30 websocket/WebSocketBench magiconion/MagicOnionBench; do
+  dotnet publish -c Release -o build-v2-dotnet/${p##*/} servers/$p.csproj
 done
 
 scripts/badnet/gen.py --out <出力先>                                      # 条件ごとの run config を作る

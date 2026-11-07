@@ -1,6 +1,9 @@
 // ENet の層。LT は unreliable(既定の sequenced)、MD は reliable で送り、
 // 互いに待たされないよう別のチャネルに載せる(docs/design.dox の
 // 「Sequencing」「Channels」)。
+//
+// ENET_TIMEOUT30 を定義すると、切断までの時間を 30 秒にする(enet_peer_timeout の timeoutMinimum と timeoutMaximum。既定は 5 秒と 30 秒)。
+// トンネルやエレベーター、Wi-Fi と携帯回線の切り替えで回線が十数秒切れても、接続を保ちたいゲームで使う。
 #include "bk_sut.h"
 
 #include <enet/enet.h>
@@ -18,12 +21,20 @@ typedef struct {
   bk_sut *sut;
 } enet_t;
 
+#ifdef ENET_TIMEOUT30
+#define NAME "enet-timeout30"
+#define TUNING                                                         \
+  "[{\"knob\":\"enet_peer_timeout\",\"value\":\"0, 30000, 30000\","          \
+  "\"reason\":\"keep the session through outages of a few tens of seconds\"," \
+  "\"upstream_ref\":\"peer.c\"}]"
+#else
 #define NAME "enet"
+#define TUNING "[]"
+#endif
 #define LT_FLAGS 0
 #define LT_PRIMITIVE "unreliable sequenced (channel 1)"
 #define LT_ORDERING "ordered"
 #define CC_ALGO "enet packet throttle (default)"
-#define TUNING "[]"
 
 static int conn_of(const enet_t *e, const ENetPeer *peer) {
   return (int)(peer - e->host->peers);
@@ -96,6 +107,10 @@ static void dispatch(enet_t *e, ENetEvent *event) {
   const int conn = conn_of(e, event->peer);
   switch (event->type) {
     case ENET_EVENT_TYPE_CONNECT:
+#ifdef ENET_TIMEOUT30
+      // 接続のたびに enet_peer_reset が既定に戻すので、つながってから設定する
+      enet_peer_timeout(event->peer, 0, 30000, 30000);
+#endif
       bk_sut_on_connect(e->sut, conn);
       break;
     case ENET_EVENT_TYPE_RECEIVE:

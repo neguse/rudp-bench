@@ -242,9 +242,9 @@ static void test_random_loss_does_not_throttle(void) {
   sim_t s;
   sim_init(&s, 0.10);
   const stats_t st = run_downlink(&s, 20, 10);
-  // 10 秒の LT は 200 件。片道 10% のロスなら約 180 件届く
+  // 10 秒の LT は 200 件。片道 10% のロスなら約 180 件届く。下限は README の C3 と同じ 0.9 ×(1 − ロス率)
   fprintf(stderr, "random loss: lt_recv=%llu lt_late=%llu\n", (unsigned long long)st.lt_recv, (unsigned long long)st.lt_late);
-  CHECK(st.lt_recv >= 170);
+  CHECK(st.lt_recv >= 162);
   CHECK(st.lt_late == 0);
   sim_free(&s);
 }
@@ -273,6 +273,20 @@ static void test_measures_rtt_longer_than_initial_rto(void) {
   rudp_get_status(rudp_endpoint_find_conn(s.nodes[0].ep, 1), &status);
   fprintf(stderr, "long rtt: rtt_ms=%u\n", status.rtt_ms);
   CHECK(status.rtt_ms >= 100 && status.rtt_ms <= 130);
+  sim_free(&s);
+}
+
+// ロスのない経路では、RTT を測る前でも余計な再送をしない(RTT 150 ms は初期 RTO より短い)。
+static void test_no_spurious_retransmit_before_rtt_sample(void) {
+  sim_t s;
+  sim_init(&s, 0.0);
+  s.links[0].delay_ms = 75;
+  s.links[1].delay_ms = 75;
+  run_downlink(&s, 2, 0);
+  rudp_flow_stats fs;
+  CHECK(rudp_get_flow_stats(rudp_endpoint_find_conn(s.nodes[0].ep, 1), &fs, 1) == 1);
+  fprintf(stderr, "spurious: retransmits=%u\n", fs.retransmits);
+  CHECK(fs.retransmits == 0);
   sim_free(&s);
 }
 
@@ -328,6 +342,7 @@ int main(int argc, char **argv) {
       {"random_loss_does_not_throttle", test_random_loss_does_not_throttle},
       {"jitter_does_not_throttle", test_jitter_does_not_throttle},
       {"outage_recovers_promptly", test_outage_recovers_promptly},
+      {"no_spurious_retransmit_before_rtt_sample", test_no_spurious_retransmit_before_rtt_sample},
       {"measures_rtt_longer_than_initial_rto", test_measures_rtt_longer_than_initial_rto},
       {"congestion_keeps_delay_low", test_congestion_keeps_delay_low},
   };

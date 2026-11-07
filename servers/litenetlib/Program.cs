@@ -2,6 +2,9 @@
 // 説明で、Sequenced は「落ちてよいが順に届く」、ReliableOrdered は「落ちず順に届く」)。
 // 設定は既定のまま。client は接続ごとに NetManager を持つ(同じ相手への接続は
 // NetManager ごとに 1 本のため)。
+//
+// LITENETLIB_TIMEOUT30 を定義すると(timeout30/LiteNetLibBenchTimeout30.csproj)、切断までの時間(NetManager.DisconnectTimeout)を既定の 5 秒から 30 秒にする。
+// トンネルやエレベーター、Wi-Fi と携帯回線の切り替えで回線が十数秒切れても、接続を保ちたいゲームで使う。
 using BenchKit.CS;
 using LiteNetLib;
 
@@ -16,13 +19,19 @@ internal sealed class LiteNetLibTransport : ISutTransport
     private BenchSut sut = null!;
     private bool gotEvent;
 
+#if LITENETLIB_TIMEOUT30
+    public string Name => "litenetlib-timeout30";
+    private const string Tuning = "[{\"knob\":\"NetManager.DisconnectTimeout\",\"value\":\"30000\",\"reason\":\"keep the session through outages of a few tens of seconds\",\"upstream_ref\":\"LiteNetLib/LiteNetManager.cs\"}]";
+#else
     public string Name => "litenetlib";
+    private const string Tuning = "[]";
+#endif
 
     public string Describe =>
         "\"class_mapping\":{" +
         "\"loss_tolerant\":{\"primitive\":\"Sequenced\",\"delivery\":\"best_effort\",\"ordering\":\"ordered\",\"realization\":\"native\"}," +
         "\"must_deliver\":{\"primitive\":\"ReliableOrdered\",\"delivery\":\"reliable\",\"ordering\":\"ordered\",\"realization\":\"native\"}}," +
-        "\"coalescing\":\"none\",\"cc_algo\":\"none\",\"thread_model\":\"internal_worker\",\"encryption\":false,\"tuning\":[]";
+        "\"coalescing\":\"none\",\"cc_algo\":\"none\",\"thread_model\":\"internal_worker\",\"encryption\":false,\"tuning\":" + Tuning;
 
     public int MaxPayload => NetConstants.MaxUnreliableDataSize;
 
@@ -47,12 +56,21 @@ internal sealed class LiteNetLibTransport : ISutTransport
             Event(() => sut.OnConnect(i));
         };
         Wire(listener);
-        var manager = new NetManager(listener);
+        var manager = NewManager(listener);
         if (!manager.Start(port))
         {
             throw new InvalidOperationException($"NetManager.Start({port}) failed");
         }
         managers.Add(manager);
+    }
+
+    private static NetManager NewManager(EventBasedNetListener listener)
+    {
+        var manager = new NetManager(listener);
+#if LITENETLIB_TIMEOUT30
+        manager.DisconnectTimeout = 30000;
+#endif
+        return manager;
     }
 
     public void Connect(BenchSut sut, string host, ushort port, int conns)
@@ -69,7 +87,7 @@ internal sealed class LiteNetLibTransport : ISutTransport
                 Event(() => sut.OnConnect(index));
             };
             Wire(listener);
-            var manager = new NetManager(listener);
+            var manager = NewManager(listener);
             if (!manager.Start())
             {
                 throw new InvalidOperationException("NetManager.Start failed");

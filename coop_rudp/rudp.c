@@ -14,7 +14,8 @@
 #define RUDP_DEFAULT_SENT_PACKETS 4096u
 #define RUDP_DEFAULT_RECV_BATCH 64u
 #define RUDP_DEFAULT_SEND_BATCH 64u
-#define RUDP_DEFAULT_RTO_MS 100u
+/* RTT を測る前の RTO。RFC 6298 §2.1 と同じ 1 秒（経路の RTT より短いと、測る前に余計な再送をする）。 */
+#define RUDP_DEFAULT_RTO_MS 1000u
 
 #define RUDP_PACKET_FLAG_ACK_ONLY 0x01u
 #define RUDP_PACKET_MAGIC_MASK 0xffffff00u
