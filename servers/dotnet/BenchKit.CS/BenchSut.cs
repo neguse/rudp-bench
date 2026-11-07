@@ -141,6 +141,7 @@ public sealed class BenchSut
     private bool failed;
     private ulong invalidPayload;
     private ulong peerDisconnects;
+    private ulong sendRefused;  // transport の Send が断った slot の数
     private ulong stateTicks;
     private long sendQueueMax;
     private byte[] buf = [];
@@ -411,7 +412,7 @@ public sealed class BenchSut
             ? ""
             : $",\"send_queue_max\":{sendQueueMax},\"send_queue_unit\":\"{tr.SendQueueUnit}\"";
         await control.DoneAsync(
-            $"{{\"invalid_payload\":{invalidPayload},\"peer_disconnects\":{peerDisconnects}{queue},{progress}}}",
+            $"{{\"invalid_payload\":{invalidPayload},\"peer_disconnects\":{peerDisconnects},\"send_refused\":{sendRefused}{queue},{progress}}}",
             CancellationToken.None).ConfigureAwait(false);
         return true;
     }
@@ -558,13 +559,23 @@ public sealed class BenchSut
         return server ? await RunServerAsync(control).ConfigureAwait(false) : await RunClientAsync(control).ConfigureAwait(false);
     }
 
+    private bool SendOrCount(int conn, bool md, ReadOnlySpan<byte> data)
+    {
+        if (tr.Send(conn, md, data))
+        {
+            return true;
+        }
+        sendRefused++;
+        return false;
+    }
+
     private void ClientSendSlot(int conn, BenchSlot slot)
     {
         var c = conns[conn];
         var md = (slot.Flags & BenchConstants.FlagMustDeliver) != 0;
         var span = buf.AsSpan(0, input.Payload[md ? Md : Lt]);
         var h = new BenchHeader(slot.Seq, slot.SchedTsNs, BenchClock.NowNs(), slot.Flags, (uint)c.Origin, slot.TrafficId);
-        var ok = BenchPayload.TryWrite(span, h) && BenchPayload.TryFillBody(span, h) && tr.Send(conn, md, span);
+        var ok = BenchPayload.TryWrite(span, h) && BenchPayload.TryFillBody(span, h) && SendOrCount(conn, md, span);
         metrics.OnSlot(h, ok);
         if (ok && !md)
         {
@@ -701,7 +712,7 @@ public sealed class BenchSut
                 ok = BenchPayload.TryWrite(span, h) &&
                     BenchPayload.TryWriteAppliedInputSeq(span, conns[conn].InputSeq) &&
                     BenchPayload.TryFillTargetPad(span, target) &&
-                    tr.Send((int)conn, md, span);
+                    SendOrCount((int)conn, md, span);
             }
             metrics.OnSlot(h, ok);
         }
