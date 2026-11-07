@@ -20,7 +20,6 @@ TRANSPORTS = {
     "quiche": ("build-v2-quiche/quiche_sut", 42929, {}),
     "litenetlib": ("build-v2-dotnet/LiteNetLibBench/LiteNetLibBench", 42941, {}),
     "slikenet": ("build-v2-slikenet/slikenet_sut", 42927, {}),
-    "litenetlib":("build-v2-dotnet/LiteNetLibBench/LiteNetLibBench", 42941, {}),
     "websocket": ("build-v2-dotnet/WebSocketBench/WebSocketBench", 42933, {"sched_is_measurand": True}),
     "magiconion": ("build-v2-dotnet/MagicOnionBench/MagicOnionBench", 42931, {"sched_is_measurand": True}),
 }
