@@ -1,10 +1,7 @@
-// SLikeNet(RakNet の後継)の層。LT は UNRELIABLE_SEQUENCED、MD は RELIABLE_ORDERED で送る
-// (Source/include/slikenet/PacketPriority.h の PacketReliability の説明)。
-// 互いに待たされないよう別の ordering channel に載せる
-// (Help/RakNet/documentation/sendingpackets.html の「Ordering streams」。ordered と sequenced は別の組)。
+// SLikeNet(RakNet の後継)の層。LT は UNRELIABLE_SEQUENCED、MD は RELIABLE_ORDERED で送る(Source/include/slikenet/PacketPriority.h の PacketReliability の説明)。
+// 互いに待たされないよう別の ordering channel に載せる(Help/RakNet/documentation/sendingpackets.html の「Ordering streams」。ordered と sequenced は別の組)。
 // 優先度は HIGH_PRIORITY(同ディレクトリの tutorialsample3.html の Send の例)。
-// 設定は既定のままで、受け付ける接続数だけ SetMaximumIncomingConnections で上げる
-// (既定の 0 では接続を受けない。Source/include/slikenet/peerinterface.h)。
+// 設定は既定のままで、受け付ける接続数だけ SetMaximumIncomingConnections で上げる(既定の 0 では接続を受けない。Source/include/slikenet/peerinterface.h)。
 // 1 つの RakPeer は同じ相手に 1 本しか接続できないので、client は接続ごとに RakPeer を持つ。
 #include "bk_sut.h"
 
