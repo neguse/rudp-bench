@@ -75,12 +75,15 @@ jobs:
             transports: gns
           - adapter: msquic
             transports: msquic,msquic-cancel-on-blocked
+          - adapter: lsquic
+            transports: lsquic
+            extra_submodules: third_party/boringssl
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Init adapter submodule
-        run: git submodule update --init --recursive third_party/${{ matrix.adapter }}
+        run: git submodule update --init --recursive third_party/${{ matrix.adapter }} ${{ matrix.extra_submodules }}
 
       - uses: actions/setup-go@v5
         with:
@@ -89,7 +92,7 @@ jobs:
       - name: Install native prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libnuma-dev libprotobuf-dev libssl-dev libsodium-dev protobuf-compiler
+          sudo apt-get install -y build-essential cmake libnuma-dev libprotobuf-dev libssl-dev libsodium-dev protobuf-compiler zlib1g-dev
 
       - name: build + loopback run
         run: |
