@@ -45,7 +45,7 @@ jobs:
 
       - name: build SUTs
         run: |
-          for t in raw_udp enet kcp; do
+          for t in raw_udp enet kcp coop_rudp; do
             cmake -S servers/$t -B build-v2-$t -DCMAKE_BUILD_TYPE=Release
             cmake --build build-v2-$t -j
           done
@@ -56,7 +56,7 @@ jobs:
       - name: loopback run
         run: |
           scripts/badnet/gen.py --loopback --out build-v2-loopback \
-            --transports raw_udp,enet,kcp,litenetlib,websocket,magiconion
+            --transports raw_udp,enet,kcp,coop_rudp,litenetlib,websocket,magiconion
           for c in build-v2-loopback/configs/*.json; do
             build-v2/orchestrator run -config "$c" || { echo "FAIL: $c"; exit 1; }
           done
@@ -79,6 +79,9 @@ jobs:
             transports: yojimbo
           - adapter: quiche
             transports: quiche
+          - adapter: lsquic
+            transports: lsquic
+            extra_submodules: third_party/boringssl
           - adapter: slikenet
             transports: slikenet
 
@@ -86,7 +89,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Init adapter submodule
-        run: git submodule update --init --recursive third_party/${{ matrix.adapter }}
+        run: git submodule update --init --recursive third_party/${{ matrix.adapter }} ${{ matrix.extra_submodules }}
 
       - uses: actions/setup-go@v5
         with:
@@ -95,7 +98,7 @@ jobs:
       - name: Install native prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libnuma-dev libprotobuf-dev libssl-dev libsodium-dev protobuf-compiler
+          sudo apt-get install -y build-essential cmake libnuma-dev libprotobuf-dev libssl-dev libsodium-dev protobuf-compiler zlib1g-dev
 
       - name: build + loopback run
         run: |
