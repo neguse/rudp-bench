@@ -849,13 +849,18 @@ func (m *MergedMetrics) TrafficMetric(trafficID uint8, direction, class string) 
 }
 
 func (m *MergedMetrics) attemptedRatio() float64 {
+	return m.attemptedRatioWith(0)
+}
+
+// attemptedRatioWith counts extra slots as attempted.
+func (m *MergedMetrics) attemptedRatioWith(extra uint64) float64 {
 	var slots, submitted uint64
 	for _, name := range metricClassNames {
 		c := m.Classes[name]
 		slots += c.Slots
 		submitted += c.Submitted
 	}
-	return ratioOrOne(submitted, slots)
+	return ratioOrOne(submitted+extra, slots)
 }
 
 func addClassCounts(a, b ClassCounts) ClassCounts {
