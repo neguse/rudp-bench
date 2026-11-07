@@ -23,7 +23,7 @@
 ## 劣悪ベンチ
 
 少ない接続数で回線の悪さを振り、C1〜C5 の合否を見る。
-結果は `docs/measurements/` に日付ごとに置く。最新は [2026-11-07(ライブラリの既定の設定)](docs/measurements/2026-11-07-badnet-local.md) 、[2026-11-07(追加の 5 ライブラリ)](docs/measurements/2026-11-07-badnet-added.md)、[2026-11-07(既定から変えた設定)](docs/measurements/2026-11-07-badnet-variants.md)。
+結果は `docs/measurements/` に日付ごとに置く。最新は [2026-11-07(ライブラリの既定の設定)](docs/measurements/2026-11-07-badnet-local.md)、[2026-11-07(追加の 5 ライブラリ)](docs/measurements/2026-11-07-badnet-added.md)、[2026-11-07(既定から変えた設定)](docs/measurements/2026-11-07-badnet-variants.md)、[2026-11-07(直した coop_rudp)](docs/measurements/2026-11-07-badnet-coop-rudp.md)。
 
 ### 負荷
 
@@ -121,6 +121,7 @@ go vet ./orchestrator/... && go test -count=1 ./orchestrator/...
 cmake -S benchkit -B build-v2-benchkit && cmake --build build-v2-benchkit && ctest --test-dir build-v2-benchkit
 dotnet run -c Release --project servers/dotnet/BenchKit.CS.Tests/BenchKit.CS.Tests.csproj
 calibration/duration_invariance.sh
+ctest --test-dir build-v2-coop_rudp
 ```
 
 ## 用語
