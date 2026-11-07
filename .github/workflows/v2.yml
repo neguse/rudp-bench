@@ -45,7 +45,7 @@ jobs:
 
       - name: build SUTs
         run: |
-          for t in raw_udp enet kcp; do
+          for t in raw_udp enet kcp coop_rudp; do
             cmake -S servers/$t -B build-v2-$t -DCMAKE_BUILD_TYPE=Release
             cmake --build build-v2-$t -j
           done
@@ -56,7 +56,7 @@ jobs:
       - name: loopback run
         run: |
           scripts/badnet/gen.py --loopback --out build-v2-loopback \
-            --transports raw_udp,enet,kcp,litenetlib,websocket,magiconion
+            --transports raw_udp,enet,kcp,coop_rudp,litenetlib,websocket,magiconion
           for c in build-v2-loopback/configs/*.json; do
             build-v2/orchestrator run -config "$c" || { echo "FAIL: $c"; exit 1; }
           done
