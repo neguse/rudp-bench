@@ -13,6 +13,7 @@ TRANSPORTS = {
     "raw_udp": ("build-v2-raw_udp/raw_udp_sut", 42911, {}),
     "enet": ("build-v2-enet/enet_sut", 42917, {}),
     "kcp": ("build-v2-kcp/kcp_sut", 42923, {}),
+    "coop_rudp": ("build-v2-coop_rudp/coop_rudp_sut", 42937, {}),
     "gns": ("build-v2-gns/gns_sut", 42921, {}),
     "msquic": ("build-v2-msquic/msquic_sut", 42919, {}),
     "msquic-cancel-on-blocked": ("build-v2-msquic/msquic_cancel_on_blocked_sut", 42920, {}),
