@@ -147,6 +147,8 @@ typedef struct rudp_send_opts {
   rudp_reliability reliability;
 
   uint32_t deadline_ms;
+  /* 0 以外なら、同じ flow・channel・reliability・replace_key でまだ送っていない unreliable を置き換える。
+     RUDP_UNRELIABLE_SEQUENCED は 0 でも置き換える。 */
   uint32_t replace_key;
 } rudp_send_opts;
 

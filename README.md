@@ -117,6 +117,7 @@ go vet ./orchestrator/... && go test -count=1 ./orchestrator/...
 cmake -S benchkit -B build-v2-benchkit && cmake --build build-v2-benchkit && ctest --test-dir build-v2-benchkit
 dotnet run -c Release --project servers/dotnet/BenchKit.CS.Tests/BenchKit.CS.Tests.csproj
 calibration/duration_invariance.sh
+ctest --test-dir build-v2-coop_rudp
 ```
 
 ## 用語

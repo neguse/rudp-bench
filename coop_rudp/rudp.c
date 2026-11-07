@@ -205,9 +205,16 @@ struct rudp_conn {
   uint32_t retx_rounds_since_rx;
   /* RTO 指数バックオフ段数（受信があるとリセット）。 */
   uint32_t rto_backoff;
-  /* loss 応答（safe_bps 半減）を 1 ロスラウンドにつき 1 回に抑えるための
-     直近半減時刻。パケット毎に半減すると一括ロスでレートが床まで落ちる。 */
-  uint64_t last_rate_halve_ns;
+  /* 送信率を最後に下げた時刻と上げた時刻。 */
+  uint64_t last_rate_decrease_ns;
+  uint64_t last_rate_increase_ns;
+  /* 直近の送信の速さ（約 100ms ごとに測る）。無制限から初めて絞るときの起点。 */
+  uint64_t rate_win_start_ns;
+  uint64_t rate_win_bytes;
+  uint32_t last_send_bps;
+  /* 直近の RTT 標本。ゆらぎで 1 つだけ伸びた標本を混雑と取り違えないよう、最小を見る。 */
+  uint64_t recent_rtt_ns[8];
+  uint32_t recent_rtt_next;
   uint64_t recv_packets;
   uint64_t reordered_packets;
   uint32_t inflight_bytes;
@@ -216,7 +223,7 @@ struct rudp_conn {
   uint32_t safe_bps;
   uint32_t pacing_bps;
   /* pacing_bps を実際の送信ゲートにするためのトークンバケット。
-     pacing_bps == UINT32_MAX（既定）の間は無制限で、loss で safe_bps が
+     pacing_bps == UINT32_MAX（既定）の間は無制限で、待ち行列の伸びで safe_bps が
      半減して有限になると flush がこのトークンで送出を絞る。 */
   uint64_t pace_tokens_bytes;
   uint64_t pace_refill_ns;
@@ -753,6 +760,61 @@ static void note_packet_rtt(rudp_conn* c, uint64_t rtt_ns) {
   }
 }
 
+#define RUDP_QUEUEING_MIN_NS (100u * RUDP_NS_PER_MS)
+#define RUDP_RATE_FLOOR_BPS 64000u
+
+/* 送信率は、経路の待ち行列が伸びて直近の RTT 標本がどれも最小 RTT より 100ms 以上大きいときだけ半分にする（1 SRTT に 1 回まで）。
+   ロスだけでは下げない（混雑によらないロスで送る量を絞らない）。
+   無制限から初めて絞るときは、直近の送信の速さを起点にする。
+   待ち行列がなければ 1 秒に 1 MTU 分ずつ上げる（待ち行列の判定は標本が揃うまで遅れるので、速く上げると行き過ぎる）。 */
+static void adjust_rate(rudp_conn* c, uint64_t now_ns, uint64_t rtt_ns) {
+  const uint32_t n = sizeof(c->recent_rtt_ns) / sizeof(c->recent_rtt_ns[0]);
+  c->recent_rtt_ns[c->recent_rtt_next++ % n] = rtt_ns;
+  if (c->recent_rtt_next < n || c->min_rtt_ns == 0) return;
+  uint64_t recent = UINT64_MAX;
+  for (uint32_t i = 0; i < n; ++i) {
+    if (c->recent_rtt_ns[i] < recent) recent = c->recent_rtt_ns[i];
+  }
+  if (recent <= c->min_rtt_ns + RUDP_QUEUEING_MIN_NS) {
+    if (c->safe_bps == UINT32_MAX ||
+        now_ns < add_ns_saturating(c->last_rate_increase_ns, RUDP_NS_PER_SEC)) {
+      return;
+    }
+    uint32_t add_bps = (uint32_t)c->ep->mtu * 8u;
+    c->safe_bps = c->safe_bps <= UINT32_MAX - 1u - add_bps
+                      ? c->safe_bps + add_bps
+                      : UINT32_MAX - 1u;
+    c->pacing_bps = c->safe_bps;
+    c->last_rate_increase_ns = now_ns;
+    return;
+  }
+  if (c->last_rate_decrease_ns != 0 &&
+      now_ns < add_ns_saturating(c->last_rate_decrease_ns, c->srtt_ns)) {
+    return;
+  }
+  uint32_t base = c->safe_bps;
+  if (base == UINT32_MAX) {
+    if (c->last_send_bps == 0) return;
+    base = c->last_send_bps;
+  }
+  base /= 2u;
+  c->safe_bps = base > RUDP_RATE_FLOOR_BPS ? base : RUDP_RATE_FLOOR_BPS;
+  c->pacing_bps = c->safe_bps;
+  c->last_rate_decrease_ns = now_ns;
+  c->last_rate_increase_ns = now_ns;
+}
+
+static void note_sent_bytes(rudp_conn* c, uint64_t now_ns, uint64_t bytes) {
+  if (c->rate_win_start_ns == 0) c->rate_win_start_ns = now_ns;
+  c->rate_win_bytes += bytes;
+  uint64_t elapsed = now_ns - c->rate_win_start_ns;
+  if (elapsed < 100u * RUDP_NS_PER_MS) return;
+  uint64_t bps = c->rate_win_bytes * 8u * RUDP_NS_PER_SEC / elapsed;
+  c->last_send_bps = bps >= UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)bps;
+  c->rate_win_start_ns = now_ns;
+  c->rate_win_bytes = 0;
+}
+
 #define RUDP_DEFAULT_MIN_RTO_MS 20u
 #define RUDP_DEFAULT_MAX_RTO_MS 10000u
 
@@ -786,13 +848,11 @@ static void release_sent_packet(rudp_conn* c, uint32_t seq, uint64_t now_ns,
                 (seq % ep->cfg.sent_packet_count);
   rudp_sent_packet* sp = &ep->sent_packets[slot];
   if (!sp->used || sp->conn_index != c->index || sp->seq != seq) return;
-  if (complete_refs && now_ns >= sp->sent_ns) note_packet_rtt(c, now_ns - sp->sent_ns);
-  if (complete_refs) {
-    ++c->acked_packets;
-    uint32_t add_bps = (uint32_t)c->ep->mtu * 8u;
-    if (c->safe_bps <= UINT32_MAX - add_bps) c->safe_bps += add_bps;
-    c->pacing_bps = c->safe_bps;
+  if (complete_refs && now_ns >= sp->sent_ns) {
+    note_packet_rtt(c, now_ns - sp->sent_ns);
+    adjust_rate(c, now_ns, now_ns - sp->sent_ns);
   }
+  if (complete_refs) ++c->acked_packets;
   for (uint16_t r = 0; r < sp->ref_count; ++r) {
     uint32_t mi = sp->refs[r];
     if (mi >= ep->cfg.max_messages) continue;
@@ -1046,8 +1106,7 @@ void rudp_conn_abort(rudp_conn* conn) {
   abort_conn_internal(conn);
 }
 
-static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp,
-                             uint64_t now_ns);
+static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp);
 
 static void prune_sent_seq_queue(rudp_conn* c) {
   rudp_endpoint* ep = c->ep;
@@ -1106,7 +1165,7 @@ static void release_acked_packets(rudp_conn* c, uint32_t ack, uint64_t bits,
         continue;
       }
       if (seq32_after(ack, seq) && ack - seq >= RUDP_LOSS_PACKET_THRESHOLD) {
-        mark_packet_lost(c, sp, now_ns);
+        mark_packet_lost(c, sp);
         continue;
       }
       ep->sent_seq_queue[base + c->sent_seq_tail] = seq;
@@ -1439,13 +1498,14 @@ static void refill_flow(rudp_endpoint* ep, rudp_flow_state* f, uint64_t now_ns) 
   f->last_refill_ns = now_ns;
 }
 
+/* sequenced は受信側が最新しか渡さないので、まだ送っていない古いものは replace_key がなくても新しいものに置き換える（送信待ちに古い値を溜めない）。 */
 static int opts_replace_unreliable(const rudp_send_opts* opts) {
-  if (!opts->replace_key) return 0;
   if (opts->reliability == RUDP_RELIABLE_UNORDERED ||
       opts->reliability == RUDP_RELIABLE_ORDERED) {
     return 0;
   }
-  return 1;
+  return opts->replace_key != 0 ||
+         opts->reliability == RUDP_UNRELIABLE_SEQUENCED;
 }
 
 static int msg_matches_replacement(const rudp_msg* m,
@@ -1749,22 +1809,10 @@ static int queue_retransmit(rudp_conn* c, uint32_t mi) {
   return 0;
 }
 
-static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp,
-                             uint64_t now_ns) {
+static void mark_packet_lost(rudp_conn* c, rudp_sent_packet* sp) {
   if (!c || !sp || sp->lost) return;
   sp->lost = 1;
   ++c->lost_packets;
-  /* loss 応答は 1 RTT（サンプル前は最小 RTO）につき 1 回。ウィンドウ分の
-     一括ロスでパケット毎に半減させるとレートが一気に床まで落ちる。 */
-  uint64_t halve_interval_ns =
-      c->srtt_ns ? c->srtt_ns
-                 : (uint64_t)RUDP_DEFAULT_MIN_RTO_MS * RUDP_NS_PER_MS;
-  if (c->last_rate_halve_ns == 0 ||
-      now_ns >= add_ns_saturating(c->last_rate_halve_ns, halve_interval_ns)) {
-    if (c->safe_bps > 64000u) c->safe_bps /= 2u;
-    c->pacing_bps = c->safe_bps;
-    c->last_rate_halve_ns = now_ns;
-  }
   for (uint16_t r = 0; r < sp->ref_count; ++r) {
     uint32_t mi = sp->refs[r];
     if (mi >= c->ep->cfg.max_messages) continue;
@@ -1806,7 +1854,7 @@ static void service_retransmits(rudp_conn* c, uint64_t now_ns) {
       uint64_t due = add_ns_saturating(sp->sent_ns, rto_ns);
       if (now_ns >= due) {
         lost_any = 1;
-        mark_packet_lost(c, sp, now_ns);
+        mark_packet_lost(c, sp);
         if (!c->active) return;
         continue;
       }
@@ -2115,7 +2163,7 @@ static int conn_idle_expired(const rudp_conn* c, uint64_t now_ns) {
 }
 
 /* pacing トークンの補充。バーストは max(16*mtu, 10ms 分) まで。
-   無制限（UINT32_MAX）の間はトークンを満杯に保ち、loss で有限レートに
+   無制限（UINT32_MAX）の間はトークンを満杯に保ち、待ち行列の伸びで有限レートに
    遷移した直後も 1 バースト分は即時送信できるようにする（0 から始めると
    同一時刻内の再送がストールする）。 */
 static void refill_pace_tokens(rudp_conn* c, uint64_t now_ns) {
@@ -2183,6 +2231,8 @@ void rudp_endpoint_flush(rudp_endpoint* ep, uint64_t now_ns) {
       }
       pace_consume(c, (uint64_t)ep->msgs[mi].len +
                           RUDP_DATA_FRAME_HEADER_BYTES);
+      note_sent_bytes(c, now_ns, (uint64_t)ep->msgs[mi].len +
+                                     RUDP_DATA_FRAME_HEADER_BYTES);
       sent_data = 1;
     }
     if (!sent_data) append_ack_only(c, now_ns);

@@ -49,6 +49,7 @@ jobs:
             cmake -S servers/$t -B build-v2-$t -DCMAKE_BUILD_TYPE=Release
             cmake --build build-v2-$t -j
           done
+          ctest --test-dir build-v2-coop_rudp --output-on-failure
           for p in litenetlib/LiteNetLibBench websocket/WebSocketBench magiconion/MagicOnionBench; do
             dotnet publish -c Release -o build-v2-dotnet/${p#*/} servers/$p.csproj
           done
