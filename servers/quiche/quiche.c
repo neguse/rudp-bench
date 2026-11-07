@@ -314,14 +314,14 @@ static int quiche_service(void *p, uint64_t timeout_ns) {
   return 0;
 }
 
-// LT の datagram の送信待ちと、stream に渡せずこの層で溜めている MD の合計
+// LT の datagram の送信待ち。stream の送信待ちを返す API はない
 static int64_t quiche_send_queue(void *p, int i) {
   const quiche_t *t = p;
   const conn *c = &t->conns[i];
   if (c->q == NULL) {
     return 0;
   }
-  return quiche_conn_dgram_send_queue_byte_size(c->q) + (int64_t)c->tx_len;
+  return quiche_conn_dgram_send_queue_byte_size(c->q);
 }
 
 static const bk_transport transport = {
