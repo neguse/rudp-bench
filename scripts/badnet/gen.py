@@ -14,6 +14,7 @@ TRANSPORTS = {
     "gns": ("build-v2-gns/gns_sut", 42921, {}),
     "msquic": ("build-v2-msquic/msquic_sut", 42919, {}),
     "msquic-cancel-on-blocked": ("build-v2-msquic/msquic_cancel_on_blocked_sut", 42920, {}),
+    "quiche": ("build-v2-quiche/quiche_sut", 42929, {}),
     "litenetlib": ("build-v2-dotnet/LiteNetLibBench/LiteNetLibBench", 42941, {}),
     "websocket": ("build-v2-dotnet/WebSocketBench/WebSocketBench", 42933, {"sched_is_measurand": True}),
     "magiconion": ("build-v2-dotnet/MagicOnionBench/MagicOnionBench", 42931, {"sched_is_measurand": True}),
