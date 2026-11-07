@@ -10,3 +10,6 @@
 [submodule "third_party/msquic"]
 	path = third_party/msquic
 	url = https://github.com/microsoft/msquic.git
+[submodule "third_party/slikenet"]
+	path = third_party/slikenet
+	url = https://github.com/SLikeSoft/SLikeNet
