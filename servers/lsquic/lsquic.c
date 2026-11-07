@@ -466,8 +466,6 @@ static const bk_transport transport = {
         "\"thread_model\":\"single\",\"encryption\":true,"
         "\"tuning\":["
         "{\"knob\":\"es_datagrams\",\"value\":\"1\","
-        "\"upstream_ref\":\"docs/apiref.rst\"},"
-        "{\"knob\":\"lsquic_stream_flush\",\"value\":\"after each write\","
         "\"upstream_ref\":\"docs/apiref.rst\"}]",
     .max_payload = MAX_PAYLOAD,
     .listen = lsq_listen,
