@@ -1,9 +1,7 @@
 // coop_rudp の層。rudp.h は LT と MD の使い分けを文書にしていないので、送り方の名前から選ぶ。
-// LT は古い値が新しい値より後に届いても捨てる RUDP_UNRELIABLE_SEQUENCED(rudp.c の deliver_frame)、
-// MD は再送して順番どおりに渡す RUDP_RELIABLE_ORDERED で、チャネルを分ける。
+// LT は新しい値より後に届いた古い値を捨てる RUDP_UNRELIABLE_SEQUENCED(rudp.c の deliver_frame)、MD は再送して順番どおりに渡す RUDP_RELIABLE_ORDERED で、チャネルを分ける。
 // 設定は 0(= rudp.c の既定)のままにし、接続数と使うチャネル数に合わせた大きさだけ指定する。
-// ライブラリは接続の手順を持たない。client は最初の service で全接続をつながったことにし、
-// server は接続ごとの最初の受信でつながったことにする。
+// ライブラリは接続の手順を持たない。client は最初の service で全接続をつながったことにし、server は接続ごとの最初の受信でつながったことにする。
 #include "bk_sut.h"
 
 #include "benchkit.h"
