@@ -13,3 +13,6 @@
 [submodule "third_party/yojimbo"]
 	path = third_party/yojimbo
 	url = https://github.com/mas-bandwidth/yojimbo
+[submodule "third_party/quiche"]
+	path = third_party/quiche
+	url = https://github.com/cloudflare/quiche.git

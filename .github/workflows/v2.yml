@@ -77,6 +77,8 @@ jobs:
             transports: msquic,msquic-cancel-on-blocked
           - adapter: yojimbo
             transports: yojimbo
+          - adapter: quiche
+            transports: quiche
 
     steps:
       - uses: actions/checkout@v4
