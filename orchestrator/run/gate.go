@@ -544,9 +544,9 @@ func validateScenarioDoneStats(controlResult *control.Result, cfg RunConfig) (in
 				failed = append(failed, fmt.Sprintf("%s applied input seq=%d exceeds locally sent seq=%d", context,
 					progress.StateAppliedInputSeqRecvMax, progress.InputLastSentMax))
 			}
-			if losslessScenario(cfg.Netem) && progress.StateAppliedInputSeqRecvMin+1 < progress.InputLastSentMin {
-				failed = append(failed, fmt.Sprintf("%s final applied input min=%d did not catch up to sent min=%d", context,
-					progress.StateAppliedInputSeqRecvMin, progress.InputLastSentMin))
+			if lag := appliedInputLag(cfg.Scenario); losslessScenario(cfg.Netem) && progress.StateAppliedInputSeqRecvMin+lag < progress.InputLastSentMin {
+				failed = append(failed, fmt.Sprintf("%s final applied input min=%d did not catch up to sent min=%d (allowed lag %d)", context,
+					progress.StateAppliedInputSeqRecvMin, progress.InputLastSentMin, lag))
 			}
 			if losslessScenario(cfg.Netem) && progress.StateHeaderSeqRecvMin != progress.StateHeaderSeqRecvMax {
 				failed = append(failed, fmt.Sprintf("%s final global state tick differs across local connections: min=%d max=%d", context,
@@ -568,6 +568,17 @@ func validateScenarioDoneStats(controlResult *control.Result, cfg RunConfig) (in
 		invalid = append(invalid, fmt.Sprintf("authoritative progress has %d server records, want 1", serverCount))
 	}
 	return dedupeStrings(invalid), dedupeStrings(failed)
+}
+
+// appliedInputLag は、回線にロスがなくても最後の状態に反映されないことがある入力の数。
+// 最後の状態を送った後の 1 状態周期の間に送った入力(入力の頻度 ÷ 状態の頻度を切り上げた数)と、届く途中の入力 1 つは、最後の状態に入らない。
+// ライブラリが送信を自分の周期でまとめて出すと(LiteNetLib は 15 ms ごと)、届くまでの時間が入力ごとにばらつくので、後者が要る。
+func appliedInputLag(s *ScenarioSpec) uint64 {
+	if s == nil || s.ClientInput == nil || s.ServerState == nil ||
+		s.ClientInput.LossTolerant.RateHz <= 0 || s.ServerState.LossTolerant.RateHz <= 0 {
+		return 1
+	}
+	return uint64(math.Ceil(s.ClientInput.LossTolerant.RateHz/s.ServerState.LossTolerant.RateHz)) + 1
 }
 
 func losslessScenario(netem *NetemRegime) bool {
