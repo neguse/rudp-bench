@@ -54,6 +54,27 @@ func TestScenarioDoneStatsSeparateInvalidFromSUTFailure(t *testing.T) {
 	}
 }
 
+func TestAppliedInputMayLagByOneStatePeriodPlusOneInput(t *testing.T) {
+	scenario := authoritativeFixture() // 入力 60 Hz、状態 20 Hz なので、最後の状態に入らない入力は 3 + 1 まで
+	cfg := RunConfig{Scenario: &scenario, TotalConns: 2, Duration: Duration{Duration: time.Second}}
+	server := control.Participant{
+		Hello: control.HelloMessage{Role: "server", ProcIndex: -1}, Ready: control.ReadyMessage{Conns: 0},
+		Done: control.DoneMessage{Stats: json.RawMessage(`{"invalid_payload":0,"authoritative_progress":{"role":"server","local_conns":0,"roster_conns":2,"input_last_sent_min":0,"input_last_sent_max":0,"state_header_seq_recv_min":0,"state_header_seq_recv_max":0,"state_applied_input_seq_recv_min":0,"state_applied_input_seq_recv_max":0,"server_state_ticks":20}}`)},
+	}
+	client := func(appliedMin int) control.Participant {
+		return control.Participant{
+			Hello: control.HelloMessage{Role: "client", ProcIndex: 0}, Ready: control.ReadyMessage{Conns: 2},
+			Done: control.DoneMessage{Stats: json.RawMessage(fmt.Sprintf(`{"invalid_payload":0,"authoritative_progress":{"role":"client","local_conns":2,"roster_conns":2,"input_last_sent_min":60,"input_last_sent_max":60,"state_header_seq_recv_min":20,"state_header_seq_recv_max":20,"state_applied_input_seq_recv_min":%d,"state_applied_input_seq_recv_max":60,"server_state_ticks":0}}`, appliedMin))},
+		}
+	}
+	if _, failed := validateScenarioDoneStats(&control.Result{Participants: []control.Participant{server, client(56)}}, cfg); len(failed) != 0 {
+		t.Fatalf("lag 4 must pass: %v", failed)
+	}
+	if _, failed := validateScenarioDoneStats(&control.Result{Participants: []control.Participant{server, client(55)}}, cfg); !reasonsContain(failed, "did not catch up") {
+		t.Fatalf("lag 5 must fail: %v", failed)
+	}
+}
+
 func TestEvaluateGateInvalidReasons(t *testing.T) {
 	gate := EvaluateGate(GateInput{
 		Control:            controlResultWithMargin(-1),
